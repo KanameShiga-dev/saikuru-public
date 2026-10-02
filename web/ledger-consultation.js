@@ -4,17 +4,21 @@ let consultationDraftRevision=null;
 let consultationModels=[], consultationModelsLoading=false, consultationModelEpoch=0;
 let consultationSending=false, consultationSubmitting=false, consultationRegistering=false, consultationActivityTimer=null, consultationStartedAt=null, consultationPendingMode=null;
 const consultDialog=document.getElementById('consultation-dialog');
-const consultStatus=text=>{document.getElementById('consultation-status').textContent=text;document.getElementById('consultation-action-status').textContent=text;};
+const consultStatus=text=>{document.getElementById('consultation-status').textContent=text;document.getElementById('consultation-action-status').textContent=text;document.getElementById('consultation-submit-status').textContent=text;};
 
 function consultationSubmissionControls(){
  if(!consultation)return;
  const blocked=consultation.busy||consultationSending||consultationSubmitting||consultationRegistering;
  const prompt=$('consultation-prompt').value.trim();
- $('consultation-submit').disabled=blocked||!consultation.plan_prompt||!prompt||!consultation.job_allowed||Boolean(consultation.job_id)||consultation.project_changed||!$('consultation-confirm').checked;
- $('consultation-register').hidden=consultation.job_allowed||Boolean(consultation.job_id)||consultation.project_changed;
+ const docs=$('consultation-kind').value==='documentation';
+ $('consultation-request-scope').value=docs?'documentation':'development';
+ $('consultation-document-scope').hidden=!docs;
+ $('consultation-submit').disabled=blocked||!consultation.plan_prompt||!prompt||(!docs&&!consultation.job_allowed)||(docs&&(!$('consultation-document-output').value.trim()||!$('consultation-document-confirm').checked))||Boolean(consultation.job_id)||consultation.project_changed||!$('consultation-confirm').checked;
+ $('consultation-register').hidden=docs||consultation.job_allowed||Boolean(consultation.job_id)||consultation.project_changed;
  $('consultation-register-consent').parentElement.hidden=$('consultation-register').hidden;
  $('consultation-register-path').hidden=$('consultation-register').hidden;
  $('consultation-register').disabled=blocked||!$('consultation-register-consent').checked;
+ if(!consultation.job_id)$('consultation-job-note').textContent=docs?'資料作成は元プロジェクトの登録不要です。別の保存先と資料作成の範囲を確認してください。':consultation.job_allowed?'計画内容を確認すると開始できます。':'改善・改修には対象登録が必要です。本体の資料を作る場合は、上の依頼範囲を「資料作成のみ」に切り替えてください。';
  $('consultation-submit').textContent=consultationSubmitting?'計画を依頼しています…':'この内容で計画を開始';
 }
 function consultationActivity(){
@@ -105,7 +109,7 @@ function renderConsultation(s){
  if(!s.messages.length)history.append(node('p','直したいこと、困っていること、レビューでの指摘を入力してください。'));
  for(const m of s.messages){
   const block=node('section',undefined,'consultation-message '+m.role);
-  const kind={improvement:'改善相談',bug:'不具合・指摘',user_voice:'ユーザーの声'}[m.kind];
+  const kind={improvement:'改善相談',bug:'不具合・指摘',user_voice:'ユーザーの声',documentation:'資料作成'}[m.kind];
   block.append(node('h3',m.role==='user'?'あなた'+(kind?'：'+kind:''):'計画担当'),node('p',m.text));history.append(block);
  }
  $('consultation-usage').textContent=`モデル呼出 ${s.calls.length}/20回。相談はCLIの利用枠を消費します。直近の取得済み利用量：${s.calls.length?JSON.stringify(s.calls.at(-1).usage):'未取得'}`;
@@ -154,6 +158,8 @@ async function openConsultation(fresh=false){
   const value=await api('/api/ledger/consultation/open',{project_id:selected.id,new:fresh});
   if(epoch!==consultationEpoch)return;
   consultationDraftRevision=null;
+  $('consultation-kind').value=value.documentation?'documentation':'improvement';
+  $('consultation-document-confirm').checked=false;
   $('consultation-input').value='';$('consultation-consent').checked=false;
   if(!consultDialog.open)consultDialog.showModal();
   $('consultation-adapter').value=value.profile.adapter;
@@ -234,7 +240,8 @@ $('consultation-submit').onclick=async()=>{
  consultationSubmitting=true;consultationSubmissionControls();consultationModelControls();consultStatus('作業ボードへ計画を依頼しています…');
  try{
   await api('/api/ledger/consultation/submit',{id,revision:consultation.revision,
-   plan_prompt:$('consultation-prompt').value,confirmed:true});
+   plan_prompt:$('consultation-prompt').value,confirmed:true,kind:$('consultation-kind').value,
+   document_output:$('consultation-document-output').value,output_confirmed:$('consultation-document-confirm').checked});
   const value=await api('/api/ledger/consultation?id='+encodeURIComponent(id));
   if(epoch!==consultationEpoch)return;
   renderConsultation(value);
@@ -242,3 +249,9 @@ $('consultation-submit').onclick=async()=>{
  }catch(e){if(epoch===consultationEpoch)consultStatus(e.message);}
  finally{consultationSubmitting=false;consultationSubmissionControls();consultationModelControls();}
 };
+
+$('consultation-kind').onchange=()=>{consultationSubmissionControls();if($('consultation-kind').value==='documentation')$('consultation-job-note').textContent='資料作成は元プロジェクトの登録不要です。別の保存先と資料作成の範囲を確認してください。';};
+$('consultation-document-output').oninput=consultationSubmissionControls;
+$('consultation-document-confirm').onchange=consultationSubmissionControls;
+
+$('consultation-request-scope').onchange=()=>{$('consultation-kind').value=$('consultation-request-scope').value==='documentation'?'documentation':'improvement';$('consultation-document-confirm').checked=false;consultationSubmissionControls();};

@@ -15,3 +15,5 @@
 .consultation-model-picker .filters{display:grid;grid-template-columns:140px minmax(0,1fr) 140px}.consultation-model-picker .filters label{min-width:0}.consultation-model-picker select{width:100%;min-width:0;box-sizing:border-box}@media(max-width:700px){.consultation-model-picker .filters{grid-template-columns:1fr}}
 
 .consultation-activity:not([hidden]){display:flex;gap:12px;align-items:center;padding:16px;margin-top:12px;background:#e5f2ed;border:2px solid #176859;border-radius:8px;color:#102f2a}.consultation-activity progress{width:90px;flex-shrink:0}#consultation-action-status,#consultation-job-note{color:#123b33;font-weight:600}#consultation-register-path{overflow-wrap:anywhere}
+
+#consultation-dialog [hidden]{display:none !important;}

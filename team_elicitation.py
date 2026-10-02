@@ -58,6 +58,14 @@ def reply_to_elicitation(ctx, params):
         ctx.check()
         ctx.event('読み取り専用project_readの自動承認: ' + read_tool[1])
         return {'action': 'accept', 'content': content}
+    document_tool = re.fullmatch(r'Allow the project_read MCP server to run tool "(list_files|read_file|search_files|read_document|write_document)"\?', message.strip())
+    document_broker = str(Path(__file__).with_name('document_tools.py'))
+    if (server == 'project_read' and document_tool and getattr(ctx,'document_scope',False)
+            and document_broker in read_config.get('args',[])
+            and (document_tool[1]!='write_document' or (ctx.task['role']=='builder' and '--write' in read_config.get('args',[])))):
+        ctx.check()
+        ctx.event('資料作成範囲の専用ツール承認: '+document_tool[1])
+        return {'action':'accept','content':content}
     # A session-local app confirmation can reuse this user's explicit scope.
     # Every other request reaches the board even with automatic_operations enabled.
     project_ok = False  # Distribution builds do not inherit personal GUI approvals.
