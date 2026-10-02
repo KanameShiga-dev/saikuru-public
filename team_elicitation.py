@@ -48,16 +48,26 @@ def reply_to_elicitation(ctx, params):
     message = request.get('message')
     if not isinstance(message, str) or not message.strip() or len(message) > 3000:
         raise ProviderError('承認対象の説明が不足しています。')
+    # Only our explicitly configured, bounded read-only broker may bypass the board.
+    read_tool = re.fullmatch(r'Allow the project_read MCP server to run tool "(list_files|read_file|search_files)"\?', message.strip())
+    read_config = getattr(ctx, 'read_mcp', {})
+    broker = str(Path(__file__).with_name('consultation_read_tools.py'))
+    if (server == 'project_read' and read_tool and getattr(ctx, 'text_only', False)
+            and getattr(ctx, 'consultation_research', False)
+            and broker in read_config.get('args', [])):
+        ctx.check()
+        ctx.event('読み取り専用project_readの自動承認: ' + read_tool[1])
+        return {'action': 'accept', 'content': content}
     # A session-local app confirmation can reuse this user's explicit scope.
     # Every other request reaches the board even with automatic_operations enabled.
     project_ok = False  # Distribution builds do not inherit personal GUI approvals.
-    target = ''  # No personal application target in distribution.
+    target = 'project-runtime-app'
     text = message.casefold()
     scoped = (project_ok and ctx.task['role'] == 'builder'
               and params.get('serverName') in ('node_repl', 'computer-use', 'computer_use')
               and re.search(r'(?<![a-z0-9_])' + target + r'(?![a-z0-9_])', text)
               and ('computer use' in text or 'computer-use' in text
-                   or text.strip() == 'allow codex to use bravestrategypcruntimesmoke?')
+                   or text.strip() == 'allow codex to use project-runtime-app?')
               and not any(word in text for word in ('always', 'permanent', 'all apps', '永久', 'delete', 'upload', 'payment', 'password')))
     answer = ctx.approve({'source': 'codex', 'operation': 'mcpServer/elicitation/request',
         'force_manual': not scoped, 'details': {'server': params.get('serverName'),

@@ -6,6 +6,42 @@ const statuses = {queued:'待機',running:'実行中',awaiting_approval:'承認�
 const jobStatuses = {...statuses,planning:'計画中',awaiting_acceptance:'成果の確認待ち',accepted:'利用者が確認済み',accepted_with_pending_checks:'成果を受領・未完了項目あり'};
 function el(tag, text, cls) { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; }
 function notice(text) { $('notice').textContent=text; }
+function waitingReason(task){
+ if(task.status!=='queued')return '';
+ const job=state.jobs.find(j=>j.id===task.job_id),prior=state.tasks.find(t=>t.id===task.after);
+ if(job?.status==='blocked'){
+  if(prior?.result?.status==='needs_changes')return '直前のレビューに未解決の指摘があります。自動修正上限で依頼が停止中のため、修正後の再レビューを待っています。';
+  return '依頼全体が停止中です。停止した担当の理由を確認してください。';
+ }
+ if(state.paused)return '新規着手を一時停止しています。';
+ if(prior&&!['succeeded','handed_off'].includes(prior.status))return '前の作業が完了するまで待っています。';
+ return '';
+}
+function reviewRepairProposal(review,job){
+ const artifact=job.artifacts?.[0]?.path;
+ const findings=(review.result?.summary||'').trim();
+ return `${artifact?'修正対象は '+artifact+' だけです。':'修正対象と許可範囲を確認し、範囲外の変更は行わないでください。'}
+【変更箇所・修正方針】
+次の最新レビューの指摘を、設計・対応表・受入条件・確認方法へ反映してください。具体的な遷移・音声ID・終了条件の修正案が指摘にある場合は、それを落とさず扱ってください。
+${findings.length<=2400?findings:findings.slice(0,2400)+'\n（表示上限です。最新レビュー全文は担当に別途渡されます。）'}
+【維持する動作】
+変更前に、指摘が参照する既存コードの前後と関連経路、最新成果物、過去の修正結果を読み取り、維持する動作を明示してください。前回報告だけを根拠に推測しないでください。新しい仕様が必要なら確定せずUNKNOWNとして残してください。
+【確認条件】
+指摘ごとに変更箇所・維持した動作・根拠ファイルと行・計画上の検証項目を対応づけて報告してください。本文と対応表、回数上限、次の工程への遷移が整合し、過去の解消済み指摘が再発していないことを読み取りで確認してください。
+実装コード変更、起動、テスト実行、モデル取得・更新、公開は許可しません。未実施の検証を実施済みとは報告しないでください。`;
+}
+function reviewResolutionHint(review,job){
+ const box=el('div',undefined,'stop-reason-box');
+ box.append(el('strong','原因：レビュー指摘が未解決のため、依頼が停止しています。'));
+ const items=(review.result?.summary||'').split('\n').filter(line=>/^\s*(?:\d+[.．、]|【(?:高|中|低|重大)】)/.test(line)).slice(0,5);
+ box.append(el('p','最新レビューで報告された指摘（抜粋）：'));
+ if(items.length){const list=el('ul');for(const item of items)list.append(el('li',item.length>420?item.slice(0,420)+'…':item));box.append(list);}
+ else box.append(el('p',(review.result?.summary||'指摘本文を確認してください。').slice(0,900)));
+ box.append(el('strong','解消のヒント'),el('p','① 指摘ごとの修正対象を確認 → ② 下の修正指示案を確認・編集 → ③「この範囲で修正を依頼」。修正後は通常レビューと必要なセキュリティレビューへ進みます。'));
+ if(job.artifacts?.length)box.append(el('p','先に「この依頼の成果物」で最新版を読めます。修正指示には対象文書・維持する条件・変更禁止範囲を残してください。'));
+ box.append(el('p','読み取り不可・未測定の指摘は、取得できない理由と後続の確認方法を明記します。未確認を確認済みに置き換えないでください。'));
+ return box;
+}
 function date(t) { return new Date(t*1000).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 let sessionRecovery = null;
 async function recoverSession() {
@@ -158,6 +194,7 @@ function render() {
       const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card'+(index===2?' attention':''));
       const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatuses[job.status]):pending(task.id).length?'確認・承認してください':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
       card.append(badge,el('strong',task.title));
+      const wait=waitingReason(task);if(wait)card.append(el('p',wait,'summary'));
       const reason=stopReason(task);
       if(reason)card.append(el('p',reason.title,'summary'));
       else if(task.summary)card.append(el('p',task.summary,'summary'));
@@ -407,6 +444,41 @@ function renderDetail(task,version) {
   const drafts={};$('detail-body').querySelectorAll('textarea').forEach(t=>drafts[t.id]=t.value);
   detailVersion=version;const job=state.jobs.find(j=>j.id===task.job_id);$('detail-title').textContent=task.title;
   const body=$('detail-body');body.replaceChildren(el('p',`${roles[task.role]} / ${task.profile.adapter} / ${task.profile.model} / ${task.profile.effort} · 試行 ${task.attempt}`),el('p',`状態: ${statuses[task.status]||task.status} · 依頼の状態: ${jobStatuses[job.status]||job.status}`));
+  if(['queued','cancelled'].includes(task.status)&&job.status==='blocked'){
+    const blocker=[...state.tasks].reverse().find(t=>t.job_id===job.id&&t.role==='reviewer'&&t.status==='succeeded'&&t.result?.status==='needs_changes');
+    const action=el('div',undefined,'stop-reason-box');
+    action.append(el('strong','先にレビュー指摘の修正が必要です'),el('p','このセキュリティレビューを直接開始するのではなく、未解決の指摘を修正し、通常レビュー後に自動で進めます。'));
+    if(blocker)action.append(reviewResolutionHint(blocker,job));
+    if(blocker)action.append(button('指摘を確認して修正を依頼',()=>{
+      openTask(blocker.id);
+      const panel=$('manual-review-repair');if(panel){revealSection(panel);panel.scrollIntoView({block:'center'});}
+    }));
+    body.append(action);
+  }
+  for(const artifact of job.artifacts||[]){
+    const panel=el('section',undefined,'detail-section'),content=el('div',undefined,'text-block');
+    panel.append(el('h3','この依頼の成果物'),button(artifact.label+'を読む',async()=>{
+      try{const value=await api(`/api/job/artifact?job_id=${encodeURIComponent(job.id)}&path=${encodeURIComponent(artifact.path)}`);content.textContent=value.content;}
+      catch(e){content.textContent=e.message;}
+    }),content);body.append(panel);
+  }
+  if(job.status==='blocked'&&task.role==='reviewer'&&task.result?.status==='needs_changes'&&task.status==='succeeded'){
+    const panel=el('section',undefined,'detail-section'),note=el('textarea');note.rows=4;note.setAttribute('aria-label','レビュー指摘の修正範囲');
+    panel.id='manual-review-repair';
+    note.id='manual-review-repair-note';
+    const artifact=job.artifacts?.[0]?.path;
+    const proposal=reviewRepairProposal(task,job);
+    note.value=drafts[note.id]??proposal;
+    const artifactPath=el('input');artifactPath.placeholder='成果物の相対パス（任意）：docs/plans/plan.md';artifactPath.value=job.artifacts?.[0]?.path||'';artifactPath.setAttribute('aria-label','確認する既存成果物の相対パス');
+    note.placeholder='修正対象、許可する変更、変更しない範囲を入力してください。';
+    panel.append(el('h3','ボード内で指摘を修正する'),reviewResolutionHint(task,job),el('p','修正指示案は編集できます。送信するまで作業は開始しません。修正担当→通常レビュー→必要なセキュリティレビュー→成果確認へ進めます。自動修正の上限は変更しません。'),button('最新指摘から修正指示案を入れ直す',()=>{if(note.value!==proposal&&!confirm('編集中の指示を最新レビューから作った案に置き換えますか？'))return;note.value=proposal;note.dispatchEvent(new Event('input',{bubbles:true}));}),note,artifactPath,button('この範囲で修正を依頼',async()=>{
+      if(!note.value.trim()){notice('修正範囲を入力してください。');return;}
+      if(confirm('入力した範囲で修正担当を開始しますか？')){
+        try{await api('/api/tasks/repair-review',{id:task.id,note:note.value,artifact_path:artifactPath.value.trim(),checked_changes:true});await refresh();}
+        catch(e){notice(e.message);}
+      }
+    }));body.append(panel);
+  }
   if(task.common_agents?.length)body.append(el('p','担当する共通Agent: '+task.common_agents.join('、'),'hint'));
   const intake=state.jobs.find(j=>j.id===task.job_id)?.intake_classification;
   if(intake)body.append(section('依頼の一次分類',`${intake.label} / ${intake.provider}\n理由: ${intake.reason}\n分類は作業範囲や権限の承認ではありません。`));

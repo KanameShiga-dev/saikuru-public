@@ -25,6 +25,7 @@ from team_move import Moves
 from team_cli_update import CliUpdateMonitor
 from team_harness import Harnesses
 from team_ui_automation import UiAutomation
+from team_consultation import Consultations
 
 
 class DataLock:
@@ -64,6 +65,7 @@ class App:
         self.origin = f'http://127.0.0.1:{port}'
         self.cookie = secrets.token_urlsafe(32)
         self.engine = Engine(self.store, self.config, self.commands, self.origin)
+        self.consultations = Consultations(self)
         self.archives = Archives(self.ledger, self.engine)
         self.moves = Moves(self.ledger, self.engine, self.archives)
         self.engine.project_blocked = lambda path: self.archives.blocked(path) or self.moves.blocked(path)
@@ -163,6 +165,28 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
                 return self.send(200, self.app.state())
+            if path == '/api/job/artifact':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query=parse_qs(urlparse(self.path).query)
+                job=self.app.store.get((query.get('job_id') or [''])[0],'job')
+                relative=(query.get('path') or [''])[0]
+                if not any(a.get('path')==relative for a in job.get('artifacts',[])):
+                    raise ValueError('登録された成果物を選択してください。')
+                from consultation_read_tools import safe_path
+                artifact=safe_path(Path(job['project']).resolve(),relative)
+                return self.send(200,{'path':relative,'content':artifact.read_text(encoding='utf-8')})
+            if path == '/api/ledger/consultation/models':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                return self.send(200, self.app.consultations.choices(
+                    query.get('adapter', ['codex'])[0], query.get('refresh', ['0'])[0] == '1'))
+            if path == '/api/ledger/consultation':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                ident = parse_qs(urlparse(self.path).query).get('id', [''])[0]
+                return self.send(200, self.app.consultations.get(ident))
             if path == '/api/ui-automation/history':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -204,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
                     'error': self.app.mobile_error})
             files = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
                      '/operation-tests': 'operation-tests.html', '/operation-tests.js': 'operation-tests.js',
-                     '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger.css': 'ledger.css'}
+                     '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
             if path not in files:
                 return self.send(404, {'error': '見つかりません。'})
             file = ROOT / 'web' / files[path]
@@ -227,11 +251,22 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('JSONオブジェクトが必要です。')
             if path == '/worker/tool':
                 token = self.headers.get('Authorization', '').removeprefix('Bearer ')
+                consultation = self.app.consultations.tool_request(token, body)
+                if consultation is not None:
+                    return self.send(200, consultation)
                 return self.send(200, self.app.engine.tool_request(token, body))
             if not self.authorized() or self.headers.get('X-Agent-Team-UI') != '1':
                 raise PermissionError('ブラウザからの認証済み操作が必要です。')
             engine = self.app.engine
-            if path == '/api/ui-automation/start':
+            if path == '/api/ledger/consultation/open':
+                result = self.app.consultations.open(body)
+            elif path == '/api/ledger/consultation/send':
+                result = self.app.consultations.send(body)
+            elif path == '/api/ledger/consultation/cancel':
+                result = self.app.consultations.cancel(body)
+            elif path == '/api/ledger/consultation/submit':
+                result = self.app.consultations.submit(body)
+            elif path == '/api/ui-automation/start':
                 result = self.app.ui_automation.start(body)
             elif path == '/api/ui-automation/next':
                 result = self.app.ui_automation.next(body)
@@ -291,6 +326,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('既に行われた変更を確認してください。')
                 engine.retry(body['id'], body.get('note', ''))
                 result = {'ok': True}
+            elif path == '/api/tasks/repair-review':
+                if body.get('checked_changes') is not True:
+                    raise ValueError('修正内容と作業範囲の確認が必要です。')
+                result = engine.repair_review(body['id'],body.get('note',''),body.get('artifact_path',''))
             elif path == '/api/tasks/handoff':
                 engine.handoff_task(body['id'], body.get('note', ''))
                 result = {'ok': True}
@@ -450,6 +489,7 @@ def main():
         pass
     finally:
         server.app.engine.shutdown.set()
+        server.app.consultations.shutdown()
         for ctx in list(server.app.engine.active.values()):
             ctx.cancel.set()
         deadline = time.time() + 15

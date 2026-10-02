@@ -101,6 +101,14 @@ class CodexAdapter:
                                  '-c', 'model_reasoning_effort="' + profile['effort'] + '"']
         if not ctx.engine.config.get('computer_use_allowed', False):
             command += ['--disable', 'computer_use']
+        if getattr(ctx, 'text_only', False):
+            command += ['--disable', 'shell_tool', '--disable', 'unified_exec',
+                        '-c', 'web_search="disabled"', '-c', 'mcp_servers={}',
+                        '--disable', 'enable_mcp_apps', '--disable', 'standalone_web_search']
+            if getattr(ctx, 'consultation_research', False):
+                command += ['-c', 'web_search="live"',
+                            '-c', 'mcp_servers.project_read.command=' + json.dumps(ctx.read_mcp['command']),
+                            '-c', 'mcp_servers.project_read.args=' + json.dumps(ctx.read_mcp['args'])]
         process = Process(command, ctx.project)
         counter = 0
         file_changes = {}
@@ -169,7 +177,7 @@ class CodexAdapter:
             thread_id = result['thread']['id']
             ctx.agent_started(thread_id, 'Codex app-server / 独立thread')
             ctx.event('Codexへ接続しました。')
-            if os.name == 'nt':
+            if os.name == 'nt' and not getattr(ctx, 'text_only', False):
                 # Check the existing sandbox before spending a model turn. No files or network are changed.
                 try:
                     probe = request('command/exec', {'command': ['cmd.exe', '/d', '/c', 'echo AGENT_TEAM_NATIVE_OK'],
@@ -228,9 +236,10 @@ class ClaudeAdapter:
             'prompt': ctx.agent_system_instructions, 'tools': list(definition.tools) + ['StructuredOutput'], 'model': 'inherit'}},
             ensure_ascii=False), encoding='utf-8')
         session_id = str(uuid.UUID(ctx.agent_run['id']))
+        mcp_config = {'mcpServers': {'project_read': ctx.read_mcp}} if getattr(ctx, 'consultation_research', False) else {'mcpServers': {}}
         command = ctx.command + ['-p', '--restricted', '--output-format', 'stream-json', '--verbose',
                   '--agents', str(agent_file), '--agent', definition.name, '--session-id', session_id,
-                  '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                  '--strict-mcp-config', '--mcp-config', json.dumps(mcp_config),
                   '--permission-mode', 'default', '--permission-prompts', 'host',
                   '--tools', ','.join(definition.tools + ('StructuredOutput',)), '--disallowed-tools', 'Agent,Task',
                   '--model', profile['model'], '--effort', profile['effort'],

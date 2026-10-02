@@ -220,10 +220,14 @@ function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefi
 async function api(path,body){const response=await fetch(path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Team-UI':'1'},body:JSON.stringify(body)});let data;try{data=await response.json();}catch{throw Error('PC側に接続できません。再読み込みしてください。');}if(!response.ok)throw Error(data.error||'処理に失敗しました。');return data;}
 function message(text,error=false){$('message').textContent=text;$('message').className=error?'error':'';}
 async function load(){state=await api('/api/ledger');const old=$('category').value;const categories=[...new Set(state.projects.map(p=>p.category))].sort();$('category').replaceChildren(node('option','すべて'));$('category').firstChild.value='';for(const c of categories){const option=node('option',c);option.value=c;$('category').append(option);}$('category').value=categories.includes(old)?old:'';const s=state.last_scan;$('scan-info').textContent=s?`最終調査：${s.at} ／ 登録候補 ${s.discovered}件 ／ 調査フォルダ ${s.visited_directories}件`:'まだ調査していません。';$('scope').textContent=s?`${s.root}：${s.scope_note} 除外：${s.excluded.join('、')}`:'C:\\Projects 以下のみ調査します。';$('scan-errors').textContent=s?.errors.length?`未確認：${s.errors.join(' ／ ')}`:'前回調査で取得エラーはありません。';render();refreshArchive();refreshMoves();schedulePoll();}
+function isRetiredProject(p){
+ return /(?:アーカイブ|削除)済(?:み)?|^(?:アーカイブ|削除|archived|deleted)$/i.test(String(p.status||'').trim());
+}
 function render(){
- const q=$('search').value.toLowerCase(),category=$('category').value;
- const items=state.projects.filter(p=>(!category||p.category===category)&&JSON.stringify([p.name,p.path,p.purpose,p.observation.technology]).toLowerCase().includes(q));
- $('count').textContent=`${items.length}件表示 ／ 台帳 ${state.projects.length}件（資料・候補を含む）`;
+ const q=$('search').value.toLowerCase(),category=$('category').value,showRetired=$('show-retired').checked;
+ const hidden=showRetired?0:state.projects.filter(isRetiredProject).length;
+ const items=state.projects.filter(p=>(showRetired||!isRetiredProject(p))&&(!category||p.category===category)&&JSON.stringify([p.name,p.path,p.purpose,p.observation.technology]).toLowerCase().includes(q));
+ $('count').textContent=`${items.length}件表示 ／ 台帳 ${state.projects.length}件（資料・候補を含む）${hidden?` ／ アーカイブ・削除 ${hidden}件は非表示`:''}`;
  $('list').replaceChildren();
  const categories=[...new Set(state.projects.map(p=>p.category).filter(Boolean))];
  for(const p of items){
@@ -268,7 +272,7 @@ function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').
 $('edit-form').addEventListener('input',updateSectionIndicators);
 $('edit-form').addEventListener('change',updateSectionIndicators);
 $('edit-form').addEventListener('submit',async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const fields=Object.fromEntries(new FormData(e.target));await api('/api/ledger/update',{id:selected.id,fields,expected_updated_at:selected.manual_updated_at});await load();$('editor').close();message('台帳を保存しました。変更前のDBと編集履歴も保持しています。');}catch(err){$('save-message').textContent=err.message;$('management-section').open=true;}finally{button.disabled=false;}});
-$('close').onclick=()=>$('editor').close();$('search').oninput=render;$('category').onchange=render;
+$('show-retired').checked=false;$('close').onclick=()=>$('editor').close();$('search').oninput=render;$('category').onchange=render;$('show-retired').onchange=render;
 $('scan').onclick=async()=>{if(busy)return;busy=true;$('scan').disabled=true;message('C:\\Projects を調査しています。プロジェクトのコードは実行しません。');try{const r=await api('/api/ledger/scan',{});await load();message(`再調査して登録しました。候補 ${r.discovered}件、取得エラー ${r.errors.length}件。`);}catch(e){message(e.message,true);}finally{busy=false;$('scan').disabled=false;}};
 $('backup').onclick=async()=>{try{const r=await api('/api/ledger/backup',{});message(`バックアップ：data/${r.backup}`);}catch(e){message(e.message,true);}};
 $('export').onclick=async()=>{try{const data=await api('/api/ledger/export'),url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=node('a');a.href=url;a.download='project-ledger.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('現在の台帳をJSONで書き出しました。');}catch(e){message(e.message,true);}};
