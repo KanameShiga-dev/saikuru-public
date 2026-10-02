@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>采来 — 操作テスト</title><link rel="stylesheet" href="/style.css"><script src="/operation-tests.js" defer></script></head>
+<body><header><a href="/">← 作業ボード</a><h1>采来 — 操作テスト</h1></header><main>
+<section><h2>判断と操作の自動引き継ぎ</h2><p>固定したテスト画面で、Ollamaが次の操作を選びます。2回続けて画面が変わらない場合や判断に失敗した場合は、通常モデルへ引き継ぎます。1件につき最大8操作です。</p>
+<p>入力・検索・ページ移動・テスト用状態変更を実施します。実プロジェクトや作業ボードのデータは変更しません。Computer Useは使いません。</p>
+<p>固定条件・完了・上限はルールで処理します。Ollamaは少数候補のページ移動に限定し、検索条件の組み合わせ・状態更新・曖昧な判断は通常モデルへ直接渡します。重要な承認は人が行います。</p>
+<label>モード<select id="mode"><option value="hybrid">軽い選択だけOllama → 通常モデル</option><option value="model">通常モデルのみ</option></select></label>
+<label>通常モデル・引き継ぎ先<select id="normal-adapter"><option value="claude">Claude（Sonnet / medium）</option><option value="codex">Codex（GPT-6-Sol / medium）</option></select></label>
+<label>目標<select id="goal"><option value="search">alphaの未着手だけ表示</option><option value="page">2ページ目を表示</option><option value="update">テスト用タスク21を完了</option><option value="empty">該当なしを確認</option></select></label>
+<label class="check"><input id="consent" type="checkbox">固定テスト情報を選択した通常モデルに送信し、CLI利用枠を使うことを確認しました</label>
+<div class="actions"><button id="run" class="primary">操作テストを開始</button><button id="compare">4目標を両モードで比較</button><button id="cancel" disabled>テストを中止</button></div>
+<p id="progress" class="operation-progress" role="status" aria-live="polite">待機中</p><p class="hint">比較は選択したモードを先に、8件を順次実行します。中止後の未実行操作は取り消します。通信中のモデル呼び出しは返答まで利用枠を消費する場合があります。</p></section>
+<section id="fixture"><h2>操作対象（テスト用データ）</h2><label>検索<input id="query" type="search" aria-label="テスト検索"></label><label>状態<select id="status" aria-label="テスト状態"><option value="">すべて</option><option value="todo">未着手</option></select></label><button id="search">検索を適用</button><p id="page-info"></p><p id="message"></p><ul id="rows"></ul><button id="next">次ページ</button></section>
+<section><h2>計測結果</h2><p>CLI入力・キャッシュ・出力と、ローカルOllamaのトークンを分けて記録します。文字数をトークン数として扱いません。効果を比べる際は、同じ目標を達成したケース同士を確認してください。</p><button id="history">履歴を再取得</button><div id="results" role="status"></div><details><summary>操作・引き継ぎの記録</summary><pre id="evidence"></pre></details></section>
+</main></body></html>

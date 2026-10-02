@@ -1,0 +1,10 @@
+data/
+__pycache__/
+*.pyc
+.test-output/
+.env
+*.sqlite3
+docs/manual/capture-data/
+
+# Local operational evidence must not enter distribution exports.
+docs/evidence/
