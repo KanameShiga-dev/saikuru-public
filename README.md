@@ -6,7 +6,7 @@ Codex／Claude Codeとプロジェクトの作業状態・引き継ぎ・検証�
 
 ## マニュアル
 
-[構成・操作マニュアル](https://kanameshiga-dev.github.io/sairai-manual/)
+[構成・操作マニュアル](https://kanameshiga-dev.github.io/saikuru-manual/)
 
 ## 起動
 
