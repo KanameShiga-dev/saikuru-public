@@ -233,7 +233,7 @@ class Handler(BaseHTTPRequestHandler):
                     'code': gateway.secret['code'] if gateway else None,
                     'fingerprint': gateway.fingerprint if gateway else None,
                     'error': self.app.mobile_error})
-            files = {'/history': 'history.html', '/history.js': 'history.js', '/history.css': 'history.css', '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
+            files = {'/history': 'history.html', '/history.js': 'history.js', '/history.css': 'history.css', '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/theme.css': 'theme.css', '/shell.js': 'shell.js',
                      '/operation-tests': 'operation-tests.html', '/operation-tests.js': 'operation-tests.js',
                      '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
             if path not in files:

@@ -77,7 +77,17 @@ function stopReason(task){
   if(claude&&/Failed to authenticate|OAuth.*expired|authentication/i.test(summary))return {code:'claude-auth',title:'Claudeのログインが失効しています',detail:'Claudeに再ログインしてから再試行してください。'};
   return null;
 }
-function group(task) { if(endedJob(task))return 3; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
+// 2026-10-03：自動修正の上限で依頼が止まった場合、最後のレビュー工程は「担当作業終了」のまま依頼だけが判断待ちになる。
+// この工程を「あなたの判断」と判断待ちバナーに出す（表示の判定のみ。作業の処理は変えない）。
+function stalledReview(job){
+  if(job?.status!=='blocked')return null;
+  const tasks=state.tasks.filter(t=>t.job_id===job.id);
+  if(tasks.some(t=>pending(t.id).length||['failed','blocked','interrupted','running','awaiting_approval'].includes(t.status)))return null;
+  return tasks.filter(t=>t.role==='reviewer'&&t.status==='succeeded'&&t.result?.status==='needs_changes')
+    .sort((a,b)=>(a.finished_at||a.updated_at||0)-(b.finished_at||b.updated_at||0)).pop()||null;
+}
+function isStalledReview(task){return stalledReview(state.jobs.find(j=>j.id===task.job_id))?.id===task.id;}
+function group(task) { if(endedJob(task))return 3; if(isStalledReview(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
 const completedFolds=new Map();
 function completedTime(task){
   const job=state.jobs.find(j=>j.id===task.job_id);
@@ -145,13 +155,43 @@ function renderCliUpdate(){
   $('claude-update-install').disabled=claude.state!=='available';
   $('claude-update-install').textContent=claude.state==='updating'?'更新中…':'Claude Code CLIを更新';
 }
+// 2026-10-03 UI改善：判断待ちを最上部の常設バナーに表示する（浮いた通知は廃止）。PC通知・音声通知は従来どおり新しい判断だけに出す。
+function renderDecisionBanner(items){
+  const banner=$('decision-banner'),list=$('decision-banner-list');
+  banner.hidden=!items.length;if(!items.length){list.replaceChildren();return;}
+  $('decision-banner-title').textContent=`あなたの判断が必要：${items.length}件`;
+  list.replaceChildren(...items.map(item=>{
+    const li=el('li'),what=el('div',undefined,'what'),job=state.jobs.find(j=>j.id===item.task.job_id);
+    what.append(el('strong',item.label),el('span',(job?.title?job.title+' ／ ':'')+item.task.title));
+    if(item.detail)what.append(el('small',item.detail));
+    if(item.completion)what.append(el('small','工程終了は実機検証済みの保証ではありません。成果物と検証結果を確認してください。'));
+    const open=el('button','内容を確認','primary');open.type='button';open.onclick=()=>openNotifiedTask(item.task.id);
+    li.append(what,open);return li;
+  }));
+}
+// 2026-10-03 UI改善：ヘッダーに利用枠の残量を常に表示する。取得できない値は「不明」とする。
+function renderUsageChips(){
+  const box=$('usage-chips');if(!box)return;
+  box.replaceChildren(...Object.keys(state.providers||{}).map(name=>{
+    const usage=state.usage?.[name],row=usage?.rows?.[0],w=row?.weekly_only?row?.weekly:row?.short;
+    const value=typeof w?.remaining_percent==='number'?w.remaining_percent:null,label=name==='codex'?'Codex':'Claude';
+    const chip=el('button',undefined,'usage-chip');chip.type='button';
+    const dot=el('span',undefined,'dot'+(value===null?' unknown':value<20?' warn':''));dot.setAttribute('aria-hidden','true');
+    chip.append(dot,document.createTextNode(`${label} 残り${value===null?'不明':value+'％'}${usage?.stale?'（前回値）':''}`));
+    chip.setAttribute('aria-label',`${label}の利用枠：残り${value===null?'不明':value+'パーセント'}。詳細を開く`);
+    chip.onclick=openModelPanel;return chip;
+  }));
+}
+function openModelPanel(){const panel=document.querySelector('.information-panel');if(!panel)return;panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});panel.querySelector('summary')?.focus();}
 function render() {
   $('connection').textContent=state.paused?'新規着手を一時停止中':'● ローカル接続中';
+  $('connection').classList.toggle('paused',!!state.paused);
   $('pause').textContent=state.paused?'新規着手を再開':'新規着手を一時停止';
   renderCliUpdate();
   const nextProviderVersion=JSON.stringify([state.providers,state.usage,state.config.roles,state.config.profiles,state.cli_update,state.claude_update]);
   if(nextProviderVersion!==providerVersion){
   providerVersion=nextProviderVersion;
+  renderUsageChips();
   $('providers').replaceChildren();
   for(const [name,p] of Object.entries(state.providers)){
     const box=el('article',undefined,'provider'), text=el('div');box.append(el('div',name==='codex'?'C':'✳','symbol'));
@@ -176,7 +216,7 @@ function render() {
   const labels=['待機している作業','チームが作業中','あなたの判断','終了した作業'];
   $('board').querySelectorAll('details[data-period-key]').forEach(d=>completedFolds.set(d.dataset.periodKey,d.open));
   $('board').replaceChildren(...labels.map((label,index)=>{
-    const column=el('section',undefined,'column'),tasks=state.tasks.filter(t=>(!filter||t.job_id===filter)&&group(t)===index);
+    const tasks=state.tasks.filter(t=>(!filter||t.job_id===filter)&&group(t)===index),column=el('section',undefined,'column'+(index===2&&tasks.length?' attention':''));
     const heading=el('h3',label);heading.append(el('span',String(tasks.length)));column.append(heading);
     const buckets=new Map();
     if(index===3){
@@ -192,7 +232,7 @@ function render() {
     }
     for(const task of tasks){
       const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card'+(index===2?' attention':''));
-      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatuses[job.status]):pending(task.id).length?'確認・承認してください':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
+      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatuses[job.status]):pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
       card.append(badge,el('strong',task.title));
       const wait=waitingReason(task);if(wait)card.append(el('p',wait,'summary'));
       const reason=stopReason(task);
@@ -621,7 +661,11 @@ function decisionItems(){
     if(approvals.length)return [{task,key:approvals.map(a=>a.id).sort().join(':'),label:'判断・確認をお願いします'}];
     if(['blocked','failed','interrupted'].includes(task.status)){const reason=stopReason(task);return [{task,key:`${task.id}:${task.attempt}:${task.status}:${reason?.code||'generic'}`,label:reason?.title||(task.status==='blocked'?'判断が必要です':'作業が停止しています'),detail:reason?.detail,voice:reason?.title}];}
     return [];
-  });
+  }).concat(state.jobs.filter(job=>!['cancelled','accepted','accepted_with_pending_checks'].includes(job.status)).flatMap(job=>{
+    const review=stalledReview(job);
+    return review?[{task:review,key:'repair-limit:'+review.id,label:'自動修正の上限に達し、判断が必要です',
+      detail:'レビュー指摘が残っています。修正範囲を指定して再依頼するか、成果の扱いを判断してください。',voice:'自動修正の上限に達しました。判断が必要です。'}]:[];
+  }));
 }
 function openNotifiedTask(id){
   const task=state?.tasks.find(t=>t.id===id);
@@ -634,7 +678,7 @@ function notifyDecisions(){
   const items=decisionItems(),active=new Set(items.map(item=>item.key));
   document.title=items.length?`判断待ち ${items.length}件 — 采来 — サイクル —`:'采来 — サイクル — — 作業と判断';
   notificationButton();
-  for(const [key,popup] of decisionPopupObjects)if(!active.has(key)){popup.remove();decisionPopupObjects.delete(key);}
+  renderDecisionBanner(items);
   for(const [key,n] of decisionNotificationObjects)if(!active.has(key)){n.close();decisionNotificationObjects.delete(key);}
   let newDecisions=0,newVoice=null;
   for(const item of items){
@@ -645,14 +689,6 @@ function notifyDecisions(){
     seenDecisions.add(item.key);
     seenDecisions=new Set([...seenDecisions].slice(-300));
     try{localStorage.setItem('agent-team-decision-seen',JSON.stringify([...seenDecisions]));}catch(error){}
-    const popup=el('section',undefined,'decision-popup'),title=el('strong',item.label),description=el('p',item.task.title),actions=el('div',undefined,'actions');
-    const open=el('button','内容を確認','primary'),later=el('button','通知を閉じる');open.type=later.type='button';
-    open.onclick=()=>{openNotifiedTask(item.task.id);popup.remove();decisionPopupObjects.delete(item.key);};
-    later.onclick=()=>{popup.remove();decisionPopupObjects.delete(item.key);};
-    actions.append(open,later);popup.append(title,description);
-    if(item.detail)popup.append(el('p',item.detail));
-    popup.append(el('small',item.completion?'通知を閉じても成果の確認待ちは残ります。工程終了は実機検証済みの保証ではありません。':'通知を閉じても、作業の停止状態は続きます。'),actions);
-    $('decision-popups').append(popup);decisionPopupObjects.set(item.key,popup);
     if('Notification' in window&&notificationSetting()&&Notification.permission==='granted'){
       try{
         const n=new Notification('采来 — サイクル —：'+item.label,{body:item.detail||'作業ダッシュボードを開いて判断してください。',tag:'agent-team-'+item.task.id});
@@ -685,6 +721,8 @@ $('decision-notifications').addEventListener('click',async()=>{
   notificationButton();
 });
 $('filter').addEventListener('change',render);
+$('menu-models').addEventListener('click',openModelPanel);
+$('menu-mobile').addEventListener('click',()=>{const m=$('mobile-access');if(m.hidden){notice('スマホ接続の情報はまだ読み込まれていません。少し待ってから再度開いてください。');return;}m.open=true;m.scrollIntoView({behavior:'smooth',block:'start'});});
 document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.close).close()));
 $('new-job').addEventListener('click',()=>{if(!state)return;$('project-select').replaceChildren(...state.config.approved_roots.map(p=>new Option(p,p)));$('new-dialog').showModal();});
 let folderState=null, folderBusy=false, folderGeneration=0;

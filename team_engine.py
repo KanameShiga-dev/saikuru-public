@@ -153,7 +153,8 @@ class Context:
 
                           'attempt': self.task['attempt'], 'status': 'starting', 'session_id': None,
 
-                          'started_at': now(), 'definition_hash': definition.digest, 'sandbox': definition.sandbox}
+                          'started_at': now(), 'definition_hash': definition.digest, 'sandbox': definition.sandbox,
+                          'quota_before': self.engine.usage_snapshot().get(self.task['profile']['adapter'], {})}
 
         with self.engine.store.lock:
 
@@ -242,7 +243,8 @@ class Context:
 
                 status = 'cancelled'
 
-            self.agent_run.update(status=status, finished_at=now(), failure_code=failure_code)
+            self.agent_run.update(status=status, finished_at=now(), failure_code=failure_code,
+                quota_after=self.engine.usage_snapshot().get(self.task['profile']['adapter'], {}))
 
             self.engine.store.update(self.task['id'], agent_run=self.agent_run)
 

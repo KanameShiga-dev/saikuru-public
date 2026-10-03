@@ -1,9 +1,16 @@
 <!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>プロジェクト履歴 — 采来</title><link rel="stylesheet" href="/history.css?v=project-names-20261003"></head>
-<body><header><a href="/">作業ボード</a><a href="/ledger">プロジェクト台帳</a><h1>プロジェクト履歴</h1><p>プロジェクトを指定し、依頼から作業・確認までの記録をたどります。</p></header>
-<main><p class="notice">人の依頼者・監視担当・確認者・承認者は現在未記録です。表示する担当はAIです。工程終了と成果の受け入れは区別します。</p>
-<section class="filters"><label>対象プロジェクト<select id="project"><option value="">すべて</option></select></label><label>依頼の入口<select id="origin"><option value="">すべて</option><option value="ledger">台帳からの依頼</option><option value="new">新規依頼</option><option value="unrecorded">入口未記録</option></select></label><label>依頼名を検索<input type="search" id="search"></label><button id="refresh">更新</button></section>
-<p id="status" role="status" aria-live="polite">読み込み中…</p><p>プロジェクト名を押すと履歴を展開できます。横棒は記録された開始・終了時刻を表します。実行時間は最新試行の記録から計算し、実行中の経過時間はページ更新時点の値です。開始前は待機、終了時刻がない工程は現在の状態を表示します。色に加えて状態名を表示します。</p>
-<section id="timeline" aria-label="依頼と作業の時系列"></section>
-<section id="detail" hidden><h2 id="detail-title"></h2><p id="people"></p><p id="paths"></p><h3>確認・承認の記録</h3><div id="approvals"></div><h3>作業の動き</h3><ol id="events"></ol><button id="older" hidden>過去の記録をさらに表示</button></section>
-</main><script src="/history.js?v=project-names-20261003"></script></body></html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>プロジェクト履歴 — 采来</title><link rel="stylesheet" href="/theme.css?v=ui-redesign-20261003"><link rel="stylesheet" href="/history.css?v=ui-redesign-20261003"></head>
+<body>
+<header class="app-header"><a href="/" class="brand"><span class="mark">采</span><span>采来 — サイクル —<small>AIに采配を。開発に連続性を。</small></span></a>
+<nav class="app-tabs" aria-label="画面の切り替え"><a href="/">作業ボード</a><a href="/ledger">プロジェクト台帳</a><a href="/history" aria-current="page">プロジェクト履歴</a><a href="/operation-tests">操作テスト</a></nav>
+<span class="spacer"></span><div class="app-actions"><button id="refresh" type="button">最新の状態に更新</button></div></header>
+<main>
+<div class="page-head"><h1>プロジェクト履歴</h1><p id="status" role="status" aria-live="polite">読み込み中…</p></div>
+<section class="filters" aria-label="絞り込み"><label>対象プロジェクト<select id="project"><option value="">すべて</option></select></label><label>依頼の入口<select id="origin"><option value="">すべて</option><option value="ledger">台帳からの依頼</option><option value="new">新規依頼</option><option value="unrecorded">入口未記録</option></select></label><label class="grow">依頼名を検索<input type="search" id="search"></label></section>
+<p class="notice"><strong>表示している担当はAIです。</strong>人の依頼者・承認者はログイン機能がないため「未記録」と表示します。保持されている記録だけを表示する読み取り専用の画面で、工程終了と成果の受け入れは区別します。</p>
+<div class="split">
+ <section id="jobs" class="jobs" aria-label="依頼の一覧"></section>
+ <section id="detail" class="detail" aria-live="polite"><p class="hint">左の一覧から依頼を選ぶと、工程の時系列・承認の記録・作業の動きを表示します。</p></section>
+</div>
+<details class="quota-help"><summary>利用枠と消費量の見方</summary><p>トークンは保存されたCLI報告の取得済み分です。修正・再試行を含み、失敗や未取得をゼロとしません。実行履歴は最大31試行分の保持範囲です。金額ではありません。利用枠はアカウント共通で他の作業も影響します。前後が同じ取得時刻の場合は実行の消費を示しません。依頼前の台帳相談の消費は合計に含みません。</p><div id="quota"></div></details>
+</main><script src="/history.js?v=ui-redesign-20261003"></script></body></html>

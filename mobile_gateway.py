@@ -34,6 +34,7 @@ VALID_PATHS.update({'/api/ledger/archive/preview', '/api/ledger/archive/start'})
 VALID_PATHS.update({'/api/ledger/delete/preview', '/api/ledger/delete/start'})
 VALID_PATHS.update({'/api/ledger/preview-status'})
 VALID_PATHS.update({'/api/ledger/move/preview', '/api/ledger/move/start', '/api/ledger/move/preview-status'})
+VALID_PATHS.update({'/theme.css', '/shell.js'})  # 2026-10-03 共通デザイン
 VALID_PATHS.update({'/operation-tests', '/operation-tests.js', '/api/ui-automation/start',
                     '/api/ui-automation/next', '/api/ui-automation/cancel', '/api/ui-automation/history'})
 

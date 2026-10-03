@@ -1,0 +1,83 @@
+/* 共通デザイン（2026-10-03 UI改善）
+   色・文字サイズの基準をここに集約する。各画面のCSSはこの変数だけを参照する。
+   詳細と経緯: docs/UI_REDESIGN_20261003.md */
+:root{
+ color-scheme:light;
+ --bg:#f4f5f2;--surface:#ffffff;--surface-2:#eef2ee;--line:#d5ddd6;--line-strong:#b6c6bd;
+ --text:#17292b;--muted:#4f6360;
+ --green:#176858;--green-strong:#0f4b40;--green-weak:#e3efe9;--on-accent:#ffffff;
+ --amber:#7a5000;--amber-bg:#fff4dc;--amber-line:#c9820f;
+ --red:#a12e2e;--red-bg:#fbeaea;--blue:#1f5fa8;--blue-bg:#e5effa;--focus:#2f6fd0;
+ --fs-xs:12px;--fs-s:14px;--fs-m:16px;--fs-l:18px;--fs-xl:22px;--fs-xxl:28px;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+ color-scheme:dark;
+ --bg:#111a1a;--surface:#182424;--surface-2:#1f2e2d;--line:#2f4241;--line-strong:#46605e;
+ --text:#e6eeeb;--muted:#a9bab6;
+ --green:#5cc4a8;--green-strong:#8fdcc6;--green-weak:#1d3a33;--on-accent:#0d1b18;
+ --amber:#f2c16b;--amber-bg:#3a2e15;--amber-line:#c9932f;
+ --red:#f09a9a;--red-bg:#3d1f1f;--blue:#8db8ef;--blue-bg:#1b2c42;--focus:#8db8ef}}
+:root[data-theme="dark"]{
+ color-scheme:dark;
+ --bg:#111a1a;--surface:#182424;--surface-2:#1f2e2d;--line:#2f4241;--line-strong:#46605e;
+ --text:#e6eeeb;--muted:#a9bab6;
+ --green:#5cc4a8;--green-strong:#8fdcc6;--green-weak:#1d3a33;--on-accent:#0d1b18;
+ --amber:#f2c16b;--amber-bg:#3a2e15;--amber-line:#c9932f;
+ --red:#f09a9a;--red-bg:#3d1f1f;--blue:#8db8ef;--blue-bg:#1b2c42;--focus:#8db8ef}
+body{background:var(--bg);color:var(--text)}
+:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+
+/* 共通ヘッダー：画面の移動はタブ、操作はボタン、危険な操作はメニューの中 */
+.app-header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 4vw;background:var(--surface);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:50}
+.app-header .brand{display:flex;align-items:center;gap:10px;font-size:var(--fs-l);font-weight:700;color:inherit;text-decoration:none}
+.app-header .brand small{display:block;font-size:var(--fs-xs);font-weight:400;color:var(--muted)}
+.app-header .mark{background:var(--green);color:var(--on-accent);width:34px;height:34px;display:grid;place-items:center;padding:0;border-radius:8px;font-size:var(--fs-m)}
+.app-tabs{display:flex;flex-wrap:nowrap;gap:2px;margin-left:6px;overflow-x:auto}
+.app-tabs a{white-space:nowrap;padding:8px 12px;border-radius:8px;color:var(--muted);text-decoration:none;font-size:var(--fs-s)}
+.app-tabs a:hover{background:var(--surface-2)}
+.app-tabs a[aria-current="page"]{background:var(--green-weak);color:var(--green);font-weight:700}
+.app-header .spacer{flex:1}
+.app-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.app-actions button{min-height:40px}
+
+/* 利用枠のチップ */
+.usage-chips{display:flex;gap:6px;flex-wrap:wrap}
+.usage-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:999px;padding:5px 12px;font-size:var(--fs-s);cursor:pointer;min-height:36px}
+.usage-chip .dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0}
+.usage-chip .dot.warn{background:var(--amber-line)}
+.usage-chip .dot.unknown{background:var(--muted)}
+
+/* 状態表示（接続・一時停止） */
+.status-pill{font-size:var(--fs-xs);background:var(--surface-2);color:var(--muted);border-radius:999px;padding:6px 12px;white-space:nowrap}
+.status-pill.paused{background:var(--amber-bg);color:var(--amber);font-weight:700}
+
+/* その他メニュー */
+.app-menu{position:relative}
+.app-menu>button{min-width:44px}
+.app-menu-list{position:absolute;right:0;top:calc(100% + 6px);z-index:60;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:6px;min-width:260px;box-shadow:0 8px 24px rgba(0,0,0,.16)}
+.app-menu-list[hidden]{display:none}
+.app-menu-list button{display:block;width:100%;text-align:left;border:0;background:none;border-radius:6px;padding:10px 12px;min-height:40px}
+.app-menu-list button:hover{background:var(--surface-2)}
+.app-menu-list hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.app-menu-list .danger{color:var(--red)}
+.app-menu-list .menu-label{font-size:var(--fs-xs);color:var(--muted);padding:6px 12px 2px;margin:0}
+
+/* 判断待ちの常設バナー */
+.decision-banner{border:1px solid var(--amber-line);border-left-width:6px;background:var(--amber-bg);border-radius:10px;padding:14px 18px;margin:0 0 18px}
+.decision-banner[hidden]{display:none}
+.decision-banner h2{margin:0 0 8px;font-size:var(--fs-l);color:var(--amber)}
+.decision-banner ul{list-style:none;margin:0;padding:0}
+.decision-banner li{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 0;border-top:1px solid var(--amber-line)}
+.decision-banner li:first-child{border-top:0}
+.decision-banner .what{flex:1;min-width:220px}
+.decision-banner .what strong{display:block;font-size:var(--fs-m)}
+.decision-banner .what span{font-size:var(--fs-s);color:var(--text)}
+.decision-banner .what small{display:block;font-size:var(--fs-xs);color:var(--muted)}
+.decision-banner button{min-height:40px}
+
+@media (max-width:720px){
+ .app-header{padding:10px 16px}
+ .app-tabs{order:5;width:100%;margin:0}
+ .app-actions{width:100%;justify-content:flex-start}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}

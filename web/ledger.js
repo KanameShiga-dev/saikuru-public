@@ -198,7 +198,7 @@ function navigateProject(p){
   $('save-message').textContent='入力中の内容があります。管理項目は保存し、GitHub公開先の入力は控えてから、別のプロジェクトを開いてください。';
   $('save-message').scrollIntoView({block:'nearest'});return;
  }
- $('editor').close();openProjectDetails(p);$('editor').scrollTop=0;
+ openProjectDetails(p);$('editor').scrollTop=0;
 }
 function renderRelations(p){
  const {parent,gitPath,gitParent,children}=projectRelations(p),box=$('project-relations');box.replaceChildren();
@@ -232,10 +232,14 @@ function render(){
  const categories=[...new Set(state.projects.map(p=>p.category).filter(Boolean))];
  for(const p of items){
   const card=node('article',undefined,'project'),button=node('button',p.name);button.type='button';button.dataset.projectId=p.id;
+  if(selected?.id===p.id&&!$('editor').hidden){card.classList.add('selected');button.setAttribute('aria-current','true');}
   card.append(button,node('p',p.path,'path'));
   const badges=node('div');
   for(const b of [p.category,p.status,p.worker_allowed?'AI作業対象に登録済み':'AI作業の許可なし'])badges.append(node('span',b,'badge'));
   card.append(badges,node('p',`目的：${p.purpose}`),node('p',`技術構成：${p.observation.technology.join(' / ')||'未確認'}`));
+  const keyFields=['purpose','owner','build_method','verification_method','completion_criteria'],known=keyFields.filter(k=>p[k]&&p[k]!=='未確認').length;
+  const fill=node('div',undefined,'fill'),meter=node('span',undefined,'meter'),bar=node('i');bar.style.width=(known/keyFields.length*100)+'%';meter.append(bar);meter.setAttribute('aria-hidden','true');
+  fill.append(node('span',`主要な管理項目 ${known}/${keyFields.length} 確認済み`),meter);if(known<keyFields.length)fill.append(node('span',`未確認 ${keyFields.length-known}項目`,'unknown'));card.append(fill);
   const form=node('form',undefined,'card-category-form'),label=node('label','分類を編集');
   const draft=categoryDrafts.get(p.id);
   const input=node('input');input.type='text';input.value=draft?.value??p.category??'';input.maxLength=limits.category;input.required=true;
@@ -268,11 +272,15 @@ function render(){
  if(!items.length)$('list').append(node('p','該当するプロジェクトはありません。'));
 }
 function renderMetadata(p){const o=p.observation,g=o.git,dl=node('dl');const info={'確認日時':o.checked_at,'フォルダ':o.exists?'存在確認済み':'見つかりません','README表題':o.readme_title||'未確認','所属Gitリポジトリ':g.parent_repository||'親リポジトリなし','技術構成':o.technology.join(' / ')||'未確認','Git管理':g.repository?'あり':'直下の .git なし','ブランチ':g.branch||'未確認','HEAD':g.head||'未確認','変更件数':g.repository&&g.changes!==null?`追跡対象 ${g.changes} ／ ステージ ${g.staged} ／ 未追跡 ${g.untracked}`:'未確認','Git取得結果':g.error||'上記は調査時点の情報です。','関連資料':o.documents.join('\n')||'既定の資料名は見つかりません。','Computer Use':'基本禁止','AI作業の許可':p.worker_allowed?'既存の作業対象に登録済み':'台帳登録のみ。作業の許可なし。'};for(const[k,v]of Object.entries(info))dl.append(node('dt',k),node('dd',v));$('metadata').replaceChildren(dl);}
-function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').textContent=p.name;$('path').textContent=p.path;$('save-message').textContent='';renderMetadata(p);renderManagementFields(p);$('archive-feedback').textContent='';$('archive-feedback').className='';$('github-repositories').value='';archivePreview=null;renderRelations(p);$('move-destination').value='';$('move-feedback').textContent='';movePreview=null;for(const section of $('editor').querySelectorAll('details.detail-section'))section.open=false;refreshArchive();updateSectionIndicators();$('editor').showModal();}
+// 2026-10-03 UI改善：詳細はダイアログではなく、一覧の右側の常設パネルに表示する。
+function showEditor(){const ed=$('editor');ed.hidden=false;$('editor-placeholder').hidden=true;markSelected();if(matchMedia('(max-width:980px)').matches)ed.scrollIntoView({behavior:'smooth',block:'start'});else ed.scrollTop=0;}
+function hideEditor(){$('editor').hidden=true;$('editor-placeholder').hidden=false;markSelected();}
+function markSelected(){for(const card of document.querySelectorAll('#list .project')){const b=card.querySelector('button[data-project-id]'),on=!$('editor').hidden&&b?.dataset.projectId===selected?.id;card.classList.toggle('selected',on);if(b){if(on)b.setAttribute('aria-current','true');else b.removeAttribute('aria-current');}}}
+function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').textContent=p.name;$('path').textContent=p.path;$('save-message').textContent='';renderMetadata(p);renderManagementFields(p);$('archive-feedback').textContent='';$('archive-feedback').className='';$('github-repositories').value='';archivePreview=null;renderRelations(p);$('move-destination').value='';$('move-feedback').textContent='';movePreview=null;for(const section of $('editor').querySelectorAll('details.detail-section'))section.open=false;refreshArchive();updateSectionIndicators();showEditor();}
 $('edit-form').addEventListener('input',updateSectionIndicators);
 $('edit-form').addEventListener('change',updateSectionIndicators);
-$('edit-form').addEventListener('submit',async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const fields=Object.fromEntries(new FormData(e.target));await api('/api/ledger/update',{id:selected.id,fields,expected_updated_at:selected.manual_updated_at});await load();$('editor').close();message('台帳を保存しました。変更前のDBと編集履歴も保持しています。');}catch(err){$('save-message').textContent=err.message;$('management-section').open=true;}finally{button.disabled=false;}});
-$('show-retired').checked=false;$('close').onclick=()=>$('editor').close();$('search').oninput=render;$('category').onchange=render;$('show-retired').onchange=render;
+$('edit-form').addEventListener('submit',async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const fields=Object.fromEntries(new FormData(e.target));await api('/api/ledger/update',{id:selected.id,fields,expected_updated_at:selected.manual_updated_at});await load();const fresh=state.projects.find(p=>p.id===selected.id);if(fresh)openProjectDetails(fresh);message('台帳を保存しました。変更前のDBと編集履歴も保持しています。');$('save-message').textContent='保存しました。';}catch(err){$('save-message').textContent=err.message;$('management-section').open=true;}finally{button.disabled=false;}});
+$('show-retired').checked=false;$('close').onclick=hideEditor;$('search').oninput=render;$('category').onchange=render;$('show-retired').onchange=render;
 $('scan').onclick=async()=>{if(busy)return;busy=true;$('scan').disabled=true;message('C:\\Projects を調査しています。プロジェクトのコードは実行しません。');try{const r=await api('/api/ledger/scan',{});await load();message(`再調査して登録しました。候補 ${r.discovered}件、取得エラー ${r.errors.length}件。`);}catch(e){message(e.message,true);}finally{busy=false;$('scan').disabled=false;}};
 $('backup').onclick=async()=>{try{const r=await api('/api/ledger/backup',{});message(`バックアップ：data/${r.backup}`);}catch(e){message(e.message,true);}};
 $('export').onclick=async()=>{try{const data=await api('/api/ledger/export'),url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=node('a');a.href=url;a.download='project-ledger.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('現在の台帳をJSONで書き出しました。');}catch(e){message(e.message,true);}};
@@ -295,11 +303,11 @@ async function prepareRemoval(operation){
    result=await api('/api/ledger/preview-status?id='+encodeURIComponent(request.request_id));
    if(result.status!=='working')break;
    await new Promise(resolve=>setTimeout(resolve,1000));
-   if(selected?.id!==project.id||!$('editor').open)return;
+   if(selected?.id!==project.id||$('editor').hidden)return;
   }
   if(result.status==='failed')throw Error(result.error);
   if(result.status!=='ready')throw Error('対象確認に時間がかかっています。対象のアプリを停止してから、確認をやり直してください。');
-  if(selected?.id!==project.id||!$('editor').open)return;
+  if(selected?.id!==project.id||$('editor').hidden)return;
   archivePreview=result.preview;
   $('archive-confirm-title').textContent=operation==='delete'?'プロジェクトを削除（復旧用ZIPを保存）':'アーカイブして元フォルダを削除';
   $('archive-form').querySelector('button[type="submit"]').textContent=operation==='delete'?'非公開化・接続解除して削除':'非公開化・接続解除してアーカイブ';
@@ -339,10 +347,10 @@ $('move-preview').onclick=async()=>{
  try{
   if(Object.keys(labels).some(key=>String(new FormData($('edit-form')).get(key)||'')!==String(project[key]||'')))throw Error('管理項目に未保存の入力があります。台帳に保存してから移動してください。');
   const request=await api('/api/ledger/move/preview',{id:project.id,destination:$('move-destination').value.trim()});let result;
-  for(let attempt=0;attempt<900;attempt++){result=await api('/api/ledger/move/preview-status?id='+encodeURIComponent(request.request_id));if(result.status!=='working')break;await new Promise(resolve=>setTimeout(resolve,1000));if(selected?.id!==project.id||!$('editor').open)return;}
+  for(let attempt=0;attempt<900;attempt++){result=await api('/api/ledger/move/preview-status?id='+encodeURIComponent(request.request_id));if(result.status!=='working')break;await new Promise(resolve=>setTimeout(resolve,1000));if(selected?.id!==project.id||$('editor').hidden)return;}
   if(result.status==='failed')throw Error(result.error);
   if(result.status!=='ready')throw Error('対象確認が終わっていません。時間を置いてもう一度確認してください。');
-  if(selected?.id!==project.id||!$('editor').open)return;
+  if(selected?.id!==project.id||$('editor').hidden)return;
   movePreview=result.preview;const box=$('move-plan');box.replaceChildren();
   for(const[k,v]of Object.entries({'移動元':movePreview.source,'移動先':movePreview.destination,'所属Git':movePreview.git_root||'検出なし','移動先の所属Git':movePreview.destination_git_root||'検出なし','Git追跡ファイル':movePreview.tracked_files+'件','移動範囲のGit差分':movePreview.git_changes+'件','台帳で移るノード':movePreview.affected.length+'件','更新する元ソース参照':movePreview.references.length+'件'}))box.append(node('p',k+'：'+v,'path'));
   for(const warning of movePreview.warnings)box.append(node('p',warning,'archive-warning'));
