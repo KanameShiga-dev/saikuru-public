@@ -82,3 +82,10 @@ main{max-width:1400px;margin:0 auto;padding:20px 4vw 48px}
 .quota-help summary{cursor:pointer}
 @media (max-width:980px){.split{grid-template-columns:minmax(0,1fr)}.jobs{max-height:none}}
 @media (max-width:620px){main{padding:16px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.axis,.lane{grid-template-columns:minmax(0,1fr)}.axis>span:first-child{display:none}.filters select{max-width:none;width:100%}.filters label{width:100%}}
+/* 判断待ち：文字と模様を併用し、勤務時間外も消さない。 */
+.wait-summary,.wait-detail{padding:16px;border:1px solid var(--line);border-radius:12px;margin:16px 0;background:var(--surface)}
+.wait-row{border-top:1px solid var(--line);padding:12px 0}
+.wait-track{height:12px;position:relative;background:repeating-linear-gradient(135deg,var(--surface) 0 4px,var(--line) 4px 6px);overflow:hidden;border-radius:4px}
+.wait-business{position:absolute;height:100%;background:var(--green)}
+.bar.wait-track{position:absolute;height:26px;padding:0;border:0}
+.wait-summary{overflow:auto}.wait-summary table{border-collapse:collapse;width:100%}.wait-summary th,.wait-summary td{padding:8px;text-align:left;border-bottom:1px solid var(--line)}

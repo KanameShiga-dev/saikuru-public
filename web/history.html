@@ -8,6 +8,7 @@
 <div class="page-head"><h1>プロジェクト履歴</h1><p id="status" role="status" aria-live="polite">読み込み中…</p></div>
 <section class="filters" aria-label="絞り込み"><label>対象プロジェクト<select id="project"><option value="">すべて</option></select></label><label>依頼の入口<select id="origin"><option value="">すべて</option><option value="ledger">台帳からの依頼</option><option value="new">新規依頼</option><option value="unrecorded">入口未記録</option></select></label><label class="grow">依頼名を検索<input type="search" id="search"></label></section>
 <p class="notice"><strong>表示している担当はAIです。</strong>人の依頼者・承認者はログイン機能がないため「未記録」と表示します。保持されている記録だけを表示する読み取り専用の画面で、工程終了と成果の受け入れは区別します。</p>
+<details class="wait-summary"><summary>人の判断待ちの集計</summary><p id="wait-hours"></p><div class="filters"><label>開始日<input id="wait-from" type="date"></label><label>終了日<input id="wait-to" type="date"></label><button id="wait-refresh" type="button">期間で集計</button></div><div id="wait-stats" role="status" aria-live="polite"></div></details>
 <div class="split">
  <section id="jobs" class="jobs" aria-label="依頼の一覧"></section>
  <section id="detail" class="detail" aria-live="polite"><p class="hint">左の一覧から依頼を選ぶと、工程の時系列・承認の記録・作業の動きを表示します。</p></section>

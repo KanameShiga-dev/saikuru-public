@@ -77,6 +77,8 @@ class App:
         self.claude_update = CliUpdateMonitor(self, 'claude')
         self.mobile = None
         self.mobile_error = None
+        from team_notifications import Notifications
+        self.notifications = Notifications(self)
 
     def refresh_claude_auth(self):
         self.health.update(environment_status({'claude': self.commands.get('claude')}))
@@ -110,7 +112,7 @@ class App:
                 'config': self.config, 'providers': self.health, 'paused': self.engine.paused,
                 'sample_project': str(ROOT / 'sample-project'), 'server_time': time.time(),
                 'usage': self.usage.snapshot(), 'cli_update': self.cli_update.snapshot(),
-                'claude_update': self.claude_update.snapshot()}
+                'claude_update': self.claude_update.snapshot(), 'notifications': self.notifications.snapshot()}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -168,10 +170,26 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlparse(self.path).query)
                 return self.send(200, snapshot(self.app, (query.get('job_id') or [''])[0],
                     max(0, int((query.get('before') or ['0'])[0]))))
+            if path == '/api/decision-wait-stats':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                from team_waits import statistics
+                query = parse_qs(urlparse(self.path).query)
+                try:
+                    start = float(query['from'][0]) if query.get('from') else None
+                    end = float(query['to'][0]) if query.get('to') else None
+                    result = statistics(self.app.store, self.app.config.get('business_hours'), start, end)
+                except ValueError as exc:
+                    return self.send(400, {'error':str(exc)})
+                return self.send(200, result)
             if path == '/api/state':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
                 return self.send(200, self.app.state())
+            if path == '/api/notifications':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                return self.send(200, self.app.notifications.snapshot())
             if path == '/api/job/artifact':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -292,6 +310,17 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/codex-usage/refresh':
                 success = self.app.usage.refresh_now('codex')
                 result = {'success': success, 'usage': self.app.usage.snapshot()['codex']}
+            elif path == '/api/notifications':
+                if set(body) != {'windows_enabled'} or type(body['windows_enabled']) is not bool:
+                    raise ValueError('通知の有効・無効を指定してください。')
+                config = dict(self.app.config)
+                config['notifications'] = {'windows_enabled': body['windows_enabled'], 'business_hours_only': True}
+                self.app.save_config(config)
+                result = self.app.notifications.snapshot()
+            elif path == '/api/notifications/test':
+                from team_notifications import windows_summary
+                windows_summary({'decision':0,'completion':0,'accepted':0}, preview=True)
+                result = {'ok':True,'note':'Windowsへテスト通知を送信しました。実際の表示は端末で確認してください。'}
             elif path == '/api/claude-auth/refresh':
                 self.app.refresh_claude_auth()
                 result = {'authenticated': self.app.health.get('claude', {}).get('authenticated')}
@@ -485,6 +514,7 @@ def main():
     if args.port == 8790:
         threading.Thread(target=mobile_loop, args=(server.app,), daemon=True).start()
     server.app.usage.start()
+    server.app.notifications.start()
     server.app.cli_update.start()
     server.app.claude_update.start()
     threading.Thread(target=server.app.auth_loop, daemon=True).start()
@@ -511,6 +541,7 @@ def main():
         if server.app.claude_update.snapshot()['state'] == 'updating' and server.app.claude_update.thread:
             server.app.claude_update.thread.join(timeout=310)
         server.server_close()
+        server.app.notifications.stop()
         server.app.store.db.close()
         server.app.engine.handoff.close()
         server.app.data_lock.close()

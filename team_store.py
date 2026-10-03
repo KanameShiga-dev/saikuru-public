@@ -28,14 +28,52 @@ class Store:
         self.db.execute('PRAGMA synchronous=FULL')
         self.db.execute('CREATE TABLE IF NOT EXISTS objects (kind TEXT, id TEXT PRIMARY KEY, body TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS transitions (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, id TEXT, job_id TEXT, from_status TEXT, to_status TEXT, at REAL, reason TEXT)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS transition_job ON transitions(job_id, seq)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS metrics_meta (key TEXT PRIMARY KEY, value REAL)')
+        self.db.execute("INSERT OR IGNORE INTO metrics_meta VALUES ('started_at', ?)", (now(),))
         self.db.commit()
 
     def put(self, kind, obj):
         with self.lock:
             obj = copy.deepcopy(obj)
             obj['updated_at'] = now()
+            body = json.dumps(obj, ensure_ascii=False)
+            if kind in ('job', 'task'):
+                previous = self.db.execute('SELECT body FROM objects WHERE id=?', (obj['id'],)).fetchone()
+                old = json.loads(previous[0]).get('status') if previous else None
+                status = obj.get('status')
+                if old != status:
+                    job_id = obj['id'] if kind == 'job' else obj['job_id']
+                    reason = 'system' if status == 'interrupted' else 'other'
+                    if kind == 'job' and status == 'failed':
+                        reason = 'task_error'
+                    if reason != 'system':
+                        pending = self.db.execute("SELECT body FROM objects WHERE kind='approval' AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.status')='pending' ORDER BY rowid DESC", (job_id,)).fetchall()
+                        for (raw,) in pending:
+                            approval = json.loads(raw)
+                            if kind == 'job' or approval.get('task_id') == obj['id']:
+                                reason = approval.get('kind', 'other'); break
+                        if reason == 'other' and kind == 'job':
+                            reason = {'awaiting_approval':'plan', 'awaiting_acceptance':'completion'}.get(status, 'other')
+                        if reason == 'other':
+                            event = self.db.execute("SELECT body FROM events WHERE json_extract(body,'$.job_id')=? ORDER BY seq DESC LIMIT 1", (job_id,)).fetchone()
+                            if event:
+                                reason = json.loads(event[0]).get('type', 'other')
+                        if kind == 'job' and status == 'blocked' and reason not in {'repair_limit','task_error'}:
+                            tasks = self.db.execute("SELECT body FROM objects WHERE kind='task' AND json_extract(body,'$.job_id')=? ORDER BY rowid DESC", (job_id,)).fetchall()
+                            latest = max((json.loads(raw) for (raw,) in tasks), key=lambda t:t.get('updated_at',0), default={})
+                            report = latest.get('result') or {}
+                            if latest.get('status')=='blocked' and (report.get('questions') or report.get('question')):
+                                reason = 'question'
+                            elif report.get('status')=='needs_changes':
+                                reason = 'repair_limit'
+                            elif latest.get('status')=='failed':
+                                reason = 'task_error'
+                    self.db.execute('INSERT INTO transitions(kind,id,job_id,from_status,to_status,at,reason) VALUES (?,?,?,?,?,?,?)',
+                                    (kind, obj['id'], job_id, old, status, obj['updated_at'], reason))
             self.db.execute('INSERT INTO objects VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body',
-                            (kind, obj['id'], json.dumps(obj, ensure_ascii=False)))
+                            (kind, obj['id'], body))
             if self.depth == 0:
                 self.db.commit()
             return obj

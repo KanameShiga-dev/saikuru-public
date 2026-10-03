@@ -269,7 +269,7 @@ function foldDetailSections(body,task){
   const stopped=!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status);
   const scopeError=/未完了項目の引き継ぎには利用者の範囲指定/.test(task.summary||'');
   const completedReport=task.recovery_advice?.code==='task_completion';
-  const focus=requests.length?'.approval-box':stopped?(!completedReport&&(stopReason(task)||scopeError)?'#task-recovery':'#recovery-advice'):null;
+  const focus=requests.length?'.approval-box':(isStalledReview(task)||stopped)?'#decision-guide':null;
   const focusNode=focus?body.querySelector(focus):null;
   let focusFold=null;
   for(const [index,node] of [...body.children].entries()){
@@ -341,7 +341,7 @@ function questionForm(approval){
     investigate.onclick=async()=>{investigate.disabled=true;status.textContent='根拠の確認を依頼しています…';
       try{await api('/api/conflicts/investigate',{id:approval.id});await refresh();}catch(error){status.textContent=error.message;investigate.disabled=false;}};
     box.append(investigate,status);
-    if(approval.payload.analysis){box.append(section('AIによる確認結果・違い・影響・推奨案',approval.payload.analysis));if(approval.payload.analysis_checks?.length)box.append(section('確認した根拠',approval.payload.analysis_checks.join('\n')));}
+    if(approval.payload.analysis){box.append(section('AIの意見：確認結果・違い・影響・推奨案',approval.payload.analysis));if(approval.payload.analysis_checks?.length)box.append(section('確認した根拠',approval.payload.analysis_checks.join('\n')));}
   }
   if(approval.payload.summary){const details=el('details');details.append(el('summary',approval.kind==='context_conflict'?'新旧の内容と根拠を読む':'作業計画と背景を読む'),el('div',approval.payload.summary,'text-block'));box.append(details);}
   const drafts=answerDrafts.get(approval.id)||{};answerDrafts.set(approval.id,drafts);
@@ -484,6 +484,19 @@ function renderDetail(task,version) {
   const drafts={};$('detail-body').querySelectorAll('textarea').forEach(t=>drafts[t.id]=t.value);
   detailVersion=version;const job=state.jobs.find(j=>j.id===task.job_id);$('detail-title').textContent=task.title;
   const body=$('detail-body');body.replaceChildren(el('p',`${roles[task.role]} / ${task.profile.adapter} / ${task.profile.model} / ${task.profile.effort} · 試行 ${task.attempt}`),el('p',`状態: ${statuses[task.status]||task.status} · 依頼の状態: ${jobStatuses[job.status]||job.status}`));
+  if(!endedJob(task)&&group(task)===2){
+    const guide=el('section',undefined,'detail-section');guide.id='decision-guide';
+    guide.append(el('h3','停止理由・判断材料・次の操作'),el('p',task.summary||task.result?.summary||'下の確認事項と担当の報告を確認してください。'));
+    if(task.recovery_advice?.message)guide.append(el('p','統括の確認結果：'+task.recovery_advice.message));
+    const choices=el('div',undefined,'actions');
+    const jump=(label,target)=>choices.append(button(label,()=>{const dest=body.querySelector(target);if(!dest){notice('対象の操作欄がありません。担当の報告と履歴を確認してください。');return;}revealSection(dest);dest.scrollIntoView({block:'center'});const focus=dest.querySelector('button,textarea,input')||dest;focus.focus();}));
+    if(isStalledReview(task))jump('範囲を指定して修正を依頼','#manual-review-repair');
+    else if(pending(task.id).length)jump('判断材料を読んで回答','.approval-box');
+    else {jump('原因と復旧方法を確認','#recovery-advice');jump('補足・差し戻しを入力','#retry-note');}
+    jump('中止の確認へ','#cancel-job');
+    choices.append(button('保留して閉じる',()=>{$('detail-dialog').close();notice('保留しました。依頼は停止したままで、判断待ちにも残ります。');}));
+    guide.append(choices,el('p','操作を選ぶだけでは承認・再開しません。移動先で内容と変更済みの範囲を確認して送信します。','hint'));body.append(guide);
+  }
   if(['queued','cancelled'].includes(task.status)&&job.status==='blocked'){
     const blocker=[...state.tasks].reverse().find(t=>t.job_id===job.id&&t.role==='reviewer'&&t.status==='succeeded'&&t.result?.status==='needs_changes');
     const action=el('div',undefined,'stop-reason-box');
@@ -511,9 +524,11 @@ function renderDetail(task,version) {
     note.value=drafts[note.id]??proposal;
     const artifactPath=el('input');artifactPath.placeholder='成果物の相対パス（任意）：docs/plans/plan.md';artifactPath.value=job.artifacts?.[0]?.path||'';artifactPath.setAttribute('aria-label','確認する既存成果物の相対パス');
     note.placeholder='修正対象、許可する変更、変更しない範囲を入力してください。';
-    panel.append(el('h3','ボード内で指摘を修正する'),reviewResolutionHint(task,job),el('p','修正指示案は編集できます。送信するまで作業は開始しません。修正担当→通常レビュー→必要なセキュリティレビュー→成果確認へ進めます。自動修正の上限は変更しません。'),button('最新指摘から修正指示案を入れ直す',()=>{if(note.value!==proposal&&!confirm('編集中の指示を最新レビューから作った案に置き換えますか？'))return;note.value=proposal;note.dispatchEvent(new Event('input',{bubbles:true}));}),note,artifactPath,button('この範囲で修正を依頼',async()=>{
+    const check=el('input'),checkLabel=el('label',undefined,'check');check.type='checkbox';checkLabel.append(check,document.createTextNode('最新成果物・変更済みの内容と、入力した修正範囲を確認しました。'));
+    panel.append(el('h3','ボード内で指摘を修正する'),reviewResolutionHint(task,job),el('p','修正指示案は編集できます。送信するまで作業は開始しません。修正担当→通常レビュー→必要なセキュリティレビュー→成果確認へ進めます。自動修正の上限は変更しません。'),button('最新指摘から修正指示案を入れ直す',()=>{if(note.value!==proposal&&!confirm('編集中の指示を最新レビューから作った案に置き換えますか？'))return;note.value=proposal;note.dispatchEvent(new Event('input',{bubbles:true}));}),note,artifactPath,checkLabel,button('この範囲で修正を依頼',async()=>{
       if(!note.value.trim()){notice('修正範囲を入力してください。');return;}
-      if(confirm('入力した範囲で修正担当を開始しますか？')){
+      if(!check.checked){notice('最新成果物と修正範囲の確認にチェックを入れてください。');return;}
+      if(check.checked){
         try{await api('/api/tasks/repair-review',{id:task.id,note:note.value,artifact_path:artifactPath.value.trim(),checked_changes:true});await refresh();}
         catch(e){notice(e.message);}
       }
@@ -589,7 +604,7 @@ function renderDetail(task,version) {
     const label=el('label','回答・補足の入力欄');label.htmlFor=input.id;
     s.append(el('h3','回答・補足を入力して再開'),label,input,el('p','入力は再開する担当へ渡します。システムエラーの場合は、原因を解消してから再開してください。','hint'),button('回答・補足を送って再試行',async()=>{if(confirm('既に行われた編集や処理を確認しましたか？ 同じ依頼が再実行されます。'))await api('/api/retry',{id:task.id,note:input.value,checked_changes:true});}));body.append(s);
   }
-  if(!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status))body.append(button('この依頼全体を中止',async()=>{if(confirm('実行中・待機中の作業を中止します。既存の変更は自動では戻しません。'))await api('/api/cancel',{id:job.id});},'danger'));
+  if(!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status)){const cancel=button('この依頼全体を中止',async()=>{if(confirm('実行中・待機中の作業を中止します。既存の変更は自動では戻しません。'))await api('/api/cancel',{id:job.id});},'danger');cancel.id='cancel-job';body.append(cancel);}
   body.querySelectorAll('textarea').forEach(t=>{if(drafts[t.id])t.value=drafts[t.id];});
   foldDetailSections(body,task);
 }
@@ -614,6 +629,7 @@ function decisionHelp(task){
   let text,target;
   if(hasChoices){text='「判断が必要です」の各選択肢を選び、必要な補足を入力して「まとめて回答して続行」を押してください。';target='.approval-box';}
   else if(requests.length){text='「操作の承認」または成果の確認欄で回答します。補足はその欄の入力欄に記入し、承認・受領または拒否を選んでください。';target='.approval-box';}
+  else if(isStalledReview(task)){text='自動修正の上限です。「ボード内で指摘を修正する」で最新指摘と成果物を確認し、許可する修正範囲を送信してください。';target='#manual-review-repair';}
   else if(stopReason(task)){const reason=stopReason(task);text=reason.title+'。'+reason.detail;target='#task-recovery';}
   else if(pythonFailure(task)){text='Pythonの起動失敗で停止しています。「停止理由と次の操作」の「原因を確認して回答案を作る」で統括側の起動確認を行い、結果に応じた回答案を取得してください。工程間の移管欄は使いません。';target='#recovery-advice';}
   else if(task.recovery_advice?.code==='task_completion'){text='担当工程の完了報告を、未完了作業の移管として返したため停止しています。「停止理由と次の操作」の回答案を入力して再報告してください。移管欄は使いません。';target='#recovery-advice';}
@@ -642,6 +658,8 @@ function speakDecision(preview=false,message='作業の判断事項が発生し�
   try{synth.speak(utterance);}catch(error){notice('音声を再生できません。画面内の通知を使ってください。');voiceUtterance=null;}
 }
 function notificationButton(){
+  $('service-notifications').textContent=state?.notifications?.windows_enabled?'常駐PC通知：有効（停止する）':'常駐PC通知を有効にする（勤務時間内）';
+  $('service-notification-status').textContent=state?.notifications?.error||'常駐通知はブラウザーを閉じても動作します。勤務時間外は次の勤務開始にまとめて通知します。Windowsへのログインが必要です。';
   const supported='Notification' in window&&window.isSecureContext;
   $('decision-notifications').textContent=!supported?'画面内で判断を通知':notificationSetting()&&Notification.permission==='granted'?'PC通知：有効（クリックで停止）':'PC通知を有効にする';
   $('decision-notifications').disabled=!supported;
@@ -649,7 +667,7 @@ function notificationButton(){
 }
 function decisionItems(){
   return state.tasks.filter(t=>!endedJob(t)).flatMap(task=>{
-    const approvals=pending(task.id).filter(a=>a.kind!=='tool'||a.payload.questions?.length);
+    const approvals=pending(task.id);
     const completion=approvals.find(a=>a.kind==='completion');
     if(completion){
       const job=state.jobs.find(j=>j.id===task.job_id);
@@ -680,6 +698,9 @@ function notifyDecisions(){
   notificationButton();
   renderDecisionBanner(items);
   for(const [key,n] of decisionNotificationObjects)if(!active.has(key)){n.close();decisionNotificationObjects.delete(key);}
+  const hours=state.config.business_hours||{utc_offset_minutes:540,start:'09:00',end:'18:00',workdays:[0,1,2,3,4],holidays:[]};
+  const local=new Date(Date.now()+hours.utc_offset_minutes*60000),clock=local.toISOString().slice(11,16),day=(local.getUTCDay()+6)%7;
+  if(!hours.workdays.includes(day)||hours.holidays.includes(local.toISOString().slice(0,10))||clock<hours.start||clock>=hours.end)return;
   let newDecisions=0,newVoice=null;
   for(const item of items){
     try{for(const key of JSON.parse(localStorage.getItem('agent-team-decision-seen')||'[]'))seenDecisions.add(key);}catch(error){}
@@ -689,7 +710,7 @@ function notifyDecisions(){
     seenDecisions.add(item.key);
     seenDecisions=new Set([...seenDecisions].slice(-300));
     try{localStorage.setItem('agent-team-decision-seen',JSON.stringify([...seenDecisions]));}catch(error){}
-    if('Notification' in window&&notificationSetting()&&Notification.permission==='granted'){
+    if('Notification' in window&&notificationSetting()&&Notification.permission==='granted'&&!state.notifications?.windows_enabled){
       try{
         const n=new Notification('采来 — サイクル —：'+item.label,{body:item.detail||'作業ダッシュボードを開いて判断してください。',tag:'agent-team-'+item.task.id});
         decisionNotificationObjects.set(item.key,n);
@@ -720,6 +741,15 @@ $('decision-notifications').addEventListener('click',async()=>{
   }catch(error){notice('このブラウザではPC通知を有効にできません。画面内の通知を使います。');}
   notificationButton();
 });
+$('service-notifications').addEventListener('click',()=>action(async()=>{
+  const enabled=!state.notifications?.windows_enabled;
+  await api('/api/notifications',{windows_enabled:enabled});
+  notice(enabled?'勤務時間内の常駐PC通知を有効にしました。通知本文は件数のみです。':'常駐PC通知を停止しました。画面内の通知は続きます。');
+}));
+$('service-notification-test').addEventListener('click',()=>action(async()=>{
+  notice('Windowsへテスト通知を送っています…');
+  const result=await api('/api/notifications/test',{});notice(result.note);
+}));
 $('filter').addEventListener('change',render);
 $('menu-models').addEventListener('click',openModelPanel);
 $('menu-mobile').addEventListener('click',()=>{const m=$('mobile-access');if(m.hidden){notice('スマホ接続の情報はまだ読み込まれていません。少し待ってから再度開いてください。');return;}m.open=true;m.scrollIntoView({behavior:'smooth',block:'start'});});

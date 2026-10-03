@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 let state=null, selected=null, busy=false, archivePreview=null, pollTimer=null, movePreview=null, harnessPreview=null;
-const categoryDrafts=new Map();
+
 const labels={name:'プロジェクト名',purpose:'目的・利用者',category:'分類（ソース／配備コピー／資料など）',status:'管理状況（未評価／運用中／保留／完了など）',owner:'管理担当',source_path:'元ソースのパス（配備コピーの場合・未確認なら空欄）',build_method:'ビルド・起動方法',verification_method:'検証方法・証拠の保存場所',completion_criteria:'完了と判断する条件',next_action:'次に行うこと・未確認事項',notes:'制約・注意点・関連情報',harness_proposal:'ハーネス化提案（下書き）'};
 const limits={name:160,purpose:1500,category:80,status:80,owner:120,source_path:1000,build_method:2000,verification_method:2000,completion_criteria:2000,next_action:2000,notes:3000,harness_proposal:8000};
 const managementGroups=[
@@ -15,7 +15,7 @@ function defaultManagementValues(p){return {name:p.path.split(/[\\/]/).filter(Bo
 function renderManagementFields(p){
  const defaults=defaultManagementValues(p);$('fields').replaceChildren();
  for(const[id,title,keys]of managementGroups){
-  const section=node('details',undefined,'detail-section management-group');section.id='management-'+id;section.dataset.inputKind='manual';
+  const section=node('details',undefined,'detail-section management-group');section.id='management-'+id;section.setAttribute('role','tabpanel');section.setAttribute('aria-labelledby','ledger-tab-'+(id==='basic'?'basic':id==='harness'?'harness':'execution'));section.dataset.inputKind='manual';
   const summary=node('summary',title+' ');summary.append(node('span','○ 入力なし','input-indicator'));section.append(summary);
   for(const key of keys){
    let generate=null;
@@ -229,7 +229,7 @@ function render(){
  const items=state.projects.filter(p=>(showRetired||!isRetiredProject(p))&&(!category||p.category===category)&&JSON.stringify([p.name,p.path,p.purpose,p.observation.technology]).toLowerCase().includes(q));
  $('count').textContent=`${items.length}件表示 ／ 台帳 ${state.projects.length}件（資料・候補を含む）${hidden?` ／ アーカイブ・削除 ${hidden}件は非表示`:''}`;
  $('list').replaceChildren();
- const categories=[...new Set(state.projects.map(p=>p.category).filter(Boolean))];
+
  for(const p of items){
   const card=node('article',undefined,'project'),button=node('button',p.name);button.type='button';button.dataset.projectId=p.id;
   if(selected?.id===p.id&&!$('editor').hidden){card.classList.add('selected');button.setAttribute('aria-current','true');}
@@ -240,31 +240,6 @@ function render(){
   const keyFields=['purpose','owner','build_method','verification_method','completion_criteria'],known=keyFields.filter(k=>p[k]&&p[k]!=='未確認').length;
   const fill=node('div',undefined,'fill'),meter=node('span',undefined,'meter'),bar=node('i');bar.style.width=(known/keyFields.length*100)+'%';meter.append(bar);meter.setAttribute('aria-hidden','true');
   fill.append(node('span',`主要な管理項目 ${known}/${keyFields.length} 確認済み`),meter);if(known<keyFields.length)fill.append(node('span',`未確認 ${keyFields.length-known}項目`,'unknown'));card.append(fill);
-  const form=node('form',undefined,'card-category-form'),label=node('label','分類を編集');
-  const draft=categoryDrafts.get(p.id);
-  const input=node('input');input.type='text';input.value=draft?.value??p.category??'';input.maxLength=limits.category;input.required=true;
-  const suggestions=node('datalist');suggestions.id='category-options-'+p.id;
-  for(const value of categories){const option=node('option');option.value=value;suggestions.append(option);}
-  input.setAttribute('list',suggestions.id);
-  const save=node('button','分類を保存');save.type='submit';save.disabled=!input.value.trim()||input.value.trim()===p.category;
-  const feedback=node('small');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');
-  input.addEventListener('input',()=>{
-   const value=input.value.trim();
-   if(value===p.category)categoryDrafts.delete(p.id);
-   else categoryDrafts.set(p.id,{value:input.value,expectedUpdatedAt:draft?.expectedUpdatedAt??p.manual_updated_at});
-   save.disabled=!value||value===p.category;
-  });
-  label.append(input);form.append(label,suggestions,save,feedback);
-  form.addEventListener('submit',async e=>{
-   e.preventDefault();const value=input.value.trim();if(!value||value===p.category)return;
-   save.disabled=true;feedback.className='';feedback.textContent='分類を保存しています…';
-   try{await api('/api/ledger/update',{id:p.id,fields:{category:value},expected_updated_at:categoryDrafts.get(p.id)?.expectedUpdatedAt??p.manual_updated_at});}
-   catch(err){feedback.textContent=err.message;feedback.className='error';save.disabled=false;return;}
-   categoryDrafts.delete(p.id);
-   try{await load();message(`${p.name} の分類を保存しました。`);}
-   catch(err){feedback.textContent='分類は保存しました。表示の更新に失敗しました: '+err.message;feedback.className='error';}
-  });
-  card.append(form);
   if((state.archives||[]).some(r=>r.project_id===p.id&&r.state==='completed'))card.append(node('p','アーカイブ保存済み（詳細に保存先）'));
   if(!p.observation.exists)card.append(node('p','フォルダが見つかりません（履歴は保持）。','error'));
   $('list').append(card);
@@ -276,10 +251,10 @@ function renderMetadata(p){const o=p.observation,g=o.git,dl=node('dl');const inf
 function showEditor(){const ed=$('editor');ed.hidden=false;$('editor-placeholder').hidden=true;markSelected();if(matchMedia('(max-width:980px)').matches)ed.scrollIntoView({behavior:'smooth',block:'start'});else ed.scrollTop=0;}
 function hideEditor(){$('editor').hidden=true;$('editor-placeholder').hidden=false;markSelected();}
 function markSelected(){for(const card of document.querySelectorAll('#list .project')){const b=card.querySelector('button[data-project-id]'),on=!$('editor').hidden&&b?.dataset.projectId===selected?.id;card.classList.toggle('selected',on);if(b){if(on)b.setAttribute('aria-current','true');else b.removeAttribute('aria-current');}}}
-function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').textContent=p.name;$('path').textContent=p.path;$('save-message').textContent='';renderMetadata(p);renderManagementFields(p);$('archive-feedback').textContent='';$('archive-feedback').className='';$('github-repositories').value='';archivePreview=null;renderRelations(p);$('move-destination').value='';$('move-feedback').textContent='';movePreview=null;for(const section of $('editor').querySelectorAll('details.detail-section'))section.open=false;refreshArchive();updateSectionIndicators();showEditor();}
+function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').textContent=p.name;$('path').textContent=p.path;$('save-message').textContent='';renderMetadata(p);renderManagementFields(p);$('archive-feedback').textContent='';$('archive-feedback').className='';$('github-repositories').value='';archivePreview=null;renderRelations(p);$('move-destination').value='';$('move-feedback').textContent='';movePreview=null;for(const section of $('editor').querySelectorAll('details.detail-section'))section.open=false;refreshArchive();updateSectionIndicators();selectLedgerTab('basic');showEditor();}
 $('edit-form').addEventListener('input',updateSectionIndicators);
 $('edit-form').addEventListener('change',updateSectionIndicators);
-$('edit-form').addEventListener('submit',async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const fields=Object.fromEntries(new FormData(e.target));await api('/api/ledger/update',{id:selected.id,fields,expected_updated_at:selected.manual_updated_at});await load();const fresh=state.projects.find(p=>p.id===selected.id);if(fresh)openProjectDetails(fresh);message('台帳を保存しました。変更前のDBと編集履歴も保持しています。');$('save-message').textContent='保存しました。';}catch(err){$('save-message').textContent=err.message;$('management-section').open=true;}finally{button.disabled=false;}});
+$('edit-form').addEventListener('submit',async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const fields=Object.fromEntries(new FormData(e.target));await api('/api/ledger/update',{id:selected.id,fields,expected_updated_at:selected.manual_updated_at});await load();const fresh=state.projects.find(p=>p.id===selected.id);if(fresh)openProjectDetails(fresh);message('台帳を保存しました。変更前のDBと編集履歴も保持しています。');$('save-message').textContent='保存しました。';}catch(err){$('save-message').textContent=err.message;selectLedgerTab('basic');$('management-section').open=true;}finally{button.disabled=false;}});
 $('show-retired').checked=false;$('close').onclick=hideEditor;$('search').oninput=render;$('category').onchange=render;$('show-retired').onchange=render;
 $('scan').onclick=async()=>{if(busy)return;busy=true;$('scan').disabled=true;message('C:\\Projects を調査しています。プロジェクトのコードは実行しません。');try{const r=await api('/api/ledger/scan',{});await load();message(`再調査して登録しました。候補 ${r.discovered}件、取得エラー ${r.errors.length}件。`);}catch(e){message(e.message,true);}finally{busy=false;$('scan').disabled=false;}};
 $('backup').onclick=async()=>{try{const r=await api('/api/ledger/backup',{});message(`バックアップ：data/${r.backup}`);}catch(e){message(e.message,true);}};
@@ -365,3 +340,19 @@ $('move-form').onsubmit=async e=>{e.preventDefault();const button=e.submitter;bu
 load().catch(e=>message(e.message,true));
 
 $('list').addEventListener('click',e=>{const button=e.target.closest('button[data-project-id]');if(!button)return;try{openProjectDetails(state.projects.find(p=>p.id===button.dataset.projectId));}catch(err){const error=node('p','詳細画面を開けません：'+err.message,'error');button.parentElement.append(error);message(error.textContent,true);}});
+
+// Keep every field mounted: switching tabs preserves unsaved drafts.
+function selectLedgerTab(tab){
+ const groups={basic:['basic'],execution:['source','verification','next'],harness:['harness'],observations:[],management:[]};
+ for(const b of document.querySelectorAll('[data-ledger-tab]')){const on=b.dataset.ledgerTab===tab;b.setAttribute('aria-selected',String(on));b.tabIndex=on?0:-1;b.setAttribute('aria-controls',b.dataset.ledgerTab==='observations'?'metadata-section relationship-section':b.dataset.ledgerTab==='management'?'ledger-danger':groups[b.dataset.ledgerTab].map(id=>'management-'+id).join(' '));}
+ for(const [id] of managementGroups){const pane=$('management-'+id);if(pane){pane.hidden=!groups[tab].includes(id);if(!pane.hidden)pane.open=true;}}
+ $('management-section').hidden=!groups[tab].length;$('management-section').open=true;
+ $('metadata-section').hidden=$('relationship-section').hidden=tab!=='observations';
+ $('ledger-danger').hidden=tab!=='management';
+}
+for(const b of document.querySelectorAll('[data-ledger-tab]')){
+ b.onclick=()=>selectLedgerTab(b.dataset.ledgerTab);
+ b.onkeydown=e=>{const all=[...document.querySelectorAll('[data-ledger-tab]')],i=all.indexOf(b);let next;
+ if(e.key==='ArrowRight')next=all[(i+1)%all.length];else if(e.key==='ArrowLeft')next=all[(i+all.length-1)%all.length];else if(e.key==='Home')next=all[0];else if(e.key==='End')next=all.at(-1);
+ if(next){e.preventDefault();selectLedgerTab(next.dataset.ledgerTab);next.focus();}};
+}

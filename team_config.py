@@ -41,6 +41,7 @@ def discover():
 
 
 def default_config():
+    from team_worktime import DEFAULT
     return {
         'schema_version': 1,
         'automatic_operations': False,
@@ -50,6 +51,8 @@ def default_config():
         'task_timeout_seconds': 1800,
         'approval_timeout_seconds': 900,
         'max_repairs': 2,
+        'notifications': {'windows_enabled': False, 'business_hours_only': True},
+        'business_hours': json.loads(json.dumps(DEFAULT)),
         'roles': {'planner': 'codex-standard', 'builder': 'claude-standard',
                   'researcher': 'codex-standard', 'reviewer': 'codex-standard'},
         'profiles': {
@@ -65,11 +68,18 @@ def load_config(data):
     if not path.exists():
         path.write_text(json.dumps(default_config(), ensure_ascii=False, indent=2), encoding='utf-8')
     config = json.loads(path.read_text(encoding='utf-8'))
+    config.setdefault('business_hours', default_config()['business_hours'])
+    config.setdefault('notifications', default_config()['notifications'])
     validate_config(config)
     return config
 
 
 def validate_config(config):
+    from team_worktime import validate, DEFAULT
+    validate(config.get('business_hours', DEFAULT))
+    notifications = config.get('notifications', {'windows_enabled':False,'business_hours_only':True})
+    if not isinstance(notifications, dict) or set(notifications) != {'windows_enabled','business_hours_only'} or any(type(v) is not bool for v in notifications.values()):
+        raise ValueError('通知設定が不正です。')
     decision = config.get('decision', {'provider':'ollama','model':'tev1:0.8b','shadow':True})
     if (not isinstance(decision, dict) or set(decision) != {'provider','model','shadow'}
             or decision['provider'] not in {'auto','ollama','decisions','luna','disabled'}

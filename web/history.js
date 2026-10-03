@@ -11,6 +11,7 @@ const origins={ledger:'台帳からの依頼',new:'新規依頼',unrecorded:'入
 const roles={planner:'計画',researcher:'調査',builder:'実装',reviewer:'レビュー'};
 const approvalKinds={plan:'計画の承認',tool:'操作の承認',question:'質問への回答',completion:'成果の確認',context_conflict:'情報の矛盾の確認',scope_transfer:'範囲の引き継ぎ'};
 const approvalStates={pending:'未判断',approved:'承認',denied:'却下',expired:'期限切れ',superseded:'置き換え',cancelled:'取消'};
+const waitReasons={...approvalKinds,system:'システム停止',repair_limit:'修正上限',task_error:'担当の失敗',other:'その他の停止'};
 const feedTypes=[['approval','確認・承認'],['step','工程の進行'],['stop','再試行・停止'],['other','その他']];
 const eventKind=t=>/approv|scope_transferred|benchmark_permission/.test(t)?'approval':/^(retry|repair_limit|task_error|cancelled|scheduler_error|recovery_advice|conflict_)/.test(t)?'stop':/^(job_created|task_|progress|review_followup|manual_review_repair|model_|shared_document_read|handoff_fact)/.test(t)?'step':'other';
 let state={jobs:[],tasks:[]},projectNames=new Map(),selected='',detailData=null,cursor=null,version=0,loading=false;
@@ -47,6 +48,50 @@ function renderList(){
   }));
   if(!list.length)$('jobs').append(node('p','条件に一致する依頼がありません。','hint'));
 }
+function filterChanged(){
+  const list=filtered();
+  if(!list.some(j=>j.id===selected)){
+    selected=list[0]?.id||''; ++version;detailData=null;cursor=null;
+    if(selected)detail(selected,false);
+    else $('detail').replaceChildren(node('p','条件に一致する依頼がありません。','hint'));
+  }
+  renderList();
+}
+function waitsView(w){
+  const panel=node('section',undefined,'wait-detail');panel.append(node('h3','人の判断待ち'));
+  if(!w?.measured){panel.append(node('p','計測開始前の依頼です。過去の待ち時間は推測しません。','hint'));return panel;}
+  panel.append(node('p',`勤務時間内 ${dur(w.inside_seconds)} ／ 時間外（参考）${dur(w.outside_seconds)} ／ システム停止 ${dur(w.system_seconds)}`));
+  if(w.incomplete)panel.append(node('p','計算範囲外の区間があり、合計は取得済み分です。','hint'));
+  for(const i of w.intervals){
+    const row=node('div',undefined,'wait-row');
+    row.append(node('strong',i.category==='system'?'システム停止（指標から除外）':waitReasons[i.reason]||'その他の停止'),
+      node('p',`${date(i.opened_at)} 〜 ${i.open?'継続中（'+date(i.as_of)+'時点）':date(i.closed_at)}`),
+      node('p',i.error||`勤務時間内 ${dur(i.inside_seconds)} ／ 時間外 ${dur(i.outside_seconds)}`));
+    const track=node('div',undefined,'wait-track');track.setAttribute('aria-label','勤務時間内は塗りつぶし、時間外は斜線');
+    const span=i.as_of-i.opened_at;
+    for(const [a,b] of i.business_segments||[]){const bar=node('span',undefined,'wait-business');bar.style.left=((a-i.opened_at)/span*100)+'%';bar.style.width=((b-a)/span*100)+'%';track.append(bar);}
+    row.append(track);panel.append(row);
+  }
+  if(!w.intervals.length)panel.append(node('p','記録された判断待ちはありません。'));
+  return panel;
+}
+async function loadWaitStats(){
+  const btn=$('wait-refresh');btn.disabled=true;
+  try{
+    const a=$('wait-from').value,b=$('wait-to').value;
+    const q=new URLSearchParams();
+    if(a)q.set('from',String(new Date(a+'T00:00:00+09:00').getTime()/1000));
+    if(b)q.set('to',String(new Date(b+'T00:00:00+09:00').getTime()/1000+86400));
+    const r=await fetch('/api/decision-wait-stats?'+q),d=await r.json();if(!r.ok)throw Error(d.error||'集計できません。');
+    const cfg=d.business_hours;const days=['月','火','水','木','金','土','日'];
+    $('wait-hours').textContent=`勤務時間：${cfg.workdays.map(x=>days[x]).join('・')} ${cfg.start}〜${cfg.end} UTC${cfg.utc_offset_minutes>=0?'+':''}${cfg.utc_offset_minutes/60} ／ 休日 ${cfg.holidays.length}日。期間指定は日本時間。`;
+    const table=node('table'),head=node('tr');
+    for(const label of ['種類','区間数','中央値','90パーセンタイル','最大（勤務時間内）'])head.append(node('th',label));table.append(head);
+    for(const row of d.rows){const tr=node('tr');for(const value of [waitReasons[row.reason]||'その他の停止',row.count,dur(row.median_seconds),dur(row.p90_seconds),dur(row.max_seconds)])tr.append(node('td',value));table.append(tr);}
+    $('wait-stats').replaceChildren(table,node('p',`時間外 ${dur(d.outside_seconds)} ／ システム停止 ${dur(d.system_seconds)} ／ 計測開始前 ${d.unmeasured_jobs}件 ／ 計算範囲外 ${d.out_of_range}区間`));
+  }catch(e){$('wait-stats').replaceChildren(node('p',e.message+' 期間で集計を押して再試行できます。'));}
+  finally{btn.disabled=false;}
+}
 function stats(tasks,approvals){
   const run=tasks.reduce((a,t)=>{const e=taskEnd(t);return a+(t.started_at&&e?e-t.started_at:0);},0);
   const retries=tasks.reduce((a,t)=>a+Math.max(0,(t.attempt||1)-1),0);
@@ -54,12 +99,12 @@ function stats(tasks,approvals){
   for(const [l,v] of [['工程',tasks.length+'件'],['実行時間の合計',dur(run)],['再試行',retries+'回'],['確認・承認',approvals.length+'件']]){const c=node('div');c.append(node('div',l,'l'),node('div',v,'v'));box.append(c);}
   return box;
 }
-function gantt(job,tasks){
+function gantt(job,tasks,waits){
   const wrap=node('div',undefined,'gantt');
   if(!tasks.length){wrap.append(node('p','作業記録はありません。','hint'));return wrap;}
-  const times=[job.created_at,...tasks.flatMap(t=>[t.created_at,t.started_at,taskEnd(t)])].filter(Boolean);
+  const times=[job.created_at,...tasks.flatMap(t=>[t.created_at,t.started_at,taskEnd(t)]),...(waits?.intervals||[]).flatMap(i=>[i.opened_at,i.as_of])].filter(Boolean);
   const min=Math.min(...times),max=Math.max(min+60,...times),span=max-min,multiDay=md(min)!==md(max);
-  wrap.setAttribute('role','img');wrap.setAttribute('aria-label','工程の時系列。'+tasks.map(t=>t.title+'：'+(statuses[t.status]||t.status)).join('、'));
+  wrap.setAttribute('role','img');wrap.setAttribute('aria-label','工程の時系列。'+tasks.map(t=>t.title+'：'+(statuses[t.status]||t.status)).join('、')+(waits?.intervals?.length?'。判断待ち '+waits.intervals.length+'区間。詳細の人の判断待ち欄で開始・終了と時間を確認できます。':''));
   const axis=node('div',undefined,'axis'),ticks=node('div',undefined,'ticks');axis.append(node('span'),ticks);
   for(const r of [0,.25,.5,.75,1]){const t=min+r*span,s=node('span',(multiDay?md(t)+' ':'')+hm(t));s.style.left=(r*100)+'%';ticks.append(s);}
   wrap.append(axis);
@@ -75,6 +120,13 @@ function gantt(job,tasks){
     track.append(bar);
     if(width<30){const out=node('span',label,'outlabel o-'+k);if(left+width>55)out.style.right=`calc(${100-left}% + 6px)`;else out.style.left=`calc(${left+width}% + 6px)`;track.append(out);}
     lane.append(name,track);wrap.append(lane);
+  }
+  for(const i of waits?.intervals||[]){
+    const lane=node('div',undefined,'lane'),name=node('div',undefined,'name'),track=node('div',undefined,'track');
+    name.append(node('strong',i.category==='system'?'システム停止':'人の判断待ち'),node('small',`${waitReasons[i.reason]||'その他'} ／ 勤務内 ${dur(i.inside_seconds)}・時間外 ${dur(i.outside_seconds)}`));
+    const bar=node('span',undefined,'bar wait-track');bar.style.left=((i.opened_at-min)/span*100)+'%';bar.style.width=((i.as_of-i.opened_at)/span*100)+'%';bar.title=date(i.opened_at)+' 〜 '+(i.open?'継続中':date(i.closed_at));
+    for(const [a,b] of i.business_segments||[]){const segment=node('span',undefined,'wait-business');segment.style.left=((a-i.opened_at)/(i.as_of-i.opened_at)*100)+'%';segment.style.width=((b-a)/(i.as_of-i.opened_at)*100)+'%';bar.append(segment);}
+    track.append(bar);lane.append(name,track);wrap.append(lane);
   }
   const legend=node('div',undefined,'legend');
   for(const [k,l] of [['done','担当工程終了'],['run','実行中（ページ更新時点まで）'],['ask','判断・確認待ち'],['stop','失敗・中断']]){const s=node('span',l);s.prepend(node('i',undefined,'sw b-'+k));legend.append(s);}
@@ -109,13 +161,15 @@ async function detail(id,scroll){
     const usage=node('details',undefined,'usage');usage.append(node('summary','消費トークンと利用枠（取得済み分）'),node('p','依頼合計：'+usageText(sum)),
       node('p','トークン記録あり '+sum.measured_runs+' / 試行 '+sum.expected_runs+'。未取得項目は合計に含まれません。入力とキャッシュの定義はCLIごとに異なるため単純加算しません。','hint'));
     for(const t of tasks){const c=t.consumption||{},q=node('div',undefined,'quota-row');q.append(node('strong',t.title+' — 利用枠（最新試行）'),node('p','開始前：'+quotaText(c.quota_before)),node('p','終了後：'+quotaText(c.quota_after)));usage.append(q);}
+    for(const t of tasks)for(const run of t.consumption?.runs||[])usage.append(node('p',`${t.title} ／ 試行${run.attempt??'未記録'} ／ ${run.provider||'未記録'} ${run.model||'モデル未記録'} ／ ${statuses[run.status]||run.status||'状態未記録'}：${usageText(run)}`));
     const types=node('div',undefined,'types');types.setAttribute('role','group');types.setAttribute('aria-label','表示する記録の種類');
     for(const [k,l] of feedTypes){const lab=node('label'),cb=node('input');cb.type='checkbox';cb.checked=shownTypes.has(k);cb.onchange=()=>{cb.checked?shownTypes.add(k):shownTypes.delete(k);drawFeed();};lab.append(cb,document.createTextNode(l));types.append(lab);}
     const older=node('button','過去の記録をさらに表示','older');older.type='button';older.hidden=!cursor;
     older.onclick=async()=>{older.disabled=true;try{const more=await api('?job_id='+encodeURIComponent(id)+'&before='+cursor);if(token!==version)return;detailData.events.push(...more.events);cursor=more.next_before;older.hidden=!cursor;drawFeed();}catch(e){$('status').textContent=e.message;}finally{older.disabled=false;}};
     $('detail').replaceChildren(head,node('h2',j.title),node('div',projectName(j.document_source||j.origin.project||j.project)+' ／ 依頼者・承認者：未記録（利用者ログイン未実装）','sub'),
       node('div','対象：'+paths(j).join(' / '),'path'),stats(tasks,d.approvals),
-      node('h3','① 工程の時系列'),gantt(j,tasks),
+      node('h3','① 工程の時系列'),gantt(j,tasks,d.waits),
+      waitsView(d.waits),
       node('h3','②③ 承認の記録と作業の動き'),types,Object.assign(node('ol',undefined,'feed'),{id:'feed'}),older,
       node('p','新しい順。作業の動きは200件ずつ過去へさかのぼれます。','hint'),usage);
     drawFeed();
@@ -136,5 +190,6 @@ async function load(){
   }catch(e){$('status').textContent=e.message+' 「最新の状態に更新」で再試行できます。';}
   finally{loading=false;$('refresh').disabled=false;}
 }
-for(const id of ['project','origin','search'])$(id).addEventListener('input',renderList);
-$('refresh').onclick=()=>load();load();
+for(const id of ['project','origin','search'])$(id).addEventListener('input',filterChanged);
+$('wait-refresh').onclick=loadWaitStats;
+$('refresh').onclick=()=>{load();loadWaitStats();};load();loadWaitStats();

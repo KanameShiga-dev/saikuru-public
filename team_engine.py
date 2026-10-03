@@ -152,6 +152,7 @@ class Context:
         self.agent_run = {'id': uid(), 'name': definition.name, 'provider': self.task['profile']['adapter'],
 
                           'attempt': self.task['attempt'], 'status': 'starting', 'session_id': None,
+                          'model': self.task['profile']['model'],
 
                           'started_at': now(), 'definition_hash': definition.digest, 'sandbox': definition.sandbox,
                           'quota_before': self.engine.usage_snapshot().get(self.task['profile']['adapter'], {})}

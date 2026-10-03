@@ -42,3 +42,6 @@ main{max-width:1440px}
 .danger-zone h3{margin:0 0 4px;color:var(--red);font-size:var(--fs-m)}
 .danger-zone>p{margin:0 0 6px;font-size:var(--fs-s)}
 @media(max-width:980px){.ledger-split{grid-template-columns:minmax(0,1fr)}.editor-column{position:static}.editor-panel{max-height:none}}
+
+.ledger-detail-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0}.ledger-detail-tabs [aria-selected="true"]{background:var(--green);color:var(--on-accent)}
+#editor [hidden]{display:none!important}
