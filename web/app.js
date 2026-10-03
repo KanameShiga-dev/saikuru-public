@@ -610,6 +610,14 @@ function notificationButton(){
 function decisionItems(){
   return state.tasks.filter(t=>!endedJob(t)).flatMap(task=>{
     const approvals=pending(task.id).filter(a=>a.kind!=='tool'||a.payload.questions?.length);
+    const completion=approvals.find(a=>a.kind==='completion');
+    if(completion){
+      const job=state.jobs.find(j=>j.id===task.job_id);
+      const remaining=completion.payload.pending_items?.length;
+      return [{task,key:'job-complete:'+completion.id,label:'依頼全体の作業工程が終了しました',
+        detail:(job?.title||task.title)+'。'+(remaining?'未完了項目があります。成果物・検証結果・残作業を確認してください。':'成果物と検証結果を確認して受け入れてください。'),
+        voice:'依頼全体の作業工程が終了しました。成果を確認してください。',completion:true}];
+    }
     if(approvals.length)return [{task,key:approvals.map(a=>a.id).sort().join(':'),label:'判断・確認をお願いします'}];
     if(['blocked','failed','interrupted'].includes(task.status)){const reason=stopReason(task);return [{task,key:`${task.id}:${task.attempt}:${task.status}:${reason?.code||'generic'}`,label:reason?.title||(task.status==='blocked'?'判断が必要です':'作業が停止しています'),detail:reason?.detail,voice:reason?.title}];}
     return [];
@@ -643,7 +651,7 @@ function notifyDecisions(){
     later.onclick=()=>{popup.remove();decisionPopupObjects.delete(item.key);};
     actions.append(open,later);popup.append(title,description);
     if(item.detail)popup.append(el('p',item.detail));
-    popup.append(el('small','通知を閉じても、作業の停止状態は続きます。'),actions);
+    popup.append(el('small',item.completion?'通知を閉じても成果の確認待ちは残ります。工程終了は実機検証済みの保証ではありません。':'通知を閉じても、作業の停止状態は続きます。'),actions);
     $('decision-popups').append(popup);decisionPopupObjects.set(item.key,popup);
     if('Notification' in window&&notificationSetting()&&Notification.permission==='granted'){
       try{
