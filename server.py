@@ -161,6 +161,13 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == '/health':
                 return self.send(200, {'status': 'ok', 'app': 'agent-team', 'version': '0.1.0'})
+            if path == '/api/project-history':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                from team_history import snapshot
+                query = parse_qs(urlparse(self.path).query)
+                return self.send(200, snapshot(self.app, (query.get('job_id') or [''])[0],
+                    max(0, int((query.get('before') or ['0'])[0]))))
             if path == '/api/state':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -226,13 +233,13 @@ class Handler(BaseHTTPRequestHandler):
                     'code': gateway.secret['code'] if gateway else None,
                     'fingerprint': gateway.fingerprint if gateway else None,
                     'error': self.app.mobile_error})
-            files = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
+            files = {'/history': 'history.html', '/history.js': 'history.js', '/history.css': 'history.css', '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
                      '/operation-tests': 'operation-tests.html', '/operation-tests.js': 'operation-tests.js',
                      '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
             if path not in files:
                 return self.send(404, {'error': '見つかりません。'})
             file = ROOT / 'web' / files[path]
-            return self.send(200, file.read_bytes(), (mimetypes.guess_type(file)[0] or 'text/plain') + '; charset=utf-8', path in ('/', '/ledger', '/operation-tests'))
+            return self.send(200, file.read_bytes(), (mimetypes.guess_type(file)[0] or 'text/plain') + '; charset=utf-8', path in ('/', '/ledger', '/operation-tests', '/history'))
         except PermissionError as exc:
             self.send(403, {'error': str(exc)})
         except (OSError, ValueError):

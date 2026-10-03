@@ -736,6 +736,7 @@ class Engine:
 
                 'project': str(Path(project).resolve()), 'auto_execute': bool(auto_execute),
                 'document_source': document_source,
+                'request_origin': 'new',
 
                 'status': 'planning', 'created_at': now()})
 
