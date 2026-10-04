@@ -39,6 +39,7 @@ VALID_PATHS.update({'/attachments.js', '/api/attachments', '/api/attachments/ima
     '/ledger-consultation.js', '/api/ledger/consultation', '/api/ledger/consultation/models',
     '/api/ledger/consultation/open', '/api/ledger/consultation/send',
     '/api/ledger/consultation/cancel', '/api/ledger/consultation/submit'})
+VALID_PATHS.add('/api/instruction-health')
 VALID_PATHS.add('/api/decision-wait-stats')
 VALID_PATHS.add('/api/notifications')
 VALID_PATHS.add('/api/notifications/test')

@@ -396,6 +396,9 @@ class Harnesses:
                            'observation': {'technology': [], 'git': {'repository': False, 'branch': '', 'head': '', 'changes': None}}}
         path = _project_path(project['path'])
         survey = _survey(path, project.get('observation') or {})
+        from team_instruction_health import inspect_instructions
+        from team_ledger import ROOT
+        survey['instruction_health'] = inspect_instructions(path, ROOT, deep=True)
         ledger_fingerprint = hashlib.sha256(json.dumps(project, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
         generated = _make_files(project, survey)
         from team_harness_fill import collect, supplement, FILES

@@ -733,6 +733,10 @@ class Engine:
 
         from team_attachments import Attachments
         attachment_ids = [a['id'] for a in Attachments(self.store).select(attachment_ids)]
+        from team_instruction_health import inspect_instructions
+        from team_ledger import ROOT as ledger_root
+        instruction_boundary = ledger_root if Path(project).resolve().is_relative_to(ledger_root) else Path(project)
+        instruction_health = inspect_instructions(Path(project), instruction_boundary, deep=True)
         from team_limited_routing import classify_intake
         intake = classify_intake(title, goal, self.config.get('decision', {}))
 
@@ -747,6 +751,7 @@ class Engine:
                 'project': str(Path(project).resolve()), 'auto_execute': bool(auto_execute),
                 'document_source': document_source,
                 'attachment_ids': attachment_ids,
+                'instruction_health': instruction_health,
                 'request_origin': 'new',
 
                 'status': 'planning', 'created_at': now()})

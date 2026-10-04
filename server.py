@@ -229,10 +229,18 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
                 return self.send(200, self.app.ui_automation.history())
+            if path == '/api/instruction-health':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                from team_ledger import inside, ROOT as ledger_root
+                from team_instruction_health import inspect_instructions
+                project = inside((query.get('project') or [''])[0])
+                return self.send(200, inspect_instructions(project, ledger_root, deep=True))
             if path in ('/api/ledger', '/api/ledger/export'):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
-                return self.send(200, self.app.ledger.snapshot(self.app.config['approved_roots']))
+                return self.send(200, self.app.ledger.snapshot(self.app.config['approved_roots'], instruction_checks=True))
             if path == '/api/ledger/preview-status':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')

@@ -553,6 +553,8 @@ function renderDetail(task,version) {
   if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status))body.append(advicePanel(task));
   if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status)&&['researcher','builder'].includes(task.role))body.append(recoveryPanel(task,job));
   if(job.attachment_ids?.length){const images=el('section');images.append(el('h3','依頼の添付ファイル'),ImageAttachments.gallery(job.attachment_ids));body.append(images);}
+  const instructionHealth=job.instruction_health;
+  if(instructionHealth?.warnings?.length){const warning=el('div',undefined,'notice');warning.append(el('strong','指示ファイルの容量警告（依頼作成時点）'));for(const w of instructionHealth.warnings)warning.append(el('p',w.message));warning.append(el('p',instructionHealth.hint));body.append(warning);}
   body.append(section('今回の作業',task.instruction),section('対象と元の依頼',job.project+'\n\n'+job.goal));
   if(task.instruction_history?.length)body.append(section('過去の指示（履歴・現在の命令ではありません）',task.instruction_history.map(h=>`試行 ${h.attempt} · ${new Date(h.at*1000).toLocaleString()} · ${h.reason}\n${h.instruction}${h.submitted_note?'\n\n当時の追加内容:\n'+h.submitted_note:''}`).join('\n\n────────\n\n')));
   if(task.result)body.append(section('担当の報告（AIによる報告）',reportText(task.result)));
@@ -756,7 +758,16 @@ $('filter').addEventListener('change',render);
 $('menu-models').addEventListener('click',openModelPanel);
 $('menu-mobile').addEventListener('click',()=>{const m=$('mobile-access');if(m.hidden){notice('スマホ接続の情報はまだ読み込まれていません。少し待ってから再度開いてください。');return;}m.open=true;m.scrollIntoView({behavior:'smooth',block:'start'});});
 document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.close).close()));
-$('new-job').addEventListener('click',()=>{if(!state)return;$('project-select').replaceChildren(...state.config.approved_roots.map(p=>new Option(p,p)));$('new-dialog').showModal();});
+let jobInstructionSequence=0;
+async function checkJobInstructionSize(){
+ const sequence=++jobInstructionSequence,project=$('project-select').value,box=$('job-instruction-health');
+ box.replaceChildren(el('p','指示ファイルの容量を確認中…','hint'));
+ if(!project){box.replaceChildren(el('p','対象プロジェクトを選ぶと指示ファイルの容量を確認します。','hint'));return;}
+ try{const result=await api('/api/instruction-health?project='+encodeURIComponent(project));if(sequence!==jobInstructionSequence)return;box.replaceChildren();for(const w of result.warnings||[])box.append(el('p','指示ファイルの警告：'+w.message,'notice'));box.append(el('p',result.warnings?.length?result.hint:'確認した範囲にサイズ警告はありません。実際の読み込みは未確認です。','hint'));}
+ catch(error){if(sequence===jobInstructionSequence)box.replaceChildren(el('p','指示ファイルの容量は未確認です。'+error.message,'notice'));}
+}
+$('project-select').addEventListener('change',checkJobInstructionSize);
+$('new-job').addEventListener('click',()=>{if(!state)return;$('project-select').replaceChildren(...state.config.approved_roots.map(p=>new Option(p,p)));$('new-dialog').showModal();checkJobInstructionSize();});
 let folderState=null, folderBusy=false, folderGeneration=0;
 function folderControls(loading){
   folderBusy=loading;

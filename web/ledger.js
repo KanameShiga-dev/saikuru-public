@@ -72,6 +72,7 @@ function renderHarnessPreview(container,preview){
  container.replaceChildren();
  const survey=preview.survey,summary=node('div',undefined,'harness-survey');
  summary.append(node('h4','読み取り専用調査の結果'));
+ for(const warning of survey.instruction_health?.warnings||[])summary.append(node('p','指示ファイルの警告：'+warning.message,'archive-warning'));
  summary.append(node('p',`対象: ${preview.project.path}`,'path'));
  summary.append(node('p',`検出言語: ${survey.languages.join('、')||'未確認'} ／ 確認ファイル数: ${survey.file_count_scanned}${survey.capped?'（上限で打ち切り）':''}`));
  summary.append(node('p',`マニフェスト: ${survey.manifest_names.join('、')||'未確認'} ／ 依存名: ${survey.dependency_names.join('、')||'未確認'}`));
@@ -223,10 +224,18 @@ async function load(){state=await api('/api/ledger');const old=$('category').val
 function isRetiredProject(p){
  return /(?:アーカイブ|削除)済(?:み)?|^(?:アーカイブ|削除|archived|deleted)$/i.test(String(p.status||'').trim());
 }
+function instructionPresence(p){return p.instruction_presence||(instructionReports.get(p.id)||p.observation.instruction_health)?.presence||{agents:null,claude:null,status:'unknown',message:'指示ファイルの有無は未確認です。'};}
+function matchesInstructions(p,filter){
+ const presence=instructionPresence(p);
+ if(filter==='missing')return presence.agents===false||presence.claude===false;
+ if(filter==='agents_missing')return presence.agents===false;
+ if(filter==='claude_missing')return presence.claude===false;
+ return !filter||presence.status===filter;
+}
 function render(){
- const q=$('search').value.toLowerCase(),category=$('category').value,showRetired=$('show-retired').checked;
+ const q=$('search').value.toLowerCase(),category=$('category').value,showRetired=$('show-retired').checked,instructionFilter=$('instruction-filter').value;
  const hidden=showRetired?0:state.projects.filter(isRetiredProject).length;
- const items=state.projects.filter(p=>(showRetired||!isRetiredProject(p))&&(!category||p.category===category)&&JSON.stringify([p.name,p.path,p.purpose,p.observation.technology]).toLowerCase().includes(q));
+ const items=state.projects.filter(p=>(showRetired||!isRetiredProject(p))&&(!category||p.category===category)&&matchesInstructions(p,instructionFilter)&&JSON.stringify([p.name,p.path,p.purpose,p.observation.technology]).toLowerCase().includes(q));
  $('count').textContent=`${items.length}件表示 ／ 台帳 ${state.projects.length}件（資料・候補を含む）${hidden?` ／ アーカイブ・削除 ${hidden}件は非表示`:''}`;
  $('list').replaceChildren();
 
@@ -241,6 +250,10 @@ function render(){
   const fill=node('div',undefined,'fill'),meter=node('span',undefined,'meter'),bar=node('i');bar.style.width=(known/keyFields.length*100)+'%';meter.append(bar);meter.setAttribute('aria-hidden','true');
   fill.append(node('span',`主要な管理項目 ${known}/${keyFields.length} 確認済み`),meter);if(known<keyFields.length)fill.append(node('span',`未確認 ${keyFields.length-known}項目`,'unknown'));card.append(fill);
   if((state.archives||[]).some(r=>r.project_id===p.id&&r.state==='completed'))card.append(node('p','アーカイブ保存済み（詳細に保存先）'));
+  const presence=instructionPresence(p);
+  if(presence.status!=='both_present')card.append(node('p',(presence.status==='unknown'?'未確認：':'指示ファイル不足：')+presence.message,'archive-warning'));
+  const instructionWarnings=((instructionReports.get(p.id)||p.observation.instruction_health)?.warnings||[]).filter(w=>!['missing_instructions','presence_unknown'].includes(w.code));
+  if(instructionWarnings.length)card.append(node('p',`指示ファイルの警告 ${instructionWarnings.length}件（調査時点）。詳細を開いて再確認してください。`,'archive-warning'));
   if(!p.observation.exists)card.append(node('p','フォルダが見つかりません（履歴は保持）。','error'));
   $('list').append(card);
  }
@@ -251,11 +264,33 @@ function renderMetadata(p){const o=p.observation,g=o.git,dl=node('dl');const inf
 function showEditor(){const ed=$('editor');ed.hidden=false;$('editor-placeholder').hidden=true;markSelected();if(matchMedia('(max-width:980px)').matches)ed.scrollIntoView({behavior:'smooth',block:'start'});else ed.scrollTop=0;}
 function hideEditor(){$('editor').hidden=true;$('editor-placeholder').hidden=false;markSelected();}
 function markSelected(){for(const card of document.querySelectorAll('#list .project')){const b=card.querySelector('button[data-project-id]'),on=!$('editor').hidden&&b?.dataset.projectId===selected?.id;card.classList.toggle('selected',on);if(b){if(on)b.setAttribute('aria-current','true');else b.removeAttribute('aria-current');}}}
-function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').textContent=p.name;$('path').textContent=p.path;$('save-message').textContent='';renderMetadata(p);renderManagementFields(p);$('archive-feedback').textContent='';$('archive-feedback').className='';$('github-repositories').value='';archivePreview=null;renderRelations(p);$('move-destination').value='';$('move-feedback').textContent='';movePreview=null;for(const section of $('editor').querySelectorAll('details.detail-section'))section.open=false;refreshArchive();updateSectionIndicators();selectLedgerTab('basic');showEditor();}
+let instructionRequest=0;const instructionReports=new Map();
+function showInstructionHealth(report){
+ const box=$('instruction-health');box.replaceChildren();
+ const heading=node('strong','指示ファイルの有無・容量確認');box.append(heading);
+ if(report.presence)box.append(node('p',report.presence.message,report.presence.status==='both_present'?'':'archive-warning'));
+ box.append(node('p','判定はプロジェクト直下の指示ファイルです。親・共通指示の継承、代替名、AIの実際の読み込みは別途確認してください。'));
+ const format=b=>`${(b/1024).toFixed(1)} KiB（${b.toLocaleString()} bytes）`;
+ box.append(node('p',`Codex上限候補：${format(report.codex_limit_bytes)} ／ 階層合計の最大候補：${format(report.codex_candidate_max_bytes||0)}。${report.limit_basis}`));
+ for(const w of (report.warnings||[]).filter(w=>!['missing_instructions','presence_unknown'].includes(w.code)))box.append(node('p','警告：'+w.message,'archive-warning'));
+ if(!(report.warnings||[]).length)box.append(node('p','確認した範囲にサイズ警告はありません。実際に全指示が読まれたことは未確認です。'));
+ box.append(node('p',report.hint));
+ const details=node('details');details.append(node('summary','ファイル別の容量・行数と確認範囲'));
+ for(const f of report.files||[])details.append(node('p',`${f.path}：${format(f.bytes)} ／ ${f.lines===null?'行数未確認':f.lines+'行'}`,'path'));
+ details.append(node('p',`Claude Codeは200行未満を推奨。200行は読み込み打ち切りではありません。CLAUDE.mdは4 MiB超で読み込み対象外（現在の公式仕様）。確認：${report.checked_at}。${report.scope}。${report.note||''}`));box.append(details);
+ const retry=node('button','容量を再確認');retry.type='button';retry.onclick=()=>refreshInstructionHealth(selected);box.append(retry);
+}
+async function refreshInstructionHealth(p){
+ if(!p)return;const request=++instructionRequest;
+ $('instruction-health').replaceChildren(node('p','指示ファイルの容量を読み取り専用で確認しています…'));
+ try{const report=await api('/api/instruction-health?project='+encodeURIComponent(p.path));if(request!==instructionRequest||selected?.id!==p.id)return;instructionReports.set(p.id,report);if(report.presence)p.instruction_presence=report.presence;showInstructionHealth(report);render();}
+ catch(err){if(request!==instructionRequest)return;const box=$('instruction-health');box.replaceChildren(node('p','指示ファイルの容量は未確認です。'+err.message,'archive-warning'));const retry=node('button','再確認');retry.type='button';retry.onclick=()=>refreshInstructionHealth(p);box.append(retry);}
+}
+function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').textContent=p.name;$('path').textContent=p.path;$('save-message').textContent='';renderMetadata(p);renderManagementFields(p);$('archive-feedback').textContent='';$('archive-feedback').className='';$('github-repositories').value='';archivePreview=null;renderRelations(p);$('move-destination').value='';$('move-feedback').textContent='';movePreview=null;for(const section of $('editor').querySelectorAll('details.detail-section'))section.open=false;refreshArchive();updateSectionIndicators();selectLedgerTab('basic');showEditor();refreshInstructionHealth(p);}
 $('edit-form').addEventListener('input',updateSectionIndicators);
 $('edit-form').addEventListener('change',updateSectionIndicators);
 $('edit-form').addEventListener('submit',async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const fields=Object.fromEntries(new FormData(e.target));await api('/api/ledger/update',{id:selected.id,fields,expected_updated_at:selected.manual_updated_at});await load();const fresh=state.projects.find(p=>p.id===selected.id);if(fresh)openProjectDetails(fresh);message('台帳を保存しました。変更前のDBと編集履歴も保持しています。');$('save-message').textContent='保存しました。';}catch(err){$('save-message').textContent=err.message;selectLedgerTab('basic');$('management-section').open=true;}finally{button.disabled=false;}});
-$('show-retired').checked=false;$('close').onclick=hideEditor;$('search').oninput=render;$('category').onchange=render;$('show-retired').onchange=render;
+$('show-retired').checked=false;$('close').onclick=hideEditor;$('search').oninput=render;$('category').onchange=render;$('instruction-filter').onchange=render;$('show-retired').onchange=render;
 $('scan').onclick=async()=>{if(busy)return;busy=true;$('scan').disabled=true;message('C:\\Projects を調査しています。プロジェクトのコードは実行しません。');try{const r=await api('/api/ledger/scan',{});await load();message(`再調査して登録しました。候補 ${r.discovered}件、取得エラー ${r.errors.length}件。`);}catch(e){message(e.message,true);}finally{busy=false;$('scan').disabled=false;}};
 $('backup').onclick=async()=>{try{const r=await api('/api/ledger/backup',{});message(`バックアップ：data/${r.backup}`);}catch(e){message(e.message,true);}};
 $('export').onclick=async()=>{try{const data=await api('/api/ledger/export'),url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=node('a');a.href=url;a.download='project-ledger.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('現在の台帳をJSONで書き出しました。');}catch(e){message(e.message,true);}};

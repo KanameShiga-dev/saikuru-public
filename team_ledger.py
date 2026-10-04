@@ -17,7 +17,7 @@ SKIP = {'.git', '.venv', 'venv', 'node_modules', 'library', 'temp', 'obj', 'bin'
         'outputs', 'captures', 'certs', 'profiles', 'records', 'chrome-amazon-automation-profile',
         'diagnostics', 'tests', 'examples', 'docs', 'deploy', 'manual', 'archive', 'work', '_project_archives'}
 CONTAINERS = {'Claude', 'Codex', 'tools', 'Projects'}
-MULTI_PROJECTS = set()  # Configure container folders for your own environment.
+MULTI_PROJECTS = {'Codex/miscProject', 'Codex/学習資料'}
 MARKERS = {'.git', 'package.json', 'pyproject.toml', 'requirements.txt',
            'Cargo.toml', 'go.mod', 'platformio.ini', 'ProjectSettings', 'server.py'}
 DOCS = ('AGENTS.md', 'README.md', 'README.txt', 'HANDOFF.md', 'PLAN.md',
@@ -107,7 +107,9 @@ def inspect(path):
         category = '配備・ビルド用コピー（関係未確認）'
     if path.parts[2:3] == ('family',):
         category = '家庭関連（内容未調査）'
-    return {'path': str(path), 'technology': sorted(set(tech)), 'git': git, 'readme_title': readme_title,
+    from team_instruction_health import inspect_instructions
+    instruction_health = inspect_instructions(path, ROOT)
+    return {'instruction_health': instruction_health, 'path': str(path), 'technology': sorted(set(tech)), 'git': git, 'readme_title': readme_title,
             'documents': [str(path / d) for d in DOCS if (path / d).is_file()],
             'suggested_category': category, 'exists': True, 'checked_at': stamp()}
 
@@ -135,15 +137,18 @@ class Ledger:
             self.db.backup(dest)
         return name
 
-    def snapshot(self, approved=None):
+    def snapshot(self, approved=None, instruction_checks=False):
         with self.lock:
             projects = [json.loads(row[0]) for row in self.db.execute('SELECT body FROM projects ORDER BY path COLLATE NOCASE')]
             scan = self.db.execute('SELECT body FROM scans ORDER BY id DESC LIMIT 1').fetchone()
             archives = [json.loads(row[0]) for row in self.db.execute('SELECT body FROM archives ORDER BY rowid DESC')]
             moves = [json.loads(row[0]) for row in self.db.execute('SELECT body FROM moves ORDER BY rowid DESC')]
         allowed = {os.path.normcase(str(Path(p).resolve())) for p in (approved or ())}
+        from team_instruction_health import instruction_presence
         for item in projects:
             item['worker_allowed'] = None if approved is None else os.path.normcase(item['path']) in allowed
+            if instruction_checks:
+                item['instruction_presence'] = instruction_presence(item['path'], ROOT)
         return {'projects': projects, 'archives': archives, 'moves': moves, 'last_scan': json.loads(scan[0]) if scan else None,
                 'root': str(ROOT), 'computer_use_policy': '基本禁止', 'schema_version': 1}
 
@@ -247,7 +252,7 @@ class Ledger:
                 report = {'at': stamp(), 'root': str(ROOT), 'max_depth': 4,
                     'visited_directories': seen, 'discovered': len(found), 'errors': errors,
                     'excluded': sorted(SKIP), 'backup': backup,
-                    'scope_note': '深さ4まで。Git/技術構成のあるフォルダは内部探索を停止。家庭関連は直下のメタ情報のみ。資料・候補も含む。除外範囲内や深い場所は手動登録可能。'}
+                    'scope_note': '深さ4まで。Git/技術構成のあるフォルダは内部探索を停止（miscProject・学習資料は内包プロジェクトも調査）。家庭関連は直下のメタ情報のみ。資料・候補も含む。除外範囲内や深い場所は手動登録可能。'}
                 self.db.execute('INSERT INTO scans(at,body) VALUES (?,?)', (stamp(), json.dumps(report, ensure_ascii=False)))
         self.export()
         return report
