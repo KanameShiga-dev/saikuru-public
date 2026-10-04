@@ -81,3 +81,6 @@ body{background:var(--bg);color:var(--text)}
  .app-actions{width:100%;justify-content:flex-start}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+
+/* Private attachment previews */
+.attachment-gallery{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}.attachment-gallery>div,.attachment-gallery>a{max-width:200px;min-width:0;overflow-wrap:anywhere}.attachment-gallery img{display:block;max-width:100%;width:180px;height:120px;object-fit:contain;border:1px solid var(--line);border-radius:8px}.attachment-gallery p{margin:4px 0;font-size:13px}

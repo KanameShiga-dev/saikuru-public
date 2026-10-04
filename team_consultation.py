@@ -53,6 +53,8 @@ class ConsultationContext:
     def __init__(self, app, session, root, cancelled):
         self.task = {'id': 'consult-' + session['id'], 'role': 'planner',
                      'profile': copy.deepcopy(session['profile'])}
+        self.attachments = app.attachments
+        self.attachment_ids = list(session.get('attachment_ids', []))
         self.engine = SimpleNamespace(config={'computer_use_allowed': False})
         self.project = str(root)
         self.command = app.commands[self.task['profile']['adapter']]
@@ -67,7 +69,8 @@ class ConsultationContext:
         self.audit_path = root / ('evidence-' + uuid.uuid4().hex + '.jsonl')
         self.read_mcp = {'command': sys.executable,
                          'args': ['-X', 'utf8', str(Path(__file__).with_name('consultation_read_tools.py')), self.read_root, str(self.audit_path)]}
-        self.agent_system_instructions = definition.instructions + '\n\n' + RULES
+        from team_attachments import RULE
+        self.agent_system_instructions = definition.instructions + '\n\n' + RULES + RULE
         self.agent_run = {'id': str(uuid.uuid4())}
         self.token = uuid.uuid4().hex
         self.endpoint = app.origin
@@ -206,6 +209,7 @@ class Consultations:
         current = self._project(item['project_id'])
         result['job_allowed'] = str(Path(current['path']).resolve()).casefold() in {
             str(Path(p).resolve()).casefold() for p in self.app.config['approved_roots']}
+        result['attachments'] = self.app.attachments.select(item.get('attachment_ids', []))
         result['documentation'] = item.get('kind') == 'documentation'
         result['progress'] = self.active[item['id']][1].progress if item['id'] in self.active else ''
         result['project_changed'] = current['path'] != item['project']['path']
@@ -244,7 +248,7 @@ class Consultations:
         kind = body.get('kind', 'improvement')
         if kind not in ('improvement','bug','user_voice','documentation'):
             raise ValueError('相談の種類を選択してください。')
-        if mode not in ('discuss', 'plan') or (mode == 'discuss' and not text.strip() and body.get('retry') is not True):
+        if mode not in ('discuss', 'plan') or (mode == 'discuss' and not text.strip() and not body.get('attachment_ids') and body.get('retry') is not True):
             raise ValueError('相談内容を入力してください。')
         with self.lock:
             item = self._get(body.get('id'))
@@ -261,18 +265,26 @@ class Consultations:
             profile = self.validate_profile(body.get('profile') or item['profile'])
             if len(item['calls']) >= 20 or sum(len(m['text']) for m in item['messages']) + len(text) > 60000:
                 raise ValueError('相談の上限に達しました。新しい相談に必要な内容を整理して入力してください。')
+            submitted_ids = body.get('attachment_ids', [])
+            if body.get('retry') is True and submitted_ids:
+                raise ValueError('再試行は前の添付を使います。新しい添付は相談を送る操作で追加してください。')
+            attachments = self.app.attachments.select(submitted_ids)
+            combined = list(dict.fromkeys(item.get('attachment_ids', []) + [a['id'] for a in attachments]))
+            self.app.attachments.select(combined)
+            item['attachment_ids'] = combined
             if body.get('retry') is True:
                 if item['status'] not in ('failed', 'cancelled', 'interrupted') or not item['messages'] or item['messages'][-1]['role'] != 'user':
                     raise ValueError('再試行できる相談がありません。')
                 mode = item['last_mode']
             else:
-                message = text.strip() or 'ここまでの相談から計画プロンプトを作成してください。'
+                message = text.strip() or ('添付ファイルについて、台帳のプロジェクトに照らして相談してください。' if mode == 'discuss' else 'ここまでの相談から計画プロンプトを作成してください。')
                 duplicate = (item['status'] in ('failed','cancelled','interrupted') and item['messages']
                              and item['messages'][-1]['role']=='user'
                              and item['messages'][-1]['text']==message
-                             and item['messages'][-1].get('kind','improvement')==kind)
+                             and item['messages'][-1].get('kind','improvement')==kind
+                             and item['messages'][-1].get('attachment_ids', [])==submitted_ids)
                 if not duplicate:
-                    item['messages'].append({'role': 'user', 'text': message, 'kind':kind})
+                    item['messages'].append({'role': 'user', 'text': message, 'kind':kind, 'attachment_ids': submitted_ids})
             item.update(busy=True, status='running', error='', last_mode=mode,
                         profile=profile, revision=item['revision'] + 1)
             # A revised conversation invalidates the older draft until a new draft is requested.
@@ -399,10 +411,11 @@ class Consultations:
                 goal = ('資料作成のみ。読み取り元: '+str(source)+'\n保存先: '+str(output)
                         +'\nソース・設定変更、コマンド実行、起動停止、公開は禁止。資料だけを専用ツールで作成する。\n'+goal)
                 job = self.app.engine.create_job(project['name']+'：資料作成計画', goal, str(output), False,
-                                                 planner_profile=profile, document_source=str(source))
+                                                 planner_profile=profile, document_source=str(source), attachment_ids=item.get('attachment_ids', []))
             else:
                 job = self.app.engine.create_job(project['name'] + '：相談からの改修計画',
-                                                 goal, project['path'], False, planner_profile=profile)
+                                                 goal, project['path'], False, planner_profile=profile,
+                                                 attachment_ids=item.get('attachment_ids', []))
             item.update(job_id=job['id'], plan_prompt=text.strip(), revision=item['revision'] + 1)
             self._save(item)
             return {'job_id': job['id'], 'already_submitted': False}

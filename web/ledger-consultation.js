@@ -4,6 +4,7 @@ let consultationDraftRevision=null;
 let consultationModels=[], consultationModelsLoading=false, consultationModelEpoch=0;
 let consultationSending=false, consultationSubmitting=false, consultationRegistering=false, consultationActivityTimer=null, consultationStartedAt=null, consultationPendingMode=null;
 const consultDialog=document.getElementById('consultation-dialog');
+const consultationImages = new ImageAttachments(document.getElementById('consultation-attachments'));
 const consultStatus=text=>{document.getElementById('consultation-status').textContent=text;document.getElementById('consultation-action-status').textContent=text;document.getElementById('consultation-submit-status').textContent=text;};
 
 function consultationSubmissionControls(){
@@ -105,12 +106,16 @@ function renderConsultation(s){
   research.append(node('p',`${e.id}：${e.path}:${e.start_line}（取得範囲 ${e.line_count}行以内） ／ ${new Date(e.checked_at*1000).toLocaleString()}${e.reused?' ／ 変更なし・前回の抜粋を再利用':''}`));
  }
  for(const error of investigation.errors||[])research.append(node('p',error));
+ const carried=$('consultation-carried-images');carried.replaceChildren();
+ if(s.attachments?.length){carried.append(node('p','以下の送信済み添付は、計画依頼と後続の担当にも引き継ぎます（新しい添付は相談を送って追加してください）。'),ImageAttachments.gallery(s.attachments));}
  const history=$('consultation-history');history.replaceChildren();
  if(!s.messages.length)history.append(node('p','直したいこと、困っていること、レビューでの指摘を入力してください。'));
  for(const m of s.messages){
   const block=node('section',undefined,'consultation-message '+m.role);
   const kind={improvement:'改善相談',bug:'不具合・指摘',user_voice:'ユーザーの声',documentation:'資料作成'}[m.kind];
-  block.append(node('h3',m.role==='user'?'あなた'+(kind?'：'+kind:''):'計画担当'),node('p',m.text));history.append(block);
+  block.append(node('h3',m.role==='user'?'あなた'+(kind?'：'+kind:''):'計画担当'),node('p',m.text));
+  const images=(m.attachment_ids||[]).map(id=>(s.attachments||[]).find(a=>a.id===id)).filter(Boolean);
+  if(images.length)block.append(ImageAttachments.gallery(images));history.append(block);
  }
  $('consultation-usage').textContent=`モデル呼出 ${s.calls.length}/20回。相談はCLIの利用枠を消費します。直近の取得済み利用量：${s.calls.length?JSON.stringify(s.calls.at(-1).usage):'未取得'}`;
  $('consultation-send').disabled=s.busy||Boolean(s.job_id);
@@ -157,6 +162,7 @@ async function openConsultation(fresh=false){
  try{
   const value=await api('/api/ledger/consultation/open',{project_id:selected.id,new:fresh});
   if(epoch!==consultationEpoch)return;
+  consultationImages.clear();
   consultationDraftRevision=null;
   $('consultation-kind').value=value.documentation?'documentation':'improvement';
   $('consultation-document-confirm').checked=false;
@@ -176,16 +182,18 @@ async function sendConsultation(mode,retry=false){
  if(consultationModelsLoading||!chosen||chosen.disabled||!$('consultation-effort').value){consultStatus('利用できるモデルと推論設定を選択してください。');return;}
  if(!$('consultation-consent').checked){consultStatus('モデルへの送信と利用枠の使用を確認してください。');return;}
  const input=$('consultation-input'),text=input.value.trim();
- if(mode==='discuss'&&!text&&!retry){consultStatus('相談内容を入力してください。');input.focus();return;}
- if(retry&&text){consultStatus('再試行は前の内容を送信します。入力した補足を送る場合は「相談を送る」を使ってください。');return;}
+ if(mode==='discuss'&&!text&&!consultationImages.files.length&&!retry){consultStatus('相談内容を入力してください。');input.focus();return;}
+ if(retry&&(text||consultationImages.files.length)){consultStatus('再試行は前の内容を送信します。入力した補足を送る場合は「相談を送る」を使ってください。');return;}
  const epoch=consultationEpoch;
  consultationSending=true;consultationPendingMode=mode;consultationActivity();consultationModelControls();
  $('consultation-send').disabled=true;$('consultation-plan').disabled=true;$('consultation-retry').disabled=true;
  try{
-  const value=await api('/api/ledger/consultation/send',{id:consultation.id,revision:consultation.revision,
-   mode,message:text,kind:$('consultation-kind').value,consent:true,retry,profile:selectedConsultationProfile()});
+  const attachment_ids=await consultationImages.upload(api);
   if(epoch!==consultationEpoch)return;
-  input.value='';renderConsultation(value);
+  const value=await api('/api/ledger/consultation/send',{id:consultation.id,revision:consultation.revision,
+   mode,message:text,attachment_ids,kind:$('consultation-kind').value,consent:true,retry,profile:selectedConsultationProfile()});
+  if(epoch!==consultationEpoch)return;
+  input.value='';consultationImages.clear();renderConsultation(value);
  }catch(e){
   if(epoch!==consultationEpoch)return;
   consultStatus(e.message);

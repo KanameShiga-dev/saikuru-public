@@ -54,6 +54,8 @@ class App:
     def __init__(self, directory, port):
         self.data_lock = DataLock(directory)
         self.store = Store(directory)
+        from team_attachments import Attachments
+        self.attachments = Attachments(self.store)
         self.ledger = Ledger(directory)
         self.harnesses = Harnesses(self.ledger)
         self.ui_automation = UiAutomation(directory, settings=lambda: self.config.get('decision', {}))
@@ -151,7 +153,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
         if set_cookie:
             self.send_header('Set-Cookie', f'agent_team={self.app.cookie}; HttpOnly; SameSite=Strict; Path=/')
         self.end_headers()
@@ -182,6 +184,17 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     return self.send(400, {'error':str(exc)})
                 return self.send(200, result)
+            if path == '/api/attachments/meta':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                return self.send(200, self.app.attachments.select([(query.get('id') or [''])[0]])[0])
+            if path == '/api/attachments/image':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                image, raw = self.app.attachments.read((query.get('id') or [''])[0])
+                return self.send(200, raw, image['mime'])
             if path == '/api/state':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -253,14 +266,19 @@ class Handler(BaseHTTPRequestHandler):
                     'error': self.app.mobile_error})
             files = {'/history': 'history.html', '/history.js': 'history.js', '/history.css': 'history.css', '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/theme.css': 'theme.css', '/shell.js': 'shell.js',
                      '/operation-tests': 'operation-tests.html', '/operation-tests.js': 'operation-tests.js',
-                     '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
+                     '/attachments.js': 'attachments.js', '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
             if path not in files:
                 return self.send(404, {'error': '見つかりません。'})
             file = ROOT / 'web' / files[path]
             return self.send(200, file.read_bytes(), (mimetypes.guess_type(file)[0] or 'text/plain') + '; charset=utf-8', path in ('/', '/ledger', '/operation-tests', '/history'))
         except PermissionError as exc:
             self.send(403, {'error': str(exc)})
-        except (OSError, ValueError):
+        except ValueError as exc:
+            if path in ('/api/attachments/image', '/api/attachments/meta'):
+                self.send(400, {'error': str(exc)[:300]})
+            else:
+                self.send(500, {'error': 'ファイルを読み込めませんでした。'})
+        except OSError:
             self.send(500, {'error': 'ファイルを読み込めませんでした。'})
 
     def do_POST(self):
@@ -268,7 +286,7 @@ class Handler(BaseHTTPRequestHandler):
             self.common()
             path = urlparse(self.path).path
             size = int(self.headers.get('Content-Length', '0'))
-            max_size = 300000 if path in ('/api/harness/apply', '/api/harness/structure-preview') else 100000
+            max_size = 7_100_000 if path == '/api/attachments' else 300000 if path in ('/api/harness/apply', '/api/harness/structure-preview') else 100000
             if not 0 < size <= max_size or self.headers.get_content_type() != 'application/json':
                 raise ValueError('JSONリクエストのサイズまたは形式が不正です。')
             body = json.loads(self.rfile.read(size))
@@ -283,7 +301,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized() or self.headers.get('X-Agent-Team-UI') != '1':
                 raise PermissionError('ブラウザからの認証済み操作が必要です。')
             engine = self.app.engine
-            if path == '/api/ledger/consultation/open':
+            if path == '/api/attachments':
+                result = self.app.attachments.upload(body)
+            elif path == '/api/ledger/consultation/open':
                 result = self.app.consultations.open(body)
             elif path == '/api/ledger/consultation/send':
                 result = self.app.consultations.send(body)
@@ -348,7 +368,8 @@ class Handler(BaseHTTPRequestHandler):
                 if body.get('consent') is not True:
                     raise ValueError('AIへの送信と作業範囲の確認が必要です。')
                 result = engine.create_job(str(body.get('title', '')), str(body.get('goal', '')),
-                                           str(body.get('project', '')), body.get('auto_execute') is True)
+                                           str(body.get('project', '')), body.get('auto_execute') is True,
+                                           attachment_ids=body.get('attachment_ids', []))
             elif path == '/api/decide':
                 if type(body.get('allow')) is not bool:
                     raise ValueError('承認または拒否を選んでください。')

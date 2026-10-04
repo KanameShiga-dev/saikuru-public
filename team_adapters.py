@@ -187,7 +187,8 @@ class CodexAdapter:
                         raise ProviderError('CodexのWindowsサンドボックスでコマンドを起動できません。setup refresh・実行環境の読み取り権限を復旧してから再試行してください。モデル実行は開始していません。', 'codex_sandbox')
                 except ProviderError as exc:
                     raise ProviderError('CodexのWindowsサンドボックスの起動確認に失敗しました。モデル実行は開始していません。詳細: ' + str(exc)[:800], 'codex_sandbox') from exc
-            request('turn/start', {'threadId': thread_id, 'input': [{'type': 'text', 'text': prompt}],
+            from team_attachments import provider_input
+            request('turn/start', {'threadId': thread_id, 'input': provider_input(ctx, prompt, 'codex'),
                                   'effort': profile['effort'], 'outputSchema': schema})
             final = ''
             while True:
@@ -245,10 +246,17 @@ class ClaudeAdapter:
                   '--model', profile['model'], '--effort', profile['effort'],
                   '--settings', json.dumps(settings), '--json-schema', json.dumps(schema),
                   '--no-session-persistence']
+        if getattr(ctx, 'attachment_ids', []):
+            command += ['--input-format', 'stream-json']
         process = None
         try:
             process = Process(command, ctx.project, env)
-            process.proc.stdin.write(prompt)
+            if getattr(ctx, 'attachment_ids', []):
+                from team_attachments import provider_input
+                process.send({'type': 'user', 'message': {'role': 'user',
+                    'content': provider_input(ctx, prompt, 'claude')}, 'parent_tool_use_id': None})
+            else:
+                process.proc.stdin.write(prompt)
             process.proc.stdin.close()
             while True:
                 msg = process.receive(ctx)

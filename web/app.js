@@ -1,6 +1,7 @@
 'use strict';
 let state = null, selected = null, detailVersion = '', busy = false, providerVersion = '';
 const $ = id => document.getElementById(id);
+const jobImages = new ImageAttachments(document.getElementById('job-attachments'));
 const roles = {planner:'計画',researcher:'調査',builder:'実装',reviewer:'レビュー'};
 const statuses = {queued:'待機',running:'実行中',awaiting_approval:'承認待ち',succeeded:'担当作業終了',handed_off:'未完了項目を残して引き継ぎ済み',failed:'失敗',cancelled:'中止',interrupted:'中断',blocked:'判断が必要'};
 const jobStatuses = {...statuses,planning:'計画中',awaiting_acceptance:'成果の確認待ち',accepted:'利用者が確認済み',accepted_with_pending_checks:'成果を受領・未完了項目あり'};
@@ -551,6 +552,7 @@ function renderDetail(task,version) {
   if(!endedJob(task)&&group(task)===2)body.append(decisionHelp(task));
   if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status))body.append(advicePanel(task));
   if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status)&&['researcher','builder'].includes(task.role))body.append(recoveryPanel(task,job));
+  if(job.attachment_ids?.length){const images=el('section');images.append(el('h3','依頼の添付ファイル'),ImageAttachments.gallery(job.attachment_ids));body.append(images);}
   body.append(section('今回の作業',task.instruction),section('対象と元の依頼',job.project+'\n\n'+job.goal));
   if(task.instruction_history?.length)body.append(section('過去の指示（履歴・現在の命令ではありません）',task.instruction_history.map(h=>`試行 ${h.attempt} · ${new Date(h.at*1000).toLocaleString()} · ${h.reason}\n${h.instruction}${h.submitted_note?'\n\n当時の追加内容:\n'+h.submitted_note:''}`).join('\n\n────────\n\n')));
   if(task.result)body.append(section('担当の報告（AIによる報告）',reportText(task.result)));
@@ -814,7 +816,7 @@ $('folder-use').addEventListener('click',()=>{
     $('folder-dialog').close();select.focus();await refresh();
   });
 });
-$('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.target);action(async()=>{await api('/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent')});$('new-dialog').close();e.target.reset();notice('依頼を受け付けました。計画の作成を始めます。');});});
+$('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.target);action(async()=>{const attachment_ids=await jobImages.upload(api);await api('/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids});$('new-dialog').close();e.target.reset();jobImages.clear();notice('依頼を受け付けました。計画の作成を始めます。');});});
 $('pause').addEventListener('click',()=>action(()=>api('/api/pause',{paused:!state.paused})));
 $('stop').addEventListener('click',()=>action(async()=>{if(confirm('全ての実行中の依頼を中止し、新規着手を停止しますか？'))await api('/api/stop',{});}));
 $('backup').addEventListener('click',()=>action(async()=>{const r=await api('/api/backup',{});notice('DBのバックアップを保存しました: data/'+r.file+'、data/'+r.handoff_file);}));

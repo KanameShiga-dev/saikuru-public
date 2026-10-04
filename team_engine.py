@@ -92,7 +92,11 @@ class Context:
 
         self.task = task
 
-        self.project = engine.store.get(task['job_id'], 'job')['project']
+        job = engine.store.get(task['job_id'], 'job')
+        self.project = job['project']
+        from team_attachments import Attachments
+        self.attachments = Attachments(engine.store)
+        self.attachment_ids = list(job.get('attachment_ids', []))
 
         self.command = engine.commands.get(task['profile']['adapter'])
 
@@ -179,7 +183,8 @@ class Context:
 
     def agent_system_instructions(self):
 
-        return (self.agent_definition.instructions + '\n\n'
+        from team_attachments import RULE
+        return (self.agent_definition.instructions + RULE + '\n\n'
 
                 '采来 — サイクル —がこの共通Agentを独立した担当セッションとして起動しています。'
 
@@ -712,7 +717,7 @@ class Engine:
 
 
 
-    def create_job(self, title, goal, project, auto_execute, planner_profile=None, document_source=None):
+    def create_job(self, title, goal, project, auto_execute, planner_profile=None, document_source=None, attachment_ids=None):
 
         if not title.strip() or not goal.strip() or len(goal) > 16000:
 
@@ -726,6 +731,8 @@ class Engine:
 
             raise ValueError('対象フォルダが見つかりません。')
 
+        from team_attachments import Attachments
+        attachment_ids = [a['id'] for a in Attachments(self.store).select(attachment_ids)]
         from team_limited_routing import classify_intake
         intake = classify_intake(title, goal, self.config.get('decision', {}))
 
@@ -739,6 +746,7 @@ class Engine:
 
                 'project': str(Path(project).resolve()), 'auto_execute': bool(auto_execute),
                 'document_source': document_source,
+                'attachment_ids': attachment_ids,
                 'request_origin': 'new',
 
                 'status': 'planning', 'created_at': now()})

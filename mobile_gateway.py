@@ -35,6 +35,10 @@ VALID_PATHS.update({'/api/ledger/delete/preview', '/api/ledger/delete/start'})
 VALID_PATHS.update({'/api/ledger/preview-status'})
 VALID_PATHS.update({'/api/ledger/move/preview', '/api/ledger/move/start', '/api/ledger/move/preview-status'})
 VALID_PATHS.update({'/theme.css', '/shell.js'})  # 2026-10-03 共通デザイン
+VALID_PATHS.update({'/attachments.js', '/api/attachments', '/api/attachments/image', '/api/attachments/meta',
+    '/ledger-consultation.js', '/api/ledger/consultation', '/api/ledger/consultation/models',
+    '/api/ledger/consultation/open', '/api/ledger/consultation/send',
+    '/api/ledger/consultation/cancel', '/api/ledger/consultation/submit'})
 VALID_PATHS.add('/api/decision-wait-stats')
 VALID_PATHS.add('/api/notifications')
 VALID_PATHS.add('/api/notifications/test')
@@ -145,7 +149,7 @@ class MobileHandler(BaseHTTPRequestHandler):
         for key, value in [('Content-Type', kind), ('Content-Length', str(len(body))),
                            ('Cache-Control', 'no-store'), ('X-Content-Type-Options', 'nosniff'),
                            ('Referrer-Policy', referrer_policy),
-                           ('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; form-action 'self'; frame-ancestors 'none'")]:
+                           ('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; form-action 'self'; frame-ancestors 'none'")]:
             self.send_header(key, value)
         if cookie:
             self.send_header('Set-Cookie', cookie)
@@ -197,11 +201,11 @@ class MobileHandler(BaseHTTPRequestHandler):
             upstream_path = path + ('?' + parsed.query if parsed.query else '')
             req = urllib.request.Request('http://127.0.0.1:8790' + upstream_path, data=body, headers=headers)
             try:
-                upstream = opener.open(req, timeout=100 if urlsplit(upstream_path).path == '/api/ui-automation/next' else 35)
+                upstream = opener.open(req, timeout=130 if path in ('/api/attachments', '/api/attachments/meta', '/api/attachments/image') else 100 if path == '/api/ui-automation/next' else 35)
             except urllib.error.HTTPError as exc:
                 upstream = exc
             with upstream:
-                self.reply(upstream.status, upstream.read(2_000_000), upstream.headers.get('Content-Type', 'application/json'))
+                self.reply(upstream.status, upstream.read(5_242_881 if path == '/api/attachments/image' else 2_000_000), upstream.headers.get('Content-Type', 'application/json'))
         except Exception:
             self.reply(502, 'PC側のサービスに接続できません。', 'text/plain; charset=utf-8')
 
@@ -216,7 +220,8 @@ class MobileHandler(BaseHTTPRequestHandler):
         if not self.request_ok() or self.headers.get('Origin') != self.server.origin:
             return self.reply(403, 'Forbidden', 'text/plain')
         size = int(self.headers.get('Content-Length', '0'))
-        if not 0 < size <= 100_000:
+        limit = 7_100_000 if self.path.split('?', 1)[0] == '/api/attachments' else 100_000
+        if not 0 < size <= limit:
             return self.reply(400, 'Bad request', 'text/plain')
         body = self.rfile.read(size)
         if self.path == '/mobile/login':

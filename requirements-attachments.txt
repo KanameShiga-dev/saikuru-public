@@ -1,0 +1,5 @@
+# Optional local parser environment; no model API or network fetch is used for screening.
+# Versions correspond to the already available local bundled environment.
+Pillow==12.3.0
+pypdf==6.10.0
+pypdfium2==5.13.0
