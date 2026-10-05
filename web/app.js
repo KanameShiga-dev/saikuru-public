@@ -206,7 +206,15 @@ function render() {
     if(name==='claude'){
       text.append(el('small','采来専用ログインを使用。通常のClaude Codeとは保存先を分けています。'));
       text.append(button('ログイン状態・残量を再確認',()=>action(async()=>{await api('/api/claude-auth/refresh',{});} )));
-      if(p.authenticated===false)text.append(el('p','PCで采来の Login-ClaudeCode.ps1 を実行してログイン後、再確認を押してください。'));
+      if(p.authenticated!==true){
+        text.append(button('サイクルでClaudeにログイン',()=>action(async()=>{
+          const login=await api('/api/claude-auth/login',{});
+          if(login.state==='authenticated'){notice('ログイン済みです。');return;}
+          notice('PCのブラウザーでClaudeのログインを完了してください。保存した認証を次回以降も使用します。');
+          watchClaudeLogin();
+        })));
+        text.append(el('p','ログインはサイクルが動いているPCのブラウザーで行います。通常は保存済み認証を使用します。認証切れの場合だけ再ログインしてください。','hint'));
+      }
     }
     box.append(text);$('providers').append(box);
   }
@@ -256,6 +264,19 @@ function render() {
   if(selected&&$('detail-dialog').open){
     const task=state.tasks.find(t=>t.id===selected);if(task){const version=JSON.stringify([task.updated_at,state.jobs.find(j=>j.id===task.job_id)?.updated_at,state.approvals.filter(a=>a.task_id===selected).map(a=>[a.id,a.status,a.updated_at,state.tasks.find(t=>t.id===a.payload?.investigation_task_id)?.updated_at])]);if(version!==detailVersion)renderDetail(task,version);}
   }
+}
+
+let claudeLoginTimer=null;
+function watchClaudeLogin(){
+ clearTimeout(claudeLoginTimer);
+ claudeLoginTimer=setTimeout(async()=>{
+  try{
+   const result=await api('/api/claude-auth/login-status',{});
+   if(result.state==='running'){watchClaudeLogin();return;}
+   await refresh();
+   notice(result.authenticated?'Claudeのログインが完了しました。停止した作業はカードから再試行してください。':'ログインを完了できませんでした。ブラウザーが開かない場合はPCの Login-ClaudeCode.ps1 を使い、ログイン状態を再確認してください。');
+  }catch(e){notice(e.message);}
+ },2000);
 }
 function section(title,text) { const s=el('section',undefined,'detail-section');s.append(el('h3',title),el('div',text,'text-block'));return s; }
 const detailFolds=new Map();let renderedDetailTask=null;
@@ -329,6 +350,7 @@ async function showHandoffHistory(jobId,container,before){
   }catch(error){if(container.isConnected)container.append(el('p','引き継ぎ履歴を読み込めません: '+error.message,'hint'));}
 }
 const answerDrafts=new Map();
+const answerFiles=new Map();
 function questionForm(approval){
   const box=el('section',undefined,'approval-box'),form=el('form'),message=el('p','','hint');
   message.setAttribute('role','status');
@@ -372,6 +394,12 @@ function questionForm(approval){
     }
     form.append(field);
   }
+  let fileDraft=null;
+  if(approval.kind!=='tool'){
+    fileDraft=answerFiles.get(approval.id);
+    if(!fileDraft){const host=el('div');host.id='answer-files-'+approval.id;fileDraft={host,widget:new ImageAttachments(host)};answerFiles.set(approval.id,fileDraft);}
+    const files=el('details');files.open=approval.payload.questions.some(q=>/ファイル|素材|画像|PDF|添付/.test(q.text));files.append(el('summary','回答にファイルを添付（ファイルを選択）'),fileDraft.host);form.append(files);
+  }
   if(approval.kind==='tool')form.append(el('p','回答期限: '+date(approval.expires_at),'hint'));
   else form.append(el('p','送信すると、回答を引き継いでこの担当を再開します。','hint'));
   form.append(el('p','「保留して閉じる」では、この担当と後続の作業は進みません。','hint'));
@@ -382,13 +410,14 @@ function questionForm(approval){
     e.preventDefault();if(submit.disabled)return;
     const answers={};
     for(const q of approval.payload.questions){
-      const d=drafts[q.id],option=q.options.find(o=>o.id===d.option_id),text=d.texts[d.option_id]||'';
+      const d=drafts[q.id],option=q.options.find(o=>o.id===d.option_id);let text=d.texts[d.option_id]||'';
+      if(!text.trim()&&fileDraft?.widget.files.length&&/ファイル|素材|画像|PDF|添付/.test(q.text))text='添付ファイル: '+fileDraft.widget.files.map(e=>e.file.name).join('、');
       if(!option){message.textContent='未回答の質問があります。すべて選択してください。';return;}
       if(option.input_required&&!text.trim()){message.textContent='選択した項目の入力欄を記入してください。';return;}
       answers[q.id]={option_id:option.id,text};
     }
     submit.disabled=true;message.textContent='回答を送信しています…';
-    try{await api('/api/decide',{id:approval.id,allow:true,answers});answerDrafts.delete(approval.id);await refresh();}
+    try{const attachment_ids=fileDraft?await fileDraft.widget.upload(api):[];await api('/api/decide',{id:approval.id,allow:true,answers,attachment_ids});answerDrafts.delete(approval.id);fileDraft?.widget.clear();answerFiles.delete(approval.id);await refresh();}
     catch(error){message.textContent=error.message;}
     finally{submit.disabled=false;}
   });

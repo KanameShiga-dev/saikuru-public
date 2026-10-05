@@ -63,6 +63,8 @@ class App:
         self.commands = discover()
         self.models = ModelCatalog(self.commands)
         self.health = environment_status(self.commands)
+        from team_claude_login import ClaudeLogin
+        self.claude_login = ClaudeLogin(self)
         self.port = port
         self.origin = f'http://127.0.0.1:{port}'
         self.cookie = secrets.token_urlsafe(32)
@@ -315,6 +317,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.app.consultations.open(body)
             elif path == '/api/ledger/consultation/send':
                 result = self.app.consultations.send(body)
+            elif path == '/api/ledger/consultation/title':
+                result = self.app.consultations.rename(body)
             elif path == '/api/ledger/consultation/cancel':
                 result = self.app.consultations.cancel(body)
             elif path == '/api/ledger/consultation/submit':
@@ -352,6 +356,13 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/claude-auth/refresh':
                 self.app.refresh_claude_auth()
                 result = {'authenticated': self.app.health.get('claude', {}).get('authenticated')}
+            elif path == '/api/claude-auth/login':
+                if body:
+                    raise ValueError('ログイン情報は画面へ入力しないでください。')
+                result = self.app.claude_login.start()
+            elif path == '/api/claude-auth/login-status':
+                result = self.app.claude_login.snapshot()
+                result['authenticated'] = self.app.health.get('claude', {}).get('authenticated')
             elif path == '/api/ledger/update':
                 result = self.app.ledger.update(body)
             elif path == '/api/ledger/add':
@@ -381,7 +392,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/decide':
                 if type(body.get('allow')) is not bool:
                     raise ValueError('承認または拒否を選んでください。')
-                engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'))
+                engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'))
                 result = {'ok': True}
             elif path == '/api/cancel':
                 engine.cancel_job(body['id'])
@@ -391,6 +402,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('既に行われた変更を確認してください。')
                 engine.retry(body['id'], body.get('note', ''))
                 result = {'ok': True}
+            elif path == '/api/document/resume':
+                if body.get('confirmed') is not True:
+                    raise ValueError('資料作成の再開を確認してください。')
+                result=engine.resume_document(body['id'],body.get('format'))
             elif path == '/api/tasks/repair-review':
                 if body.get('checked_changes') is not True:
                     raise ValueError('修正内容と作業範囲の確認が必要です。')

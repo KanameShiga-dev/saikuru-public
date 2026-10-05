@@ -179,7 +179,12 @@ class HTTPTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown(); cls.server.server_close(); cls.server.app.store.db.close(); cls.server.app.data_lock.close(); cls.temp.cleanup()
+        cls.server.shutdown(); cls.server.server_close(); cls.thread.join(timeout=5)
+        cls.server.app.consultations.shutdown()
+        cls.server.app.consultations.db.close()
+        cls.server.app.ledger.db.close()
+        cls.server.app.engine.handoff.close()
+        cls.server.app.store.db.close(); cls.server.app.data_lock.close(); cls.temp.cleanup()
 
     def post(self, path, body, headers=None):
         h = {'Content-Type': 'application/json', 'X-Agent-Team-UI': '1'}
@@ -208,6 +213,23 @@ class HTTPTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.client.open(self.base + '/data/config.json')
         self.assertEqual(ctx.exception.code, 404)
+
+    def test_wait_api_requires_session(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(self.base+'/api/decision-wait-stats')
+        self.assertEqual(ctx.exception.code,403)
+        data=json.load(self.client.open(self.base+'/api/decision-wait-stats'))
+        self.assertIn('rows',data)
+
+    def test_notification_settings(self):
+        result=self.post('/api/notifications',{'windows_enabled':False})
+        self.assertFalse(result['windows_enabled'])
+        self.assertTrue(result['business_hours_only'])
+
+    def test_wait_period_validation(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self.client.open(self.base+'/api/decision-wait-stats?from=2&to=1')
+        self.assertEqual(ctx.exception.code,400)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 'use strict';
 let consultation=null, consultationTimer=null, consultationEpoch=0;
-let consultationDraftRevision=null;
+let consultationDraftRevision=null, consultationDraftStale=true, consultationAwaitingPlan=false;
 let consultationModels=[], consultationModelsLoading=false, consultationModelEpoch=0;
 let consultationSending=false, consultationSubmitting=false, consultationRegistering=false, consultationActivityTimer=null, consultationStartedAt=null, consultationPendingMode=null;
 const consultDialog=document.getElementById('consultation-dialog');
@@ -12,15 +12,20 @@ function consultationSubmissionControls(){
  const blocked=consultation.busy||consultationSending||consultationSubmitting||consultationRegistering;
  const prompt=$('consultation-prompt').value.trim();
  const docs=$('consultation-kind').value==='documentation';
+ const format=$('consultation-document-format').value;
+ const supported=['md','html','txt','svg','pptx','pdf','mp4'].includes(format);
+ $('consultation-capability-note').textContent=supported?'PowerPoint・PDF・スライド動画を専用ツールで制作できます。音声付き動画には起動中のVOICEVOXと話者IDが必要です。制作環境が不足していれば依頼開始前に警告します。':'成果物の形式を選択してください。Word・Excel・音声単独の出力は未対応です。';
+ $('consultation-document-format').disabled=blocked;
  $('consultation-request-scope').value=docs?'documentation':'development';
  $('consultation-document-scope').hidden=!docs;
- $('consultation-submit').disabled=blocked||!consultation.plan_prompt||!prompt||(!docs&&!consultation.job_allowed)||(docs&&(!$('consultation-document-output').value.trim()||!$('consultation-document-confirm').checked))||Boolean(consultation.job_id)||consultation.project_changed||!$('consultation-confirm').checked;
+ $('consultation-submit').disabled=blocked||consultationDraftStale||!consultation.plan_prompt||!prompt||(!docs&&!consultation.job_allowed)||(docs&&(!$('consultation-document-output').value.trim()||!$('consultation-document-confirm').checked))||Boolean(consultation.job_id)||consultation.project_changed||!$('consultation-confirm').checked;
  $('consultation-register').hidden=docs||consultation.job_allowed||Boolean(consultation.job_id)||consultation.project_changed;
  $('consultation-register-consent').parentElement.hidden=$('consultation-register').hidden;
  $('consultation-register-path').hidden=$('consultation-register').hidden;
  $('consultation-register').disabled=blocked||!$('consultation-register-consent').checked;
  if(!consultation.job_id)$('consultation-job-note').textContent=docs?'資料作成は元プロジェクトの登録不要です。別の保存先と資料作成の範囲を確認してください。':consultation.job_allowed?'計画内容を確認すると開始できます。':'改善・改修には対象登録が必要です。本体の資料を作る場合は、上の依頼範囲を「資料作成のみ」に切り替えてください。';
  $('consultation-submit').textContent=consultationSubmitting?'計画を依頼しています…':'この内容で計画を開始';
+ if(docs&&!supported)$('consultation-submit').disabled=true;
 }
 function consultationActivity(){
  const busy=consultationSending||consultation?.busy;
@@ -47,9 +52,15 @@ function consultationModelControls(){
  const selected=$('consultation-model-select').selectedOptions[0];
  const usable=!consultationModelsLoading&&selected&&!selected.disabled&&Boolean($('consultation-effort').value);
  const blocked=consultation.busy||consultationSending||consultationSubmitting||consultationRegistering||Boolean(consultation.job_id);
- $('consultation-send').disabled=blocked||!usable;
- $('consultation-plan').disabled=blocked||!usable||!consultation.messages.length;
- $('consultation-retry').disabled=blocked||!usable;
+ const consent=$('consultation-consent').checked;
+ const content=Boolean($('consultation-input').value.trim()||consultationImages.files.length||consultation.messages.length);
+ $('consultation-send').disabled=blocked||!usable||!consent;
+ $('consultation-plan').disabled=blocked||!usable||!consent||!content;
+ $('consultation-retry').disabled=blocked||!usable||!consent;
+ $('consultation-input').disabled=blocked;$('consultation-kind').disabled=blocked;
+ $('consultation-name').disabled=blocked;$('consultation-name-save').disabled=blocked;
+ consultationImages.disabled=blocked;consultationImages.render();
+ $('consultation-send-note').textContent=blocked?(consultation.job_id?'作業ボードへ送信済みです。別の内容は「履歴を残して新しい相談を開始」を使ってください。':'処理中です。完了または中止を待ってください。'):!usable?'計画担当のモデル候補と推論設定を確認してください。':!consent?'AIへの送信確認にチェックを入れてください。':!content?'相談内容または参考ファイルを指定すると、初回から計画プロンプトを作成できます。':'入力・添付を含めて計画プロンプトを作成できます。';
  for(const id of ['consultation-adapter','consultation-model-select','consultation-effort','consultation-model-refresh'])$(id).disabled=blocked;
 }
 function consultationEfforts(preferred){
@@ -93,9 +104,11 @@ async function loadConsultationModels(force=false){
 }
 
 function renderConsultation(s){
+ if(consultation?.id===s.id&&Number(s.revision)<Number(consultation.revision))return;
  consultation=s;
+ if(s.busy&&s.last_mode==='plan')consultationAwaitingPlan=true;
  const profile=s.profile;
- $('consultation-title').textContent=s.project.name+'：改修・指摘事項の相談';
+ $('consultation-title').textContent=s.project.name+'：'+(s.title||'改修・指摘事項の相談');
  $('consultation-model').textContent=`${s.calls.length?'最後に使用した担当':'相談の初期設定'}：${profile.adapter} / ${profile.model} / ${profile.effort}`;
  $('consultation-context').value=JSON.stringify(s.project,null,2);
  const research=$('consultation-research');research.replaceChildren();
@@ -125,10 +138,13 @@ function renderConsultation(s){
  $('consultation-retry').hidden=!['failed','cancelled','interrupted'].includes(s.status);
  $('consultation-retry').disabled=s.busy;
  if(consultationDraftRevision!==s.revision){
-  $('consultation-prompt').value=s.plan_prompt||'';
+  if(consultationDraftRevision!==null&&consultationAwaitingPlan&&!s.busy&&s.status==='ready'&&s.last_mode==='plan'&&s.plan_prompt)consultationDraftStale=false;
+  if(!s.busy)consultationAwaitingPlan=false;
+  $('consultation-prompt').value=consultationDraftStale?'':s.plan_prompt||'';
   $('consultation-confirm').checked=false;
   consultationDraftRevision=s.revision;
  }
+ $('consultation-prompt-note').textContent=consultationDraftStale?'現在の入力・添付・相談の種類を確認し、「計画プロンプトを作る」で作成してください。過去の下書きがある場合は相談履歴から確認できます。':'今回作成した下書きです。入力・添付・相談の種類を変更した場合は作成し直してください。';
  $('consultation-copy').disabled=!$('consultation-prompt').value.trim();
  $('consultation-job-note').textContent=s.job_id?'作業依頼へ送信済みです。作業ボードで計画を確認してください。':
   s.project_changed?'プロジェクトの場所が変わりました。新しい相談を開始してください。':
@@ -163,8 +179,9 @@ async function openConsultation(fresh=false){
   const value=await api('/api/ledger/consultation/open',{project_id:selected.id,new:fresh});
   if(epoch!==consultationEpoch)return;
   consultationImages.clear();
-  consultationDraftRevision=null;
+  consultationDraftRevision=null;consultationDraftStale=true;consultationAwaitingPlan=false;
   $('consultation-kind').value=value.documentation?'documentation':'improvement';
+  $('consultation-name').value=value.title||'';
   $('consultation-document-confirm').checked=false;
   $('consultation-input').value='';$('consultation-consent').checked=false;
   if(!consultDialog.open)consultDialog.showModal();
@@ -177,12 +194,13 @@ async function openConsultation(fresh=false){
 }
 
 async function sendConsultation(mode,retry=false){
+ if(!$('consultation-name').value.trim()){consultStatus('相談・依頼名を入力してください。');$('consultation-name').focus();return;}
  if(!consultation||consultation.busy||consultationSending)return;
  const chosen=$('consultation-model-select').selectedOptions[0];
  if(consultationModelsLoading||!chosen||chosen.disabled||!$('consultation-effort').value){consultStatus('利用できるモデルと推論設定を選択してください。');return;}
  if(!$('consultation-consent').checked){consultStatus('モデルへの送信と利用枠の使用を確認してください。');return;}
  const input=$('consultation-input'),text=input.value.trim();
- if(mode==='discuss'&&!text&&!consultationImages.files.length&&!retry){consultStatus('相談内容を入力してください。');input.focus();return;}
+ if(!text&&!consultationImages.files.length&&!retry&&(mode==='discuss'||!consultation.messages.length)){consultStatus('相談内容を入力してください。');input.focus();return;}
  if(retry&&(text||consultationImages.files.length)){consultStatus('再試行は前の内容を送信します。入力した補足を送る場合は「相談を送る」を使ってください。');return;}
  const epoch=consultationEpoch;
  consultationSending=true;consultationPendingMode=mode;consultationActivity();consultationModelControls();
@@ -191,7 +209,7 @@ async function sendConsultation(mode,retry=false){
   const attachment_ids=await consultationImages.upload(api);
   if(epoch!==consultationEpoch)return;
   const value=await api('/api/ledger/consultation/send',{id:consultation.id,revision:consultation.revision,
-   mode,message:text,attachment_ids,kind:$('consultation-kind').value,consent:true,retry,profile:selectedConsultationProfile()});
+   mode,message:text,title:$('consultation-name').value.trim(),attachment_ids,kind:$('consultation-kind').value,consent:true,retry,profile:selectedConsultationProfile()});
   if(epoch!==consultationEpoch)return;
   input.value='';consultationImages.clear();renderConsultation(value);
  }catch(e){
@@ -204,6 +222,15 @@ async function sendConsultation(mode,retry=false){
  }
 }
 
+function invalidateConsultationDraft(){
+ if(consultationSending||consultation?.busy){consultationModelControls();return;}
+ consultationDraftStale=true;$('consultation-prompt').value='';$('consultation-confirm').checked=false;$('consultation-copy').disabled=true;
+ $('consultation-prompt-note').textContent='入力・添付・相談の種類が変わったため、前回の下書きはこの欄から外しました。計画プロンプトを作成し直してください。';
+ consultationSubmissionControls();consultationModelControls();
+}
+consultationImages.onchange=invalidateConsultationDraft;
+$('consultation-input').oninput=invalidateConsultationDraft;
+$('consultation-consent').onchange=consultationModelControls;
 $('consultation-open').onclick=()=>openConsultation();
 $('consultation-adapter').onchange=()=>loadConsultationModels();
 $('consultation-model-select').onchange=()=>consultationEfforts($('consultation-effort').value);
@@ -242,14 +269,15 @@ $('consultation-copy').onclick=async()=>{
  catch{$('consultation-prompt').focus();$('consultation-prompt').select();consultStatus('コピーできませんでした。選択した文章を手動でコピーしてください。');}
 };
 $('consultation-submit').onclick=async()=>{
+ if(consultationDraftStale){consultStatus('現在の内容で計画プロンプトを作成し直してください。');return;}
  if(!$('consultation-confirm').checked){consultStatus('計画プロンプトの内容を確認してください。');return;}
  if(consultationSubmitting)return;
  const epoch=consultationEpoch,id=consultation.id;
  consultationSubmitting=true;consultationSubmissionControls();consultationModelControls();consultStatus('作業ボードへ計画を依頼しています…');
  try{
   await api('/api/ledger/consultation/submit',{id,revision:consultation.revision,
-   plan_prompt:$('consultation-prompt').value,confirmed:true,kind:$('consultation-kind').value,
-   document_output:$('consultation-document-output').value,output_confirmed:$('consultation-document-confirm').checked});
+   plan_prompt:$('consultation-prompt').value,title:$('consultation-name').value.trim(),confirmed:true,kind:$('consultation-kind').value,
+   document_format:$('consultation-document-format').value,document_output:$('consultation-document-output').value,output_confirmed:$('consultation-document-confirm').checked});
   const value=await api('/api/ledger/consultation?id='+encodeURIComponent(id));
   if(epoch!==consultationEpoch)return;
   renderConsultation(value);
@@ -258,8 +286,19 @@ $('consultation-submit').onclick=async()=>{
  finally{consultationSubmitting=false;consultationSubmissionControls();consultationModelControls();}
 };
 
-$('consultation-kind').onchange=()=>{consultationSubmissionControls();if($('consultation-kind').value==='documentation')$('consultation-job-note').textContent='資料作成は元プロジェクトの登録不要です。別の保存先と資料作成の範囲を確認してください。';};
+$('consultation-kind').onchange=()=>{invalidateConsultationDraft();consultationSubmissionControls();if($('consultation-kind').value==='documentation')$('consultation-job-note').textContent='資料作成は元プロジェクトの登録不要です。別の保存先と資料作成の範囲を確認してください。';};
+$('consultation-name-save').onclick=async()=>{
+ if(!consultation||consultation.busy||consultation.job_id)return;
+ const draft=$('consultation-prompt').value;
+ try{
+  const value=await api('/api/ledger/consultation/title',{id:consultation.id,revision:consultation.revision,title:$('consultation-name').value.trim()});
+  consultationDraftRevision=value.revision;
+  renderConsultation(value);$('consultation-prompt').value=draft;
+  consultationSubmissionControls();consultStatus('相談・依頼名を保存しました。');
+ }catch(e){consultStatus(e.message);}
+};
+$('consultation-document-format').onchange=()=>{ $('consultation-document-confirm').checked=false;consultationSubmissionControls(); };
 $('consultation-document-output').oninput=consultationSubmissionControls;
 $('consultation-document-confirm').onchange=consultationSubmissionControls;
 
-$('consultation-request-scope').onchange=()=>{$('consultation-kind').value=$('consultation-request-scope').value==='documentation'?'documentation':'improvement';$('consultation-document-confirm').checked=false;consultationSubmissionControls();};
+$('consultation-request-scope').onchange=()=>{invalidateConsultationDraft();$('consultation-kind').value=$('consultation-request-scope').value==='documentation'?'documentation':'improvement';$('consultation-document-confirm').checked=false;consultationSubmissionControls();};

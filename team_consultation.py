@@ -228,7 +228,7 @@ class Consultations:
             item = {'id': uuid.uuid4().hex, 'project_id': project['id'],
                     'project': {k: project.get(k, '') for k in ('name', 'path', 'purpose',
                         'build_method', 'verification_method', 'completion_criteria', 'next_action')},
-                    'profile': profile, 'messages': [], 'plan_prompt': '', 'calls': [],
+                    'title': '', 'profile': profile, 'messages': [], 'plan_prompt': '', 'calls': [],
                     'busy': False, 'status': 'ready', 'error': '', 'revision': 0,
                     'job_id': None, 'created_at': time.time()}
             self._save(item)
@@ -262,9 +262,13 @@ class Consultations:
             if current_project['path'] != item['project']['path']:
                 raise ValueError('対象フォルダが変更されています。新しい相談を開始してください。')
             item['project'] = {k:current_project.get(k,'') for k in item['project']}
+            if 'title' in body:
+                item['title'] = self._title(body['title'])
             profile = self.validate_profile(body.get('profile') or item['profile'])
             if len(item['calls']) >= 20 or sum(len(m['text']) for m in item['messages']) + len(text) > 60000:
                 raise ValueError('相談の上限に達しました。新しい相談に必要な内容を整理して入力してください。')
+            if mode == 'plan' and body.get('retry') is not True and not text.strip() and not body.get('attachment_ids') and not item['messages']:
+                raise ValueError('相談内容または参考ファイルを指定してください。初回から計画プロンプトを作成できます。')
             submitted_ids = body.get('attachment_ids', [])
             if body.get('retry') is True and submitted_ids:
                 raise ValueError('再試行は前の添付を使います。新しい添付は相談を送る操作で追加してください。')
@@ -277,7 +281,7 @@ class Consultations:
                     raise ValueError('再試行できる相談がありません。')
                 mode = item['last_mode']
             else:
-                message = text.strip() or ('添付ファイルについて、台帳のプロジェクトに照らして相談してください。' if mode == 'discuss' else 'ここまでの相談から計画プロンプトを作成してください。')
+                message = text.strip() or ('添付ファイルについて、台帳のプロジェクトに照らして相談してください。' if mode == 'discuss' else '台帳・添付ファイル・ここまでの相談から計画プロンプトを作成してください。')
                 duplicate = (item['status'] in ('failed','cancelled','interrupted') and item['messages']
                              and item['messages'][-1]['role']=='user'
                              and item['messages'][-1]['text']==message
@@ -385,6 +389,8 @@ class Consultations:
                 return {'job_id': item['job_id'], 'already_submitted': True}
             if item['busy'] or not item['plan_prompt'] or body.get('revision') != item['revision']:
                 raise ValueError('最新の計画プロンプトを確認してください。')
+            if 'title' in body:
+                item['title'] = self._title(body['title'])
             project = self._project(item['project_id'])
             if project['path'] != item['project']['path']:
                 raise ValueError('プロジェクトの場所が変更されています。新しい相談を開始してください。')
@@ -397,6 +403,9 @@ class Consultations:
                 raise ValueError('調査根拠を含めると計画の上限を超えます。計画プロンプトを短くしてください。')
             documentation = body.get('kind') == 'documentation'
             if documentation:
+                from team_document_capabilities import require_supported
+                require_supported(body.get('document_format'), text)
+                goal = '必須成果物形式: '+body['document_format']+'。下書きや手順書だけでは完了しない。\n'+goal
                 if body.get('output_confirmed') is not True:
                     raise ValueError('資料の保存先と資料作成の範囲を確認してください。')
                 from team_folders import project_folder
@@ -410,15 +419,31 @@ class Consultations:
                     self.app.save_config(config)
                 goal = ('資料作成のみ。読み取り元: '+str(source)+'\n保存先: '+str(output)
                         +'\nソース・設定変更、コマンド実行、起動停止、公開は禁止。資料だけを専用ツールで作成する。\n'+goal)
-                job = self.app.engine.create_job(project['name']+'：資料作成計画', goal, str(output), False,
-                                                 planner_profile=profile, document_source=str(source), attachment_ids=item.get('attachment_ids', []))
+                job = self.app.engine.create_job(item.get('title') or project['name']+'：資料作成計画', goal, str(output), False,
+                                                 planner_profile=profile, document_source=str(source), attachment_ids=item.get('attachment_ids', []),document_format=body.get('document_format'))
             else:
-                job = self.app.engine.create_job(project['name'] + '：相談からの改修計画',
+                job = self.app.engine.create_job(item.get('title') or project['name'] + '：相談からの改修計画',
                                                  goal, project['path'], False, planner_profile=profile,
                                                  attachment_ids=item.get('attachment_ids', []))
             item.update(job_id=job['id'], plan_prompt=text.strip(), revision=item['revision'] + 1)
             self._save(item)
             return {'job_id': job['id'], 'already_submitted': False}
+
+    @staticmethod
+    def _title(value):
+        if not isinstance(value, str) or not 1 <= len(value.strip()) <= 160 or any(ord(c) < 32 for c in value):
+            raise ValueError('相談・依頼名を1〜160文字で入力してください。')
+        return value.strip()
+
+    def rename(self, body):
+        title = self._title(body.get('title'))
+        with self.lock:
+            item = self._get(body.get('id'))
+            if item['busy'] or item['job_id'] or body.get('revision') != item['revision']:
+                raise ValueError('処理中・依頼送信済み、または別画面で更新されています。')
+            item.update(title=title, revision=item['revision'] + 1)
+            self._save(item)
+            return self._decorate(item)
 
     def shutdown(self):
         with self.lock:

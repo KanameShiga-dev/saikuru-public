@@ -58,24 +58,24 @@ def reply_to_elicitation(ctx, params):
         ctx.check()
         ctx.event('読み取り専用project_readの自動承認: ' + read_tool[1])
         return {'action': 'accept', 'content': content}
-    document_tool = re.fullmatch(r'Allow the project_read MCP server to run tool "(list_files|read_file|search_files|read_document|write_document)"\?', message.strip())
+    document_tool = re.fullmatch(r'Allow the project_read MCP server to run tool "(list_files|read_file|search_files|read_document|write_document|generate_media|media_environment)"\?', message.strip())
     document_broker = str(Path(__file__).with_name('document_tools.py'))
     if (server == 'project_read' and document_tool and getattr(ctx,'document_scope',False)
             and document_broker in read_config.get('args',[])
-            and (document_tool[1]!='write_document' or (ctx.task['role']=='builder' and '--write' in read_config.get('args',[])))):
+            and (document_tool[1] not in ('write_document','generate_media') or (ctx.task['role']=='builder' and '--write' in read_config.get('args',[])))):
         ctx.check()
         ctx.event('資料作成範囲の専用ツール承認: '+document_tool[1])
         return {'action':'accept','content':content}
     # A session-local app confirmation can reuse this user's explicit scope.
     # Every other request reaches the board even with automatic_operations enabled.
-    project_ok = False  # Distribution builds do not inherit personal GUI approvals.
-    target = 'project-runtime-app'
+    project_ok = Path(ctx.project).resolve() == Path(r'C:\Projects\Projects\Games\bravia-New-Games').resolve()
+    target = 'bravestrategypcruntimesmoke'
     text = message.casefold()
     scoped = (project_ok and ctx.task['role'] == 'builder'
               and params.get('serverName') in ('node_repl', 'computer-use', 'computer_use')
               and re.search(r'(?<![a-z0-9_])' + target + r'(?![a-z0-9_])', text)
               and ('computer use' in text or 'computer-use' in text
-                   or text.strip() == 'allow codex to use project-runtime-app?')
+                   or text.strip() == 'allow codex to use bravestrategypcruntimesmoke?')
               and not any(word in text for word in ('always', 'permanent', 'all apps', '永久', 'delete', 'upload', 'payment', 'password')))
     answer = ctx.approve({'source': 'codex', 'operation': 'mcpServer/elicitation/request',
         'force_manual': not scoped, 'details': {'server': params.get('serverName'),
