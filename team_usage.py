@@ -173,6 +173,13 @@ class UsageMonitor:
         self.reader_locks = {name: threading.Lock() for name in ('codex', 'claude')}
         self.values = {name: {'status': 'loading', 'rows': [], 'updated_at': None,
                             'note': '利用枠を取得中…'} for name in ('codex', 'claude')}
+        self.claude_schedule = ROOT / 'data' / 'claude-usage-schedule.json'
+        self.claude_next = 0
+        try:
+            value=json.loads(self.claude_schedule.read_text(encoding='utf-8'))
+            self.claude_next=min(time.time()+900,max(0,float(value['next_update_at'])))
+        except (OSError,ValueError,KeyError,TypeError):
+            pass
 
     def start(self):
         for name in ('codex', 'claude'):
@@ -182,7 +189,7 @@ class UsageMonitor:
         delay = 300
         while not self.shutdown.is_set():
             success = self.refresh_now(name)
-            delay = 300 if success else min(3600, max(900, delay * 2))
+            delay = max(1,self.claude_next-time.time()) if name=='claude' else (300 if success else min(3600, max(900, delay * 2)))
             with self.lock:
                 self.values[name]['next_update_at'] = time.time() + delay
             if self.shutdown.wait(delay):
@@ -194,6 +201,24 @@ class UsageMonitor:
         if name not in readers:
             raise ValueError('未対応の利用枠です。')
         with self.reader_locks[name]:
+            if name=='claude':
+                if time.time()<self.claude_next:
+                    with self.lock:
+                        self.values[name]['next_update_at']=self.claude_next
+                        if self.values[name]['updated_at'] is None:
+                            self.values[name].update(status='unavailable',note='15分間隔の次回取得を待っています。')
+                    return self.values[name]['status']=='ok'
+                # Reserve the interval before contacting the provider, including failures.
+                self.claude_next=time.time()+900
+                try:
+                    self.claude_schedule.parent.mkdir(parents=True,exist_ok=True)
+                    temporary=self.claude_schedule.with_suffix('.tmp')
+                    temporary.write_text(json.dumps({'next_update_at':self.claude_next}),encoding='utf-8')
+                    temporary.replace(self.claude_schedule)
+                except OSError:
+                    with self.lock:
+                        self.values[name].update(status='unavailable',note='次回取得時刻を保存できないため取得を保留しました。')
+                    return False
             if mark_loading:
                 with self.lock:
                     self.values[name].update(status='loading', note='CLI更新後の利用枠を再取得中…')
@@ -202,7 +227,7 @@ class UsageMonitor:
                 if not any(r.get('short') or r.get('weekly') for r in rows):
                     raise UsageUnavailable('利用枠の割合が提供されていません。')
                 value = {'status': 'ok', 'rows': rows, 'updated_at': time.time(),
-                         'note': '5分ごとに自動取得'}
+                         'note': '15分ごとに自動取得' if name=='claude' else '5分ごとに自動取得'}
                 with self.lock:
                     self.values[name] = value
                 return True
@@ -217,8 +242,8 @@ class UsageMonitor:
         with self.lock:
             result = copy.deepcopy(self.values)
         now = time.time()
-        for value in result.values():
-            value['stale'] = value['status'] != 'ok' or now - (value['updated_at'] or 0) > 600
+        for name,value in result.items():
+            value['stale'] = value['status'] != 'ok' or now - (value['updated_at'] or 0) > (1200 if name=='claude' else 600)
             for row in value['rows']:
                 for key in ('short', 'weekly'):
                     item = row.get(key)

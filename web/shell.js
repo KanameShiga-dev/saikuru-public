@@ -1,6 +1,7 @@
 'use strict';
 // 共通ヘッダーの「その他」メニュー（2026-10-03 UI改善）。処理はメニュー内の各ボタンが持つ既存のIDに任せる。
 (()=>{
+  for(const nav of document.querySelectorAll('.app-tabs')){if(!nav.querySelector('a[href="/skills"]')){const link=document.createElement('a');link.href='/skills';link.textContent='スキル一覧';nav.append(link);}}
   for(const menu of document.querySelectorAll('.app-menu')){
     const toggle=menu.querySelector('.app-menu-button'),list=menu.querySelector('.app-menu-list');
     if(!toggle||!list)continue;

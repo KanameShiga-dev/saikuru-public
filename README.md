@@ -73,3 +73,12 @@ AIの報告だけで完了とは判断しません。削除・公開・外部送
 - [Word・Excelの作成・編集](docs/OFFICE_DOCUMENTS.md)
 
 制作用依存は `requirements-documents.txt` を参照してください。
+
+
+## 企業の経験とスキル
+
+- [企業記憶の自動蓄積](docs/ENTERPRISE_MEMORY.md)
+- [経験からスキル候補へ](docs/EXPERIENCE_SKILL_CANDIDATES.md)
+- [正式化・一覧・共有・版管理](docs/PROJECT_SKILL_RELEASE.md)
+
+Claude利用枠は15分間隔で取得し、再起動後も次回取得時刻を保持します。実操作とモデル利用の一巡確認は未実施です。

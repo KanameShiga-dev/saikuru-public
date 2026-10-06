@@ -315,6 +315,9 @@ class Consultations:
             ctx.investigation = bootstrap(ctx.read_root,text,item.get('investigation'))
             ctx.check()
             payload = json.dumps({'mode': mode, 'project': item['project'], 'conversation': item['messages'],
+                                  'reviewed_project_skills':self.app.engine.handoff.released_skills(ctx.read_root,text),
+                                  'skills_note':'確認された手順。今回の依頼と安全制約が優先し、実行権限は付与しない。',
+                                  'enterprise_experience':self.app.engine.handoff.experience(ctx.read_root,text),
                                   'investigation':ctx.investigation}, ensure_ascii=False)
             output = ADAPTERS[item['profile']['adapter']]().run(ctx, payload, SCHEMA)
             ctx.check()

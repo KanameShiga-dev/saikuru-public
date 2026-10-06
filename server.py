@@ -286,6 +286,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise PermissionError('画面を再読み込みしてください。')
                 query = parse_qs(urlparse(self.path).query)
                 return self.send(200, self.app.moves.preview_status((query.get('id') or [''])[0]))
+            if path == '/api/skills':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                return self.send(200,{'skills':self.app.engine.handoff.skill_library(),
+                                     'projects':self.app.ledger.snapshot()['projects']})
             if path == '/api/handoff':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -297,7 +302,9 @@ class Handler(BaseHTTPRequestHandler):
                 before = int(before) if before.isdigit() else None
                 return self.send(200, {'records':self.app.engine.handoff.history(job_id,job['project'],before),
                     'conflicts':self.app.engine.handoff.pending_conflicts(job_id),
-                    'facts':self.app.engine.handoff.current_facts(job_id)})
+                    'facts':self.app.engine.handoff.current_facts(job_id),
+                    'skill_candidates':self.app.engine.handoff.skill_candidates(job['project']),
+                    'released_skills':self.app.engine.handoff.released_skills(job['project'])})
             if path == '/api/mobile':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -308,6 +315,7 @@ class Handler(BaseHTTPRequestHandler):
                     'fingerprint': gateway.fingerprint if gateway else None,
                     'error': self.app.mobile_error})
             files = {'/history': 'history.html', '/history.js': 'history.js', '/history.css': 'history.css', '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/theme.css': 'theme.css', '/shell.js': 'shell.js',
+                     '/skills': 'skills.html', '/skills.js': 'skills.js',
                      '/operation-tests': 'operation-tests.html', '/operation-tests.js': 'operation-tests.js',
                      '/attachments.js': 'attachments.js', '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
             if path not in files:
@@ -495,6 +503,26 @@ class Handler(BaseHTTPRequestHandler):
                 handoff = 'handoff-' + primary
                 self.app.engine.handoff.backup(self.app.store.directory / handoff)
                 result = {'file':primary,'handoff_file':handoff}
+            elif path == '/api/skills/apply':
+                if body.get('reviewed') is not True:
+                    raise ValueError('適用先の条件と情報共有の確認が必要です。')
+                target=next((p for p in self.app.ledger.snapshot()['projects'] if p['id']==body.get('project_id')),None)
+                if not target:
+                    raise ValueError('台帳のプロジェクトを選択してください。')
+                if canonical(target['path']) not in [canonical(p) for p in self.app.config['approved_roots']]:
+                    raise ValueError('適用先をAI作業対象として登録してください。')
+                engine.handoff.apply_skill(body.get('version_id',''),target['path'])
+                self.app.store.event('project_skill_shared','確認したスキルを別の登録済みプロジェクトへ適用しました。')
+                result={'ok':True}
+            elif path in ('/api/skills/release','/api/skills/state'):
+                job=self.app.store.get(body.get('job_id',''),'job')
+                if path=='/api/skills/release':
+                    version=engine.handoff.release_skill(job['project'],body.get('candidate_id',''),body)
+                else:
+                    version=body.get('version_id','')
+                    engine.handoff.manage_skill(job['project'],version,body.get('enabled'))
+                self.app.store.event('project_skill_changed','プロジェクトのスキル版・利用状態を画面で変更しました。',job_id=job['id'])
+                result={'ok':True,'version_id':version}
             elif path == '/api/handoff/fact':
                 job = self.app.store.get(body.get('job_id',''), 'job')
                 self.app.engine.handoff.set_user_fact(job['project'],job['id'],body.get('key',''),

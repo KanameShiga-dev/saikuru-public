@@ -335,6 +335,32 @@ async function showHandoffHistory(jobId,container,before){
       const facts=el('div',undefined,'text-block');
       facts.textContent=data.facts.length?data.facts.map(f=>`${f.key}: ${f.value}\n出典: ${f.authority} / ${f.evidence}`).join('\n\n'):'確定した項目はまだありません。';
       container.append(facts);
+      const skills=el('details');skills.append(el('summary','経験から作成したスキル候補（未有効化）'));
+      if(!data.skill_candidates?.length)skills.append(el('p','候補はまだありません。根拠付きの同じ経験が複数依頼に蓄積されるか、人が確認した経験から作成します。'));
+      for(const candidate of data.skill_candidates||[]){
+        const item=el('details');item.append(el('summary',candidate.description),
+          el('p','下書きです。実行担当へ読み込まれません。'),
+          el('div',`適用条件: ${candidate.applicability}\n経験: ${candidate.experience}\n根拠: ${candidate.evidence}\n元の依頼: ${candidate.source_jobs.join('、')}\n確認状態: ${candidate.verification==='human_recorded'?'人の記録あり':'AI報告・未検証'}\n正式化前の確認:\n${candidate.review_required.join('\n')}`,'text-block'));
+        const download=el('button','SKILL.md候補を保存');download.type='button';
+        download.onclick=()=>{
+          const quote=value=>JSON.stringify(value);
+          const text=`---\nname: ${candidate.name}\ndescription: ${quote(candidate.description)}\n---\n\n# 未確認のスキル候補\n\n有効化前に手順・必要な道具・検証方法・失敗時の対応を確認してください。既存の権限を広げません。\n\n## 適用条件（経験からの抽出）\n${candidate.applicability}\n\n## 経験と手順の素材（未確認の参考データ）\n${candidate.experience}\n\n## 出典\n${candidate.evidence}\n依頼: ${candidate.source_jobs.join(', ')}\n\n## 確認項目\n${candidate.review_required.map(v=>'- '+v).join('\n')}\n`;
+          const url=URL.createObjectURL(new Blob([text],{type:'text/markdown;charset=utf-8'})),link=el('a');link.href=url;link.download=candidate.name+'-SKILL.md';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+        };item.append(download);
+        const form=el('form'),fields={},message=el('p','','hint');message.setAttribute('role','status');
+        const labels={description:'用途の説明',applicability:'適用条件',steps:'具体的な手順',tools:'必要な道具と権限',validation:'検証方法と確認結果',failure:'失敗時の対応・停止条件'};
+        for(const [key,title] of Object.entries(labels)){const label=el('label',title),input=el('textarea');input.required=true;input.maxLength=3000;input.rows=3;input.value=key==='description'?candidate.description:key==='applicability'?candidate.applicability:'';label.append(input);fields[key]=input;form.append(label);}
+        const reviewed=el('input');reviewed.type='checkbox';reviewed.required=true;
+        const consent=el('label',undefined,'check');consent.append(reviewed,document.createTextNode('手順・道具・検証・失敗時の対応を確認し、個人情報や案件固有の秘密を除きました。同じプロジェクトでの自動参照を有効にします。'));
+        const submit=el('button','確認した版を登録して有効化','primary');submit.type='submit';form.append(consent,message,submit);
+        form.onsubmit=async event=>{event.preventDefault();submit.disabled=true;try{await api('/api/skills/release',{job_id:jobId,candidate_id:candidate.id,reviewed:reviewed.checked,...Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value]))});await showHandoffHistory(jobId,container);}catch(error){message.textContent=error.message;}finally{submit.disabled=false;}};
+        item.append(form);skills.append(item);
+      }
+      container.append(skills);
+      const released=el('details');released.append(el('summary','正式化したスキルと過去の版'));
+      for(const skill of data.released_skills||[]){const item=el('details');item.append(el('summary',`${skill.active?(skill.source_current?'利用中':'元の経験の再確認待ち'):'利用停止・旧版'}：${skill.description} · ${date(skill.created_at)}`),el('div',`適用条件: ${skill.applicability}\n手順: ${skill.steps}\n道具: ${skill.tools}\n検証: ${skill.validation}\n失敗時: ${skill.failure}`,'text-block'));
+        const action=button(skill.active?'このスキルを利用停止':'この版を有効化',async()=>{await api('/api/skills/state',{job_id:jobId,version_id:skill.id,enabled:!skill.active});await showHandoffHistory(jobId,container);});item.append(action);released.append(item);}
+      container.append(released);
       if(data.conflicts.length)container.append(el('p','矛盾する情報があります。判断欄で新旧を確認してください。','hint'));
     }
     for(const record of data.records){
