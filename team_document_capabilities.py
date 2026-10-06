@@ -9,7 +9,10 @@ import urllib.request
 import re
 from pathlib import Path
 
-SUPPORTED = {'md', 'html', 'txt', 'svg', 'pptx', 'pdf', 'mp4'}
+SUPPORTED = {'md', 'html', 'txt', 'svg', 'pptx', 'pdf', 'mp4', 'docx', 'xlsx'}
+MEDIA = {'pptx', 'pdf', 'mp4'}
+OFFICE = {'docx', 'xlsx'}
+BINARY = MEDIA | OFFICE
 ROOT=Path(__file__).resolve().parent
 
 def required_visuals(job):
@@ -29,8 +32,13 @@ def runtime():
 
 
 def require_supported(format_name, goal=''):
-    if format_name not in SUPPORTED:raise ValueError('成果物形式を選択してください。対応はMD・HTML・TXT・SVG・PowerPoint・PDF・MP4です。')
-    if format_name in {'pptx','pdf','mp4'}:
+    if format_name not in SUPPORTED:raise ValueError('成果物形式を選択してください。対応はMD・HTML・TXT・SVG・PowerPoint・PDF・MP4・Word・Excelです。')
+    if format_name in OFFICE:
+        python,_=runtime()
+        module={'docx':'docx','xlsx':'openpyxl'}[format_name]
+        check=subprocess.run([python,'-c','import '+module],capture_output=True,timeout=15,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        if check.returncode:raise ValueError('指定形式の制作ライブラリが利用できません。依頼を開始しません。')
+    if format_name in MEDIA:
         python,ffmpeg=runtime()
         module={'pptx':'pptx','pdf':'reportlab','mp4':'PIL'}[format_name]
         check=subprocess.run([python,'-c','import '+module+'; import PIL'],capture_output=True,timeout=15,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
@@ -47,7 +55,7 @@ def require_supported(format_name, goal=''):
 
 def require_artifacts(job):
     expected=job.get('document_format')
-    if expected not in {'pptx','pdf','mp4'}:return
+    if expected not in BINARY:return
     root=Path(job['project']).resolve();manifest=root/('.saikuru-output-'+job['id']+'.json')
     if not manifest.is_file() or manifest.is_symlink():raise ValueError('指定された成果物が未作成です。完了扱いにできません。')
     for record in json.loads(manifest.read_text(encoding='utf-8')):
@@ -66,7 +74,12 @@ def require_plan(job,result):
     format_name=job.get('document_format')
     if not format_name:return
     require_supported(format_name,job.get('goal',''))
-    if format_name in {'pptx','pdf','mp4'}:
+    if format_name in OFFICE:
+        tasks=result.get('tasks',[])
+        if not any(t.get('role')=='builder' and 'generate_office' in t.get('instruction','') and format_name in t.get('instruction','').lower() for t in tasks):
+            raise ValueError('計画に指定成果物の実制作工程がありません。builderのgenerate_officeで'+format_name+'を作成（既存ファイルの編集はbase_pathを指定して新しい名前で保存）する工程と、完成物の確認工程を計画してください。')
+        return
+    if format_name in MEDIA:
         tasks=result.get('tasks',[])
         if not any(t.get('role')=='builder' and 'generate_media' in t.get('instruction','') and format_name in t.get('instruction','').lower() for t in tasks):
             raise ValueError('計画に指定成果物の実制作工程がありません。builderのgenerate_mediaで'+format_name+'を生成する工程と、完成物の確認工程を計画してください。台本・手順書だけでは依頼を達成しません。')

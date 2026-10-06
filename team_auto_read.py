@@ -262,21 +262,40 @@ def _bash_search(script, root, initial_cwd=None):
     """Validate every leaf of a bounded read-only shell sequence without executing it."""
     if any(c in script for c in '$`<>\r\n') or len(script) > 1000:
         return False
-    lexer = shlex.shlex(script, posix=True, punctuation_chars=';&|<>')
+    lexer = shlex.shlex(script, posix=True, punctuation_chars=';&|<>()')
     lexer.whitespace_split = True
     lexer.commenters = ''
-    tokens = list(lexer)
-    chunks, part, before = [], [], None
+    tokens = []
+    for token in lexer:
+        # shlex merges adjacent punctuation (e.g. ");"); split it into known operators only.
+        if token and all(c in ';&|<>()' for c in token):
+            pieces = re.findall(r'&&|\|\||[;|()]|.', token)
+            if any(p not in ('&&', '||', ';', '|', '(', ')') for p in pieces):
+                return False
+            tokens.extend(pieces)
+        else:
+            tokens.append(token)
+    # Subshell groups and "||" can leave cd state unknown, so cd is refused with them.
+    grouped = any(t in ('(', ')', '||') for t in tokens)
+    chunks, part, before, depth, closed = [], [], None, 0, False
     for token in tokens:
-        if token in ('&&', ';', '|'):
+        if token in ('&&', '||', ';', '|'):
             if not part:
                 return False
-            chunks.append((before, part, token));part=[];before=token
-        elif token and all(c in ';&|<>' for c in token):
+            chunks.append((before, part, token));part=[];before=token;closed=False
+        elif token == '(':
+            if part or closed:
+                return False
+            depth += 1
+        elif token == ')':
+            if not part or depth == 0:
+                return False
+            depth -= 1;closed=True
+        elif closed:
             return False
         else:
             part.append(token)
-    if not part:
+    if not part or depth:
         return False
     chunks.append((before, part, None))
     if len(chunks) > 12:
@@ -292,7 +311,7 @@ def _bash_search(script, root, initial_cwd=None):
     for preceding, words, following in chunks:
         name, args = words[0], words[1:]
         if name == 'cd':
-            if preceding == '|' or following not in ('&&', ';') or len(args) != 1:
+            if grouped or preceding == '|' or following not in ('&&', ';') or len(args) != 1:
                 return False
             target = path(args[0])
             if not target or not target.is_dir():
@@ -330,6 +349,17 @@ def _bash_search(script, root, initial_cwd=None):
                     if not target or not target.is_file():
                         return False
                 searched=True
+        elif name == 'ls':
+            # Names only; no recursion so protected folders are not listed.
+            if preceding == '|' or any(a.startswith('-') and not re.fullmatch(r'-[1aAlhtrSF]+', a) for a in args):
+                return False
+            targets = [a for a in args if not a.startswith('-')]
+            if len(targets) > 20 or any(not (path(raw) and path(raw).exists()) for raw in targets):
+                return False
+            searched=True
+        elif name in ('python', 'python3', 'py') and args in (['--version'], ['-V']):
+            if preceding == '|':
+                return False
         elif name in ('cat', 'sed', 'head', 'tail') and preceding != '|':
             file_arg=None
             if name=='cat' and len(args)==1 and not args[0].startswith('-'):

@@ -244,6 +244,7 @@ function render() {
       const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatuses[job.status]):pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
       card.append(badge,el('strong',task.title));
       const wait=waitingReason(task);if(wait)card.append(el('p',wait,'summary'));
+      if(task.next_action)card.append(el('p',task.next_action,'summary'));
       const reason=stopReason(task);
       if(reason)card.append(el('p',reason.title,'summary'));
       else if(task.summary)card.append(el('p',task.summary,'summary'));
@@ -578,6 +579,8 @@ function renderDetail(task,version) {
   }else if(task.agent_name)body.append(el('p','実行時に共通定義を読み込み、専用セッションを起動します。','hint'));
   else if(task.common_agent_hashes)body.append(el('p','この過去の試行は役割指示を読み込む旧方式でした。独立Agentの起動記録はありません。','hint'));
   if(task.agent_run_history?.length)body.append(section('過去のAgent実行',task.agent_run_history.map(run=>`${run.name} · 試行 ${run.attempt} · ${run.status}\nセッションID: ${run.session_id||'未取得'}`).join('\n\n')));
+  if(!endedJob(task)&&task.next_action)body.append(el('p','おすすめの次の操作：'+task.next_action,'notice'));
+  if(!endedJob(task)&&task.previous_findings&&task.result?.status==='needs_changes')body.append(el('p','修正後も指摘が残っています。変更した箇所と根拠を確認してください。未変更のまま再試行せず、修正または未完了項目を残す引き継ぎを選んでください。','notice'));
   if(!endedJob(task)&&group(task)===2)body.append(decisionHelp(task));
   if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status))body.append(advicePanel(task));
   if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status)&&['researcher','builder'].includes(task.role))body.append(recoveryPanel(task,job));
@@ -830,7 +833,7 @@ function openFolders(create){
   $('folder-title').textContent=create?'新規プロジェクトのフォルダを作成':'既存フォルダを選択';
   $('folder-create-form').hidden=!create;$('folder-name').value='';
   $('folder-list').replaceChildren();$('folder-dialog').showModal();
-  folderAction(()=>loadFolder('C:\\Projects'));
+  folderAction(()=>loadFolder('C:\\AI_Work'));
 }
 $('choose-folder').addEventListener('click',()=>openFolders(false));
 $('new-folder').addEventListener('click',()=>openFolders(true));
@@ -856,7 +859,7 @@ $('folder-use').addEventListener('click',()=>{
     $('folder-dialog').close();select.focus();await refresh();
   });
 });
-$('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.target);action(async()=>{const attachment_ids=await jobImages.upload(api);await api('/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids});$('new-dialog').close();e.target.reset();jobImages.clear();notice('依頼を受け付けました。計画の作成を始めます。');});});
+$('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.target);action(async()=>{const attachment_ids=await jobImages.upload(api);const created=await api('/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids});$('new-dialog').close();e.target.reset();jobImages.clear();notice('依頼を受け付けました。計画の作成を始めます。'+(created.prepared?.length?' '+created.prepared.join(' '):''));});});
 $('pause').addEventListener('click',()=>action(()=>api('/api/pause',{paused:!state.paused})));
 $('stop').addEventListener('click',()=>action(async()=>{if(confirm('全ての実行中の依頼を中止し、新規着手を停止しますか？'))await api('/api/stop',{});}));
 $('backup').addEventListener('click',()=>action(async()=>{const r=await api('/api/backup',{});notice('DBのバックアップを保存しました: data/'+r.file+'、data/'+r.handoff_file);}));

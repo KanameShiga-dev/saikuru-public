@@ -1,3 +1,5 @@
+> 添付パッケージの提供元の仕様・確認記録を基にした資料です。記載の機能確認は提供元の報告で、本環境で再実施した結果ではありません。本環境への適用と未確認事項は CHANGE_REQUEST_INTEGRATION_20261006.md を参照してください。
+
 # 検索・読み取りの自動承認
 
 2026-09-27、頻繁な操作承認を減らす利用者の依頼により追加。
@@ -40,5 +42,7 @@ DB退避: `data/backup-20260927-223536-7650a7.sqlite3`。
 追記 2026-09-28 00:08: 実際の承認要求 `Get-Command Unity.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source` が新しい判定で許可になることを確認。要求自体は利用者による承認済みだったため再実行・重複承認していない。実行中担当0件で正常再起動して反映。変更前ファイルは `data/backups/auto-locate-20260928-000753/`、DBは `data/backup-20260928-000823-eaa2de.sqlite3`。巻戻しは安全な停止後にteam_auto_read.pyのみ復元して再起動する。
 
 実運用でattempt 6の読み取り要求がauto_approvedになり、次のコマンドへ進んだことをAPIの履歴で確認。git status --shortは自動許可リスト外のまま、再開時の現状確認として一度だけ承認した。
+
+追記 2026-10-05: 利用者の指示により、Claude Bashの読み取り判定に `ls`（-1aAlhtrSF のみ、再帰なし、プロジェクト内パス）、`python`/`python3`/`py` の `--version`/`-V`、区切り `||`、サブシェルの丸括弧を追加。実例 `(python --version || py --version); ls; cat generate.py` を許可。括弧または `||` を含む場合は `cd` を手動へ戻す（cdの成否・範囲が静的に確定しないため）。版数確認だけのコマンドは読み取り扱いにしない。スクリプト実行・リダイレクト・ヒアドキュメント・プロジェクト外は従来どおり手動。判定関数に22件の文字列を与えて期待どおりを確認（テストスイートは未実行）。変更前は `data/backups/auto-read-ls-20261005-142506/`。巻戻しは実行中担当0件で同ファイルのみ戻して再起動する。
 
 追記 2026-09-27 23:54: 上記Gitの対象外制限を修正。実際に保留中だった `git diff --check -- HANDOFF.md unity/Assets/Scripts/Unity/Boot/M5BattleStateController.cs` が新しい判定を通過し、通常APIから許可して担当が終了するまで確認。続く反映は実行中担当0件で正常再起動した。テストスイートは実行していない。変更前のteam_auto_read.pyは `data/backups/auto-git-20260927-235246/`、DBは `data/backup-20260927-235413-b37b2f.sqlite3`。必要時は担当を停止して同ファイルのみ戻し、正常再起動する。DBの巻戻しは不要。

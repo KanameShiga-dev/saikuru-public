@@ -69,13 +69,22 @@ class HandoffDB:
         with self.lock, self.db:
             if self.db.execute('SELECT 1 FROM facts WHERE source_id=?', (source_id,)).fetchone():
                 return
-            current = self.db.execute("SELECT seq,value FROM facts WHERE job_id=? AND key=? AND status='current' ORDER BY seq DESC LIMIT 1", (job_id,key)).fetchone()
+            current = self.db.execute("SELECT seq,value,authority FROM facts WHERE job_id=? AND key=? AND status='current' ORDER BY seq DESC LIMIT 1", (job_id,key)).fetchone()
+            if authority=='model_reported' and current and current[2]=='model_reported':
+                confirmed=self.db.execute("SELECT seq,value,authority FROM facts WHERE project=? AND key=? AND job_id<>? AND status='current' AND authority IN ('user_decision','user_confirmed') ORDER BY seq DESC LIMIT 1",(canonical(project),key,job_id)).fetchone()
+                if confirmed and ' '.join(confirmed[1].split())!=' '.join(value.split()):current=confirmed
             if not current and authority == 'model_reported':
-                current = self.db.execute("SELECT seq,value FROM facts WHERE project=? AND key=? AND job_id<>? AND status='current' AND authority IN ('user_decision','user_confirmed') ORDER BY seq DESC LIMIT 1",
+                current = self.db.execute("SELECT seq,value,authority FROM facts WHERE project=? AND key=? AND job_id<>? AND status='current' AND authority IN ('user_decision','user_confirmed') ORDER BY seq DESC LIMIT 1",
                     (canonical(project),key,job_id)).fetchone()
             same = current and ' '.join(current[1].split()) == ' '.join(value.split())
-            if current and not same and authority == 'user_decision':
+            # Within one job, a later AI report about the same key is a progress update
+            # (e.g. "not created yet" -> "created"). Supersede it but keep an audit row.
+            # Facts the user confirmed or decided still stop for a human decision.
+            time_update = bool(current and not same and authority == 'model_reported' and current[2] == 'model_reported')
+            superseded = None
+            if current and not same and (authority == 'user_decision' or time_update):
                 self.db.execute("UPDATE facts SET status='superseded' WHERE seq=?",(current[0],))
+                superseded = current[0] if time_update else None
                 current = None
             status = 'current' if not current else ('duplicate' if same else 'pending')
             cursor = self.db.execute('INSERT INTO facts(project,job_id,key,value,evidence,authority,source_id,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
@@ -83,6 +92,9 @@ class HandoffDB:
             if status == 'pending':
                 self.db.execute('INSERT INTO conflicts(job_id,key,old_fact,new_fact) VALUES (?,?,?,?)',
                     (job_id,key,current[0],cursor.lastrowid))
+            elif superseded:
+                self.db.execute("INSERT INTO conflicts(job_id,key,old_fact,new_fact,status,resolved_at,resolution) VALUES (?,?,?,?,'resolved',?,?)",
+                    (job_id,key,superseded,cursor.lastrowid,time.time(),json.dumps({'choice':'new','auto':'later_model_report'},ensure_ascii=False)))
 
     def sync(self, job, tasks, approvals):
         project, job_id = job['project'], job['id']

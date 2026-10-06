@@ -97,6 +97,39 @@ class App:
             if current.get('claude', {}).get('authenticated') and previous is not True:
                 self.usage.refresh_now('claude')
 
+    def prepare_new_request(self, project):
+        """For jobs started from 依頼を追加: register in the ledger, then create missing harness files.
+
+        Uses the existing ledger/harness paths (no overwrite, no moves). Failures are reported, not raised,
+        so the request itself is not lost. Projects outside the ledger root are skipped.
+        """
+        from team_ledger import ROOT as ledger_root
+        notes = []
+        try:
+            path = Path(project).resolve()
+            if (canonical(path) not in [canonical(p) for p in self.config['approved_roots']]
+                    or not path.is_dir() or not path.is_relative_to(ledger_root) or path == ledger_root):
+                return ['台帳登録・ハーネスのコンバートは対象外です（設定された台帳ルート以下の登録済みプロジェクトのみ）。']
+            item = self.ledger.add({'path': str(path)})
+            notes.append('台帳に登録しました。')
+        except (OSError, ValueError, RuntimeError) as exc:
+            return [f'台帳登録に失敗しました: {exc}']
+        try:
+            preview = self.harnesses.preview({'id': item['id']})
+            create = [row for row in preview['files'] if row['state'] == 'create']
+            if not create:
+                notes.append('ハーネス資料は既にそろっています（上書きなし）。')
+            else:
+                result = self.harnesses.apply({'token': preview['token'], 'confirmed': True,
+                    'confirmed_project': preview['project']['path'], 'moves': [], 'directories': [],
+                    'files': [{'path': row['path'], 'content': row['content']} for row in create]})
+                notes.append(f"ハーネスのコンバートで{len(result['created'])}件を作成しました（既存{len(result['skipped_existing'])}件は上書きなし）。")
+            if preview['conflicts']:
+                notes.append('作成しなかった衝突: ' + '、'.join(preview['conflicts'][:5]))
+        except (OSError, ValueError, RuntimeError) as exc:
+            notes.append(f'ハーネスのコンバートに失敗しました: {exc}')
+        return notes
+
     def save_config(self, config):
         validate_config(config)
         with self.store.lock:
@@ -386,9 +419,16 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/jobs':
                 if body.get('consent') is not True:
                     raise ValueError('AIへの送信と作業範囲の確認が必要です。')
+                if not isinstance(body.get('title'),str) or not isinstance(body.get('goal'),str) or not body['title'].strip() or not body['goal'].strip() or len(body['goal'])>16000:
+                    raise ValueError('依頼名と内容を入力してください（内容は16,000文字まで）。')
+                self.app.attachments.select(body.get('attachment_ids',[]))
+                # 依頼を追加: ledger registration and harness conversion run before planning starts.
+                prepared = self.app.prepare_new_request(str(body.get('project', '')))
                 result = engine.create_job(str(body.get('title', '')), str(body.get('goal', '')),
                                            str(body.get('project', '')), body.get('auto_execute') is True,
                                            attachment_ids=body.get('attachment_ids', []))
+                self.app.store.event('new_request_harness', ' '.join(prepared), job_id=result['id'])
+                result = dict(result, prepared=prepared)
             elif path == '/api/decide':
                 if type(body.get('allow')) is not bool:
                     raise ValueError('承認または拒否を選んでください。')

@@ -406,13 +406,12 @@ class Consultations:
                 from team_document_capabilities import require_supported
                 require_supported(body.get('document_format'), text)
                 goal = '必須成果物形式: '+body['document_format']+'。下書きや手順書だけでは完了しない。\n'+goal
-                if body.get('output_confirmed') is not True:
-                    raise ValueError('資料の保存先と資料作成の範囲を確認してください。')
                 from team_folders import project_folder
-                output = project_folder(str(body.get('document_output', '')))
                 source = Path(project['path']).resolve()
-                if output.is_relative_to(source) or source.is_relative_to(output):
-                    raise ValueError('資料の保存先は読み取り元と別のフォルダを指定してください。')
+                # The output folder is the one written in the plan (no separate input field).
+                output = project_folder(str(self._output_from_plan(text, source)))
+                if output != source and source.is_relative_to(output):
+                    raise ValueError('資料の保存先が読み取り元を含む上位フォルダです。計画の保存先を見直してください。')
                 config = copy.deepcopy(self.app.config)
                 if str(output).casefold() not in {str(Path(p).resolve()).casefold() for p in config['approved_roots']}:
                     config['approved_roots'].append(str(output))
@@ -428,6 +427,44 @@ class Consultations:
             item.update(job_id=job['id'], plan_prompt=text.strip(), revision=item['revision'] + 1)
             self._save(item)
             return {'job_id': job['id'], 'already_submitted': False}
+
+    @staticmethod
+    def _output_from_plan(text, source):
+        """Pick the save folder written in the plan; fall back to the source project folder.
+
+        A file path means its parent folder. Only folders under the project root
+        (team_folders.BASE) are used; a missing folder there is created.
+        """
+        from team_folders import BASE
+        from team_config import ROOT as app_root
+        documents = ('.md', '.html', '.htm', '.txt', '.svg', '.pptx', '.pdf', '.mp4', '.docx', '.xlsx')
+        source=Path(source).resolve(strict=True)
+        boundary=BASE.resolve();app_root=app_root.resolve()
+        pattern = re.compile(r'"([A-Za-z]:[\\/][^"<>|*?]+)"|\x27([A-Za-z]:[\\/][^\x27<>|*?]+)\x27|([A-Za-z]:[\\/][^\s`\x27"<>|*?（）()「」『』、。，,]+)')
+        lines = text.splitlines()
+        preferred = [l for l in lines if re.search(r'保存先|出力先|保存場所|出力フォルダ|配置先', l)]
+        candidates=[]
+        for line in preferred:
+            for match in pattern.finditer(line):
+                raw=next(x for x in match.groups() if x is not None)
+                candidate = Path(raw.rstrip('.\\:;'))
+                if candidate.suffix.lower() in documents:
+                    candidate = candidate.parent
+                try:
+                    candidate = candidate.resolve()
+                except OSError:
+                    raise ValueError('計画の保存先を解決できません。計画プロンプトを修正してください。')
+                if (not candidate.is_relative_to(boundary) or candidate == boundary
+                        or candidate.is_relative_to(app_root) or (candidate != source and source.is_relative_to(candidate))):
+                    raise ValueError('計画の保存先が許可範囲外・統括内部・読み取り元の上位です。計画プロンプトを修正してください。')
+                if candidate not in candidates:candidates.append(candidate)
+        if len(candidates)>1:raise ValueError('計画に複数の保存先があります。資料の保存先を一つにしてください。')
+        output=candidates[0] if candidates else source
+        if not output.is_relative_to(boundary) or output==boundary or output.is_relative_to(app_root):
+            raise ValueError('保存先を計画に明記してください。元プロジェクトは資料の保存先として許可できません。')
+        output.mkdir(parents=True,exist_ok=True)
+        if not output.is_dir():raise ValueError('資料の保存先はフォルダを指定してください。')
+        return output
 
     @staticmethod
     def _title(value):

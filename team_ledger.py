@@ -9,14 +9,14 @@ import subprocess
 import threading
 import time
 
-ROOT = Path(r'C:\Projects')
+ROOT = Path(r'C:\AI_Work')
 SKIP = {'.git', '.venv', 'venv', 'node_modules', 'library', 'temp', 'obj', 'bin',
         'build', 'builds', 'dist', 'out', 'data', 'backups', 'gacha-backups',
         '_archive', '_migration', '__pycache__', 'assets', 'packages', 'projectsettings',
         'logs', 'cache', 'userdata', 'sample-project', 'target', '.next', '.gradle',
         'outputs', 'captures', 'certs', 'profiles', 'records', 'chrome-amazon-automation-profile',
         'diagnostics', 'tests', 'examples', 'docs', 'deploy', 'manual', 'archive', 'work', '_project_archives'}
-CONTAINERS = {'Claude', 'Codex', 'tools', 'Projects'}
+CONTAINERS = {'Claude', 'Codex', 'tools', 'Projects', 'samples'}
 MULTI_PROJECTS = {'Codex/miscProject', 'Codex/学習資料'}
 MARKERS = {'.git', 'package.json', 'pyproject.toml', 'requirements.txt',
            'Cargo.toml', 'go.mod', 'platformio.ini', 'ProjectSettings', 'server.py'}
@@ -37,7 +37,7 @@ def inside(path):
         raise ValueError('絶対パスを指定してください。')
     path = Path(path).resolve()
     if not path.is_relative_to(ROOT.resolve()):
-        raise ValueError('台帳の調査・登録範囲は C:\\Projects 以下です。')
+        raise ValueError('台帳の調査・登録範囲は C:\\AI_Work 以下です。')
     return path
 
 
@@ -202,7 +202,7 @@ class Ledger:
     def add(self, body):
         path = inside(body.get('path', ''))
         if not path.is_dir() or path == ROOT:
-            raise ValueError('C:\\Projects 以下の既存プロジェクトフォルダを指定してください。')
+            raise ValueError('C:\\AI_Work 以下の既存プロジェクトフォルダを指定してください。')
         with self.lock:
             self.backup()
             with self.db:
@@ -266,7 +266,7 @@ class Ledger:
         def cell(value):
             return str(value).replace('|', '/').replace('\n', ' ')
         lines = ['# 開発プロジェクト台帳', '', '正本：project_ledger.sqlite3。編集・再調査は作業ボードの「プロジェクト台帳」から行います。',
-                 '', '調査対象：C:\\Projects。実行・完了判定は未実施。資料・候補・配備コピーも含みます。', '',
+                 '', '調査対象：C:\\AI_Work。実行・完了判定は未実施。資料・候補・配備コピーも含みます。', '',
                  '| 名称 | 場所 | 分類 | 技術構成 | 管理状況 |', '|---|---|---|---|---|']
         for p in snapshot['projects']:
             lines.append('| ' + ' | '.join(map(cell, [p['name'], p['path'], p['category'],
@@ -279,7 +279,7 @@ class Ledger:
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='C:\\Projects の開発プロジェクト台帳')
+    parser = argparse.ArgumentParser(description='C:\\AI_Work の開発プロジェクト台帳')
     parser.add_argument('action', choices=['scan', 'list', 'export', 'backup'])
     parser.add_argument('--data', type=Path, default=Path(__file__).parent / 'data')
     args = parser.parse_args()

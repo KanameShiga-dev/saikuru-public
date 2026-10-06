@@ -62,3 +62,14 @@ AIの報告だけで完了とは判断しません。削除・公開・外部送
 - [実画面の必須要件・資料制作と回答時ファイル選択](docs/MEDIA_REQUIREMENT_FIX_20261005.md)
 
 - [共通Agent定義（Codex / Claude Code）](shared-agents/README.md)
+
+
+## 2026-10-06 更新
+
+確認指摘から修正・再確認への連携、Word/Excel作成、工程途中の成果物判定、回答添付欄などを改善しました。
+
+- [確認指摘の修正と再確認](docs/CONFIRMATION_REPAIR_20261006.md)
+- [変更依頼の統合と未確認事項](docs/CHANGE_REQUEST_INTEGRATION_20261006.md)
+- [Word・Excelの作成・編集](docs/OFFICE_DOCUMENTS.md)
+
+制作用依存は `requirements-documents.txt` を参照してください。

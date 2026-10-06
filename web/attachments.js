@@ -12,7 +12,8 @@ window.ImageAttachments = class {
     this.status=document.createElement('p');this.status.setAttribute('role','status');this.status.setAttribute('aria-live','polite');
     host.append(label,this.input,hint,this.list,this.status);
     this.input.onchange=()=>{this.add([...this.input.files]);this.input.value='';};
-    const form=host.closest('form');form.addEventListener('paste',e=>{
+    // Answer forms build the host before attaching it; fall back to the host itself.
+    const form=host.closest('form')||host;form.addEventListener('paste',e=>{
       const files=[...(e.clipboardData?.files||[])];if(files.length&&!this.locked&&!this.disabled){e.preventDefault();this.add(files);}
     });
   }
