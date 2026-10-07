@@ -289,8 +289,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/skills':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
+                from team_skill_import import inbox as skill_inbox
                 return self.send(200,{'skills':self.app.engine.handoff.skill_library(),
-                                     'projects':self.app.ledger.snapshot()['projects']})
+                                     'projects':self.app.ledger.snapshot()['projects'],
+                                     'inbox':skill_inbox()})
             if path == '/api/handoff':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -315,7 +317,7 @@ class Handler(BaseHTTPRequestHandler):
                     'fingerprint': gateway.fingerprint if gateway else None,
                     'error': self.app.mobile_error})
             files = {'/history': 'history.html', '/history.js': 'history.js', '/history.css': 'history.css', '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/theme.css': 'theme.css', '/shell.js': 'shell.js',
-                     '/skills': 'skills.html', '/skills.js': 'skills.js',
+                     '/skills': 'skills.html', '/skills.js': 'skills.js', '/skills.css': 'skills.css',
                      '/operation-tests': 'operation-tests.html', '/operation-tests.js': 'operation-tests.js',
                      '/attachments.js': 'attachments.js', '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
             if path not in files:
@@ -437,6 +439,10 @@ class Handler(BaseHTTPRequestHandler):
                                            attachment_ids=body.get('attachment_ids', []))
                 self.app.store.event('new_request_harness', ' '.join(prepared), job_id=result['id'])
                 result = dict(result, prepared=prepared)
+            elif path == '/api/jobs/artifact-url':
+                result = engine.record_artifact_url(str(body.get('id', '')), str(body.get('url', '')), str(body.get('note', '')))
+            elif path == '/api/jobs/rework':
+                result = engine.rework_from_rejection(str(body.get('id', '')), body.get('note', ''))
             elif path == '/api/decide':
                 if type(body.get('allow')) is not bool:
                     raise ValueError('承認または拒否を選んでください。')
@@ -514,6 +520,40 @@ class Handler(BaseHTTPRequestHandler):
                 engine.handoff.apply_skill(body.get('version_id',''),target['path'])
                 self.app.store.event('project_skill_shared','確認したスキルを別の登録済みプロジェクトへ適用しました。')
                 result={'ok':True}
+            elif path == '/api/skills/unassign':
+                if body.get('confirmed') is not True:
+                    raise ValueError('解除の確認が必要です。')
+                target=next((p for p in self.app.ledger.snapshot()['projects'] if p['id']==body.get('project_id')),None)
+                if not target:
+                    raise ValueError('台帳のプロジェクトを選択してください。')
+                engine.handoff.unassign_skill(str(body.get('version_id','')),target['path'])
+                self.app.store.event('skill_unassigned','スキルの適用を解除しました: '+(target.get('name') or target['path']))
+                result={'ok':True}
+            elif path == '/api/skills/delete':
+                if body.get('confirmed') is not True:
+                    raise ValueError('削除の確認が必要です。')
+                skill=engine.handoff.delete_skill(str(body.get('version_id','')))
+                moved=[]
+                if skill.get('imported'):
+                    from team_skill_import import remove_installed
+                    moved=remove_installed(skill['name'],bool(body.get('remove_desktop')))
+                self.app.store.event('skill_deleted','スキル「'+skill['name']+'」を削除しました（全プロジェクトで解除'
+                                     +('、ファイルは控えへ移動' if moved else '')+'）。')
+                result={'ok':True,'moved':moved}
+            elif path == '/api/skills/import':
+                from team_skill_import import import_skill, registry_fields
+                projects=self.app.ledger.snapshot()['projects']
+                chosen=[p for p in projects if p['id'] in (body.get('project_ids') or [])]
+                if not chosen or len(chosen)!=len(set(body.get('project_ids') or [])):
+                    raise ValueError('スキルを使う台帳のプロジェクトを1つ以上選んでください。')
+                approved={canonical(p) for p in self.app.config['approved_roots']}
+                if any(canonical(p['path']) not in approved for p in chosen):
+                    raise ValueError('適用先をAI作業対象として登録してください。')
+                preview,manifest_sha=import_skill(str(body.get('folder','')),body.get('reviewed'),bool(body.get('desktop')),[str(x) for x in (body.get('confirmed_reviews') or [])][:50])
+                version=engine.handoff.register_imported_skill(registry_fields(preview,manifest_sha),[p['path'] for p in chosen])
+                self.app.store.event('skill_imported','スキル「'+preview['name']+'」を取り込みました（スクリプト'+str(len(preview['scripts']))+'件、適用先'+str(len(chosen))+'件'
+                                     +('、デスクトップにも配置' if body.get('desktop') else '')+'、誤検知と確認した箇所'+str(len(preview['reviews']))+'件）。')
+                result={'ok':True,'version_id':version,'name':preview['name']}
             elif path in ('/api/skills/release','/api/skills/state'):
                 job=self.app.store.get(body.get('job_id',''),'job')
                 if path=='/api/skills/release':

@@ -124,9 +124,13 @@ def execute(root, name, args):
                     output.append({'path':str(path.relative_to(root)), 'line':index+1,'text':line[:250]})
                     if len(output)>=40:return {'matches':output,'limit':40}
         return {'matches':output,'limit':40}
+    if name == 'web_search':
+        from team_web_guard import search
+        return search(args.get('query',''),root)
     raise ValueError('読み取り以外の操作は許可されません。')
 
 TOOLS = [
+ {'name':'web_search','description':'Search public technical information through a fail-closed egress check. Never include internal names, paths, personal data, secrets or pasted documents. Returns bounded Bing search snippets, never fetches pages.', 'inputSchema':{'type':'object','properties':{'query':{'type':'string','maxLength':200}},'required':['query'],'additionalProperties':False}},
  {'name':'list_files','description':'List bounded non-sensitive project text files.', 'inputSchema':{'type':'object','properties':{},'additionalProperties':False}},
  {'name':'read_file','description':'Read a project-relative text file, bounded lines; never writes.', 'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'start_line':{'type':'integer'},'line_count':{'type':'integer'}},'required':['path'],'additionalProperties':False}},
  {'name':'search_files','description':'Search a literal term in project text files.', 'inputSchema':{'type':'object','properties':{'query':{'type':'string'}},'required':['query'],'additionalProperties':False}},

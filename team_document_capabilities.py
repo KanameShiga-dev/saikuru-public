@@ -10,6 +10,9 @@ import re
 from pathlib import Path
 
 SUPPORTED = {'md', 'html', 'txt', 'svg', 'pptx', 'pdf', 'mp4', 'docx', 'xlsx'}
+# Claude Artifact deliverables (claude.ai Design / Design System / Slides); see team_artifact_guard.
+ARTIFACT = {'claude_design', 'claude_design_system', 'claude_slides'}
+SUPPORTED = SUPPORTED | ARTIFACT
 MEDIA = {'pptx', 'pdf', 'mp4'}
 OFFICE = {'docx', 'xlsx'}
 BINARY = MEDIA | OFFICE
@@ -32,7 +35,7 @@ def runtime():
 
 
 def require_supported(format_name, goal=''):
-    if format_name not in SUPPORTED:raise ValueError('成果物形式を選択してください。対応はMD・HTML・TXT・SVG・PowerPoint・PDF・MP4・Word・Excelです。')
+    if format_name not in SUPPORTED:raise ValueError('成果物形式を選択してください。対応はMD・HTML・TXT・SVG・PowerPoint・PDF・MP4・Word・Excel・ClaudeのDesign／Design System／Slidesです。')
     if format_name in OFFICE:
         python,_=runtime()
         module={'docx':'docx','xlsx':'openpyxl'}[format_name]
@@ -55,6 +58,10 @@ def require_supported(format_name, goal=''):
 
 def require_artifacts(job):
     expected=job.get('document_format')
+    if expected in ARTIFACT:
+        from team_artifact_guard import check_staging
+        check_staging(job['project'],job['id'],expected)
+        return
     if expected not in BINARY:return
     root=Path(job['project']).resolve();manifest=root/('.saikuru-output-'+job['id']+'.json')
     if not manifest.is_file() or manifest.is_symlink():raise ValueError('指定された成果物が未作成です。完了扱いにできません。')
@@ -74,6 +81,10 @@ def require_plan(job,result):
     format_name=job.get('document_format')
     if not format_name:return
     require_supported(format_name,job.get('goal',''))
+    if format_name in ARTIFACT:
+        if not any(t.get('role')=='builder' and 'Artifact' in t.get('instruction','') for t in result.get('tasks',[])):
+            raise ValueError('計画にArtifactの制作工程がありません。builderのinstructionに「Artifact」と種類名を明記したデータファイル作成の工程と、完成物の確認工程を計画してください。claude.aiへの送信は受け入れ後に行うため計画に入れません。')
+        return
     if format_name in OFFICE:
         tasks=result.get('tasks',[])
         if not any(t.get('role')=='builder' and 'generate_office' in t.get('instruction','') and format_name in t.get('instruction','').lower() for t in tasks):

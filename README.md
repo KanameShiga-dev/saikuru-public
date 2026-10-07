@@ -82,3 +82,14 @@ AIの報告だけで完了とは判断しません。削除・公開・外部送
 - [正式化・一覧・共有・版管理](docs/PROJECT_SKILL_RELEASE.md)
 
 Claude利用枠は15分間隔で取得し、再起動後も次回取得時刻を保持します。実操作とモデル利用の一巡確認は未実施です。
+
+
+## 資料制作・スキル管理の追加（2026-10-07）
+
+PDFのデザイン抽出、PPTX本文・表・ノート読み取り、Artifact用のローカルデータ制作、外部スキルの取り込み・適用管理、失敗カードの案内を追加。全依頼のセキュリティレビュー、検索出口制御、拒否理由からの修正依頼も反映。
+
+- [統合内容と確認範囲](docs/CHANGE_REQUEST_MERGE_20261007.md)
+- [依存環境の導入記録](docs/DOCUMENT_RUNTIME_SETUP_20261007.md)
+- [外部スキルの取り込み](docs/SKILL_IMPORT.md)
+
+新規PCでは専用のPython仮想環境に requirements-documents.txt を導入し、data/attachment-runtime.json のpythonへ実行ファイルの絶対パスを設定してください。MP4はFFmpegと日本語フォント、音声付きの場合は起動中のVOICEVOXが必要です。ローカル設定・Python環境・認証情報・DBは公開物に含めません。

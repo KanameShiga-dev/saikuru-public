@@ -106,9 +106,14 @@ class CodexAdapter:
                         '-c', 'web_search="disabled"', '-c', 'mcp_servers={}',
                         '--disable', 'enable_mcp_apps', '--disable', 'standalone_web_search']
             if getattr(ctx, 'consultation_research', False):
-                command += ['-c', 'web_search="live"',
+                command += [
                             '-c', 'mcp_servers.project_read.command=' + json.dumps(ctx.read_mcp['command']),
                             '-c', 'mcp_servers.project_read.args=' + json.dumps(ctx.read_mcp['args'])]
+        # Native Codex search has no pre-query approval hook. Use the guarded MCP.
+        command += ['-c','web_search="disabled"','--disable','standalone_web_search']
+        if not getattr(ctx,'text_only',False) and getattr(ctx,'read_mcp',None):
+            command += ['-c','mcp_servers.project_read.command='+json.dumps(ctx.read_mcp['command']),
+                        '-c','mcp_servers.project_read.args='+json.dumps(ctx.read_mcp['args'])]
         process = Process(command, ctx.project)
         counter = 0
         file_changes = {}
@@ -258,6 +263,7 @@ class ClaudeAdapter:
             else:
                 process.proc.stdin.write(prompt)
             process.proc.stdin.close()
+            artifact_calls = {}
             while True:
                 msg = process.receive(ctx)
                 kind = msg.get('type')
@@ -269,10 +275,23 @@ class ClaudeAdapter:
                         raise ProviderError('Claude共通AgentをCLIへ登録できませんでした: ' + definition.name)
                     ctx.agent_started(session_id, 'Claude Code / --agent ' + definition.name)
                     ctx.event('Claude Codeへ接続しました。モデル: ' + str(msg.get('model', profile['model'])))
+                    if 'Artifact' in definition.tools:
+                        ctx.event('Artifactの道具: ' + ('使用可' if 'Artifact' in (msg.get('tools') or []) else 'CLIが提供していません')
+                                  + '（CLIの道具一覧: ' + ', '.join(str(t) for t in (msg.get('tools') or []))[:400] + '）')
                 elif kind == 'assistant':
                     for block in msg.get('message', {}).get('content', []):
                         if block.get('type') == 'tool_use':
                             ctx.event('処理: ' + str(block.get('name', 'tool')))
+                            if block.get('name') == 'Artifact':
+                                artifact_calls[block.get('id')] = block.get('input') or {}
+                elif kind == 'user' and artifact_calls and hasattr(ctx, 'artifact_result'):
+                    content = msg.get('message', {}).get('content', [])
+                    for block in content if isinstance(content, list) else []:
+                        if block.get('type') == 'tool_result' and block.get('tool_use_id') in artifact_calls:
+                            body = block.get('content')
+                            text = body if isinstance(body, str) else '\n'.join(
+                                str(part.get('text', '')) for part in body or [] if isinstance(part, dict))
+                            ctx.artifact_result(artifact_calls.pop(block.get('tool_use_id')), text)
                 elif kind == 'result':
                     ctx.record_usage(msg.get('usage', {}))
                     if not ctx.agent_run.get('session_id'):

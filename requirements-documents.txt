@@ -1,5 +1,8 @@
 # 資料作成（PDF・PowerPoint・スライド動画・Word・Excel）用の Python ライブラリ。
 # 導入例: python -m pip install --user -r requirements-documents.txt
+# ※通常のターミナルで実行すること。Claude デスクトップアプリ（MSIX）内のターミナルから --user で入れると
+#   アプリ専用の領域に入り、タスク スケジューラ等から起動した采来から見えない。
+# 版数は 2026-10-05 に Python 3.13.5 / Windows 11 で動作確認したもの。
 # 添付の提供元が報告した版数。全組み合わせの動作確認はこの環境では未実施。
 #
 # Python 以外に必要なもの（このファイルでは入らない）:
@@ -12,3 +15,5 @@ python-pptx==1.0.2      # PowerPoint（PPTX）
 Pillow==12.3.0          # PDF・PPTX・MP4 のページ画像
 python-docx==1.2.0      # Word（DOCX）の作成・編集
 openpyxl==3.1.5         # Excel（XLSX）の作成・編集
+pypdf==6.19.0           # 参考PDFのデザイン学習（文字・書体・サイズ・文字色）
+pypdfium2==5.14.0       # 参考PDFのデザイン学習（ページを画像にして配色）

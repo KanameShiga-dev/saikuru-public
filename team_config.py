@@ -48,6 +48,7 @@ def default_config():
         'computer_use_allowed': False,
         'decision': {'provider': 'ollama', 'model': 'tev1:0.8b', 'shadow': True},
         'max_parallel_projects': 2,
+        'security_review': 'always',
         'task_timeout_seconds': 1800,
         'approval_timeout_seconds': 900,
         'max_repairs': 2,
@@ -89,6 +90,8 @@ def validate_config(config):
         raise ValueError('未対応の設定形式です。')
     if type(config.get('automatic_operations', False)) is not bool:
         raise ValueError('操作自動承認の設定は真偽値で指定してください。')
+    if config.get('security_review', 'always') not in ('always', 'planner'):
+        raise ValueError('security_review は always または planner を指定してください。')
     if type(config.get('computer_use_allowed', False)) is not bool:
         raise ValueError('Computer Useの設定は真偽値で指定してください。')
     for role in ('planner', 'builder', 'researcher', 'reviewer'):

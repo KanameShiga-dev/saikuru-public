@@ -16,6 +16,26 @@ def digest(value):
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
 
 
+CJK = re.compile(r'[぀-ヿ㐀-鿿]+')
+CONTENT = re.compile(r'[゠-ヿ㐀-鿿]')
+
+
+def skill_matches(query, text):
+    """Does a request (query) call for a reviewed skill (text)? Latin/digit words of 2+ chars match as words
+    (the original rule). Japanese has no spaces, so it is compared as 2-character pairs that contain a kanji or
+    katakana (hiragana-only pairs such as 'する' are too common); 3 or more shared pairs count as a match."""
+    query, text = query.casefold(), text.casefold()
+    words = {w for w in re.findall(r'[a-z0-9_]{2,}', query)}
+    if any(w in text for w in words if len(w) >= 3 or w in ('ai', 'ui')):
+        return True
+    def pairs(value):
+        found = set()
+        for run in CJK.findall(value):
+            found.update(run[k:k + 2] for k in range(len(run) - 1) if CONTENT.search(run[k:k + 2]))
+        return found
+    return len(pairs(query) & pairs(text)) >= 3
+
+
 class HandoffDB:
     def __init__(self, directory):
         self.path = Path(directory) / 'handoff.sqlite3'
@@ -346,17 +366,57 @@ class HandoffDB:
         for source in {i['source_project'] for i in items}:
             eligible[source]={i['name']:i['experience'] for i in self.skill_candidates(source)}
         for item in items:
+            if item.get('imported'):
+                # Imported skills stay current while the installed files match the import manifest.
+                from team_skill_import import current
+                item['source_current']=current(item['name'],item.get('manifest_sha',''))
+                continue
             item['source_current']=eligible[item['source_project']].get(item['name'])==item.get('source_experience')
         if query is None: return items
-        terms=set(re.findall(r'[\w]{2,}',query.casefold()))
         return [i for i in items if i['active'] and i['source_current']
-                and any(t in (i['description']+' '+i['applicability']).casefold() for t in terms)][:5]
+                and skill_matches(query, i['description']+' '+i['applicability'])][:5]
 
     def skill_library(self):
         with self.lock:
             projects=[r[0] for r in self.db.execute('SELECT DISTINCT project FROM skill_active')]
         return [dict(item,applied_project=project) for project in projects
                 for item in self.released_skills(project) if item['active']]
+
+    def register_imported_skill(self, fields, projects):
+        """Register a skill imported from skills/_inbox (user-reviewed) and activate it for the chosen projects."""
+        if not projects:
+            raise ValueError('スキルを使うプロジェクトを1つ以上選んでください。')
+        fields=dict(fields,reviewed_at=time.time())
+        identifier=digest(json.dumps(fields,ensure_ascii=False,sort_keys=True))
+        with self.lock,self.db:
+            self.db.execute('INSERT INTO skill_versions VALUES (?,?,?,?,?,?)',
+                (identifier,'saikuru:imported',fields['name'],'import',json.dumps(fields,ensure_ascii=False),time.time()))
+            for project in projects:
+                self.db.execute('INSERT OR REPLACE INTO skill_active VALUES (?,?,?,1)',
+                    (canonical(project),fields['name'],identifier))
+        return identifier
+
+    def active_skill_names(self, project):
+        """Names of imported skills active in this project (for script execution checks)."""
+        return {i['name'] for i in self.released_skills(project) if i['active'] and i.get('imported') and i['source_current']}
+
+    def unassign_skill(self, version_id, project):
+        """Stop using a skill in one project (the version and other projects are kept)."""
+        with self.lock,self.db:
+            removed=self.db.execute('DELETE FROM skill_active WHERE project=? AND version_id=?',
+                                    (canonical(project),version_id)).rowcount
+        if not removed:
+            raise ValueError('このプロジェクトでは、そのスキルを使っていません。')
+
+    def delete_skill(self, version_id):
+        """Remove a skill from every project. Versions stay in the DB as audit data; returns the version payload."""
+        with self.lock:
+            row=self.db.execute('SELECT name,payload FROM skill_versions WHERE id=?',(version_id,)).fetchone()
+        if not row:
+            raise ValueError('削除するスキルを選択してください。')
+        with self.lock,self.db:
+            self.db.execute('DELETE FROM skill_active WHERE name=?',(row[0],))
+        return dict(json.loads(row[1]),name=row[0])
 
     def apply_skill(self, version_id, target_project):
         library=self.skill_library()

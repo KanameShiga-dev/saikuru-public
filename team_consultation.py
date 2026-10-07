@@ -62,15 +62,18 @@ class ConsultationContext:
             raise ValueError('計画担当のCLIが見つかりません。チーム設定とCLI導入を確認してください。')
         definition = load_agent('planner', self.task['profile']['adapter'])
         self.agent_definition = replace(definition, sandbox='read-only', tools=(
-            'WebSearch', 'WebFetch', 'mcp__project_read__list_files',
+            'WebSearch', 'mcp__project_read__list_files',
             'mcp__project_read__read_file', 'mcp__project_read__search_files'))
         self.consultation_research = True
+        if self.task['profile']['adapter']=='codex':
+            self.agent_definition=replace(self.agent_definition,tools=tuple(t for t in self.agent_definition.tools if t!='WebSearch')+('mcp__project_read__web_search',))
         self.read_root = str(Path(session['project']['path']).resolve())
         self.audit_path = root / ('evidence-' + uuid.uuid4().hex + '.jsonl')
         self.read_mcp = {'command': sys.executable,
                          'args': ['-X', 'utf8', str(Path(__file__).with_name('consultation_read_tools.py')), self.read_root, str(self.audit_path)]}
         from team_attachments import RULE
         self.agent_system_instructions = definition.instructions + '\n\n' + RULES + RULE
+        self.agent_system_instructions += '\nCodexのWeb調査はmcp__project_read__web_searchのみ利用してください。検索語には一般的な技術用語だけを使用します。'
         self.agent_run = {'id': str(uuid.uuid4())}
         self.token = uuid.uuid4().hex
         self.endpoint = app.origin
@@ -419,8 +422,11 @@ class Consultations:
                 if str(output).casefold() not in {str(Path(p).resolve()).casefold() for p in config['approved_roots']}:
                     config['approved_roots'].append(str(output))
                     self.app.save_config(config)
+                from team_artifact_guard import is_artifact_format
+                publishing = ('公開は、利用者が承認したclaude.ai上の非公開Artifact（この依頼で作成する1件）への送信だけ。それ以外の公開は禁止。'
+                              if is_artifact_format(body.get('document_format')) else '公開は禁止。')
                 goal = ('資料作成のみ。読み取り元: '+str(source)+'\n保存先: '+str(output)
-                        +'\nソース・設定変更、コマンド実行、起動停止、公開は禁止。資料だけを専用ツールで作成する。\n'+goal)
+                        +'\nソース・設定変更、コマンド実行、起動停止は禁止。'+publishing+'資料だけを専用ツールで作成する。\n'+goal)
                 job = self.app.engine.create_job(item.get('title') or project['name']+'：資料作成計画', goal, str(output), False,
                                                  planner_profile=profile, document_source=str(source), attachment_ids=item.get('attachment_ids', []),document_format=body.get('document_format'))
             else:
@@ -445,7 +451,20 @@ class Consultations:
         boundary=BASE.resolve();app_root=app_root.resolve()
         pattern = re.compile(r'"([A-Za-z]:[\\/][^"<>|*?]+)"|\x27([A-Za-z]:[\\/][^\x27<>|*?]+)\x27|([A-Za-z]:[\\/][^\s`\x27"<>|*?（）()「」『』、。，,]+)')
         lines = text.splitlines()
-        preferred = [l for l in lines if re.search(r'保存先|出力先|保存場所|出力フォルダ|配置先', l)]
+        # Upstream rules (narrow save keywords, strict errors) plus local additions:
+        # lines under a 保存先/出力先 heading (up to 3) count, and source/reference-labelled lines never do.
+        source_label = re.compile(r'読み取り元|読込元|参照元|元資料|元の資料|入力元|source', re.I)
+        save_label = re.compile(r'保存先|出力先|保存場所|出力フォルダ|配置先')
+        preferred, carry = [], 0
+        for line in lines:
+            if save_label.search(line):
+                carry = 3
+                if not source_label.search(line):
+                    preferred.append(line)
+            elif carry:
+                carry -= 1
+                if not source_label.search(line):
+                    preferred.append(line)
         candidates=[]
         for line in preferred:
             for match in pattern.finditer(line):
@@ -499,18 +518,18 @@ class Consultations:
                 return None
             ctx.check()
             tool = body.get('tool', '')
-            allowed = tool in ('WebSearch', 'mcp__project_read__list_files',
+            if tool == 'WebSearch':
+                from team_web_guard import check_query, masked
+                data=body.get('input') or {}
+                query=data.get('query','') if isinstance(data,dict) else ''
+                if not isinstance(data,dict) or set(data)-{'query'}:
+                    return {'allow':False,'note':'検索はqueryのみ指定してください。未検査の追加引数は外部送信できません。'}
+                allowed,reason=check_query(query,ctx.read_root)
+                self.app.store.event('websearch_allowed' if allowed else 'websearch_blocked',
+                    '台帳相談の検索: '+('許可' if allowed else reason)+'（'+masked(query)+'）')
+                return {'allow':allowed,'note':'検索前チェック済み' if allowed else reason}
+            allowed = tool in ('WebSearch','mcp__project_read__web_search', 'mcp__project_read__list_files',
                                'mcp__project_read__read_file', 'mcp__project_read__search_files')
             if tool == 'WebFetch':
-                import ipaddress
-                import socket
-                from urllib.parse import urlparse
-                try:
-                    url = urlparse(body.get('input', {}).get('url', ''))
-                    allowed = (url.scheme == 'https' and bool(url.hostname) and not url.username
-                               and not url.password and url.port in (None, 443)
-                               and all(ipaddress.ip_address(r[4][0]).is_global
-                                       for r in socket.getaddrinfo(url.hostname, 443)))
-                except (ValueError, OSError):
-                    allowed = False
+                return {'allow':False,'note':'ページ取得は検索前チェック対象外のため利用できません。'}
             return {'allow': allowed, 'note': '相談のWeb・プロジェクト読み取り専用範囲。変更・実行は作業ボードへ依頼してください。'}

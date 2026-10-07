@@ -12,8 +12,9 @@ import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
 from consultation_read_tools import execute, TOOLS
+import design_profile
 
-DOCUMENTS = {'.md', '.html', '.txt', '.svg', '.pptx', '.pdf', '.mp4', '.docx', '.xlsx'}
+DOCUMENTS = {'.md', '.html', '.txt', '.svg', '.pptx', '.pdf', '.mp4', '.docx', '.xlsx', '.json'}
 BINARY = ('.pptx', '.pdf', '.mp4', '.docx', '.xlsx')
 
 def output_path(root, name):
@@ -21,7 +22,7 @@ def output_path(root, name):
     if relative.is_absolute() or any(p in ('.', '..') or p.startswith('.') for p in relative.parts):
         raise ValueError('資料の相対パスを指定してください。')
     if relative.suffix.lower() not in DOCUMENTS:
-        raise ValueError('資料はmd/html/txt/svg/pptx/pdf/mp4/docx/xlsxのみです。')
+        raise ValueError('資料はmd/html/txt/svg/pptx/pdf/mp4/docx/xlsxのみです（jsonはデザインプロファイルの読み取りだけ）。')
     path = (root / relative).resolve()
     path.relative_to(root)
     return path
@@ -32,13 +33,22 @@ def document_operation(root, name, args, writable):
         if path.suffix in ('.docx','.xlsx'):
             return dict(office_text(path), path=str(path.relative_to(root)), bytes=path.stat().st_size,
                         sha256=hashlib.sha256(path.read_bytes()).hexdigest())
-        if path.suffix in ('.pptx','.pdf','.mp4'):
+        if path.suffix == '.pptx':
+            return dict(pptx_text(path), path=str(path.relative_to(root)), bytes=path.stat().st_size,
+                        sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        if path.suffix in ('.pdf','.mp4'):
             return {'path':str(path.relative_to(root)), 'bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'note':'バイナリ成果物です。内容の視聴・表示確認は別途必要です。'}
         if path.stat().st_size > 200000: raise ValueError('資料が大きすぎます。')
         data = path.read_bytes()
         return {'content': data.decode('utf-8')[:16000], 'sha256': hashlib.sha256(data).hexdigest()}
     if name != 'write_document' or not writable: raise ValueError('資料変更は禁止です。')
+    if path.suffix == '.json': raise ValueError('JSONは書けません（デザインプロファイルはlearn_designが作ります）。')
     content = args.get('content')
+    if path.suffix.lower() == '.html' and args.get('design_profile') and isinstance(content, str):
+        # Unified design: the learned profile's CSS goes first in <head> (or at the top of a fragment).
+        style = '<style>\n' + design_profile.css(_design(root, args['design_profile'])) + '</style>\n'
+        at = content.lower().find('<head>')
+        content = content[:at + 6] + '\n' + style + content[at + 6:] if at >= 0 else style + content
     if path.suffix in ('.docx','.xlsx'):raise ValueError('Word・Excelはgenerate_officeツールを使ってください。')
     if path.suffix in ('.pptx','.pdf','.mp4'):raise ValueError('バイナリ成果物はgenerate_mediaツールを使ってください。')
     if not isinstance(content, str) or len(content.encode('utf-8')) > 200000:
@@ -77,17 +87,78 @@ def media_environment():
     except (OSError,ValueError,KeyError):pass
     return result
 
+def _design(root, name):
+    """Load a design profile (*.design.json) from the output folder; validated before use."""
+    path = output_path(root, name)
+    if not path.name.endswith('.design.json') or not path.is_file() or path.is_symlink():
+        raise ValueError('design_profile は learn_design で作った保存先内の *.design.json を相対パスで指定してください。')
+    return design_profile.load(path)
+
+
+def learn_design(roots, args, writable):
+    """Learn colours, fonts, type sizes and margins from a reference PDF (read-only) into design/<name>.design.json/.md."""
+    if not writable:
+        raise ValueError('デザインの学習は制作担当（builder）が行います。')
+    root = roots[0]
+    pdf = _office_base(roots, str(args.get('pdf_path', '')), '.pdf')
+    name = str(args.get('name') or pdf.stem)
+    if not re.fullmatch(r'[A-Za-z0-9_\-\u3040-\u30ff\u4e00-\u9fff]{1,40}', name):
+        raise ValueError('name は40文字以内の英数字・日本語・-・_ で指定してください。')
+    target = output_path(root, 'design/' + name + '.design.json')
+    summary = target.with_name(name + '.design.md')
+    if target.exists() or summary.exists():
+        raise ValueError('同じ名前のデザインプロファイルがあります。別の name を指定してください（既存は上書きしません）。')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    from team_document_capabilities import runtime
+    python, _ = runtime()
+    with tempfile.TemporaryDirectory(prefix='saikuru-design-', dir=target.parent) as folder:
+        out, md = Path(folder) / 'profile.json', Path(folder) / 'profile.md'
+        result = subprocess.run([python, '-X', 'utf8', str(Path(__file__).with_name('design_profile.py')), str(pdf), str(out),
+                                 '--md', str(md), '--name', name], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        if result.returncode or not out.is_file():
+            detail = [l[len('SAIKURU_INPUT_ERROR: '):] for l in result.stderr.decode('utf-8', 'replace').splitlines() if l.startswith('SAIKURU_INPUT_ERROR: ')]
+            raise ValueError('PDFからデザインを学習できませんでした' + ('：' + detail[-1] if detail else '（pypdf・pypdfium2 の導入とPDFを確認してください）。'))
+        profile = design_profile.load(out)
+        with target.open('xb') as f:
+            f.write(out.read_bytes())
+        with summary.open('xb') as f:
+            f.write(md.read_bytes())
+    rel = str(target.relative_to(root))
+    return {'design_profile': rel, 'summary': str(summary.relative_to(root)),
+            'colors': {k: v for k, v in profile['colors'].items() if k != 'palette'},
+            'fonts': {k: profile['fonts'][k]['family'] for k in ('heading', 'body')}, 'sizes_pt': profile['sizes_pt'],
+            'line_height': profile['line_height'], 'margins_mm': profile['margins_mm'], 'page': profile['page'], 'notes': profile['notes'],
+            'how_to_apply': 'generate_media（PPTX・PDF・MP4）と generate_office（Word）に design_profile="' + rel + '" を指定する。'
+                            'HTML は write_document に design_profile を指定するとCSSが入る（本文は h1/h2/h3/p/table と var(--color-primary) などを使う）。'
+                            'Excel は対象外。'}
+
+
 def generate_media(root,args,writable,job_id):
     if not writable:raise ValueError('制作はbuilderのみです。')
     path=output_path(root,args.get('path',''))
     if path.suffix not in ('.pptx','.pdf','.mp4') or path.exists():raise ValueError('新しいPPTX・PDF・MP4の名前を指定してください。既存成果物は上書きしません。')
     slides=args.get('slides')
-    if not isinstance(slides,list) or not 1<=len(slides)<=40:raise ValueError('ページ・章は1〜40件です。')
-    for slide in slides:
-        if not isinstance(slide,dict) or set(slide)-{'title','body','narration','duration','asset_path','scene'}:raise ValueError('制作データの形式が不正です。')
-        for key,limit in [('title',50),('body',1200),('narration',1500)]:
+    if not isinstance(slides,list) or not 1<=len(slides)<=80:raise ValueError('ページ・章は1〜80件です。')
+    design=_design(root,args['design_profile']) if args.get('design_profile') else None
+    theme=args.get('theme') or {}
+    if not isinstance(theme,dict) or set(theme)-{'accent'} or ('accent' in theme and not re.fullmatch(r'#[0-9A-Fa-f]{6}',str(theme['accent']))):
+        raise ValueError('themeは {"accent": "#RRGGBB"} の形式です。')
+    if not isinstance(args.get('document_title',''),str) or len(args.get('document_title',''))>80:raise ValueError('document_titleは80文字までです。')
+    for index,slide in enumerate(slides,1):
+        if not isinstance(slide,dict) or set(slide)-{'title','body','narration','duration','asset_path','scene','layout','table','diagram','notes'}:raise ValueError('制作データの形式が不正です。')
+        for key,limit in [('title',50),('body',1200),('narration',1500),('notes',2000)]:
             value=slide.get(key,'')
-            if not isinstance(value,str) or len(value)>limit:raise ValueError('ページの文字数上限を超えました。')
+            if not isinstance(value,str) or len(value)>limit:raise ValueError(f'{index}枚目の文字数上限を超えました（{key}は{limit}文字まで）。')
+        if slide.get('layout',None) not in (None,'cover','section','content'):raise ValueError(f'{index}枚目のlayoutはcover・section・contentのいずれかです。')
+        table=slide.get('table')
+        if table is not None and (not isinstance(table,list) or not 1<=len(table)<=20 or any(not isinstance(r,list) or not 1<=len(r)<=8 or any(not isinstance(v,(str,int,float,type(None))) or len(str(v))>200 for v in r) for r in table)):
+            raise ValueError(f'{index}枚目の表は1〜20行・1〜8列、各セル200文字までです（1行目が見出し）。')
+        diagram=slide.get('diagram')
+        if diagram is not None and (not isinstance(diagram,dict) or set(diagram)-{'type','direction','nodes'} or diagram.get('type','flow') not in ('flow','stack')
+                or diagram.get('direction','horizontal') not in ('horizontal','vertical') or not isinstance(diagram.get('nodes'),list)
+                or not 2<=len(diagram['nodes'])<=8 or any(not isinstance(n,str) or not 1<=len(n)<=40 for n in diagram['nodes'])):
+            raise ValueError(f'{index}枚目の図は type=flow|stack、nodes=2〜8個（各40文字まで）です。')
         duration=slide.get('duration',8)
         if type(duration) not in (int,float) or not 1<=duration<=180:raise ValueError('章の長さは1〜180秒です。')
     from team_document_capabilities import require_supported,runtime
@@ -95,6 +166,9 @@ def generate_media(root,args,writable,job_id):
     path.parent.mkdir(parents=True,exist_ok=True);path=output_path(root,args['path'])
     with tempfile.TemporaryDirectory(prefix='saikuru-output-',dir=path.parent) as folder:
         assets=[];render_args=dict(args,slides=[dict(s) for s in slides])
+        render_args.pop('design_profile',None)
+        if design:
+            render_args['design']=dict(design_profile.slide_palette(design),body_file=design_profile.font_file(design,'body'),heading_file=design_profile.font_file(design,'heading'))
         for index,slide in enumerate(render_args['slides']):
             if not slide.get('asset_path'):continue
             name=Path(slide['asset_path'])
@@ -110,8 +184,11 @@ def generate_media(root,args,writable,job_id):
             assets.append({'path':str(asset.relative_to(root.resolve())),'sha256':hashlib.sha256(copied.read_bytes()).hexdigest(),'scene':scene,'slide':index+1})
         spec=Path(folder)/'input.json';generated=Path(folder)/('result'+path.suffix)
         spec.write_text(json.dumps(render_args,ensure_ascii=False),encoding='utf-8')
-        result=subprocess.run([python,'-X','utf8',str(Path(__file__).with_name('document_media_worker.py')),str(spec),str(generated),ffmpeg or ''],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=1500,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-        if result.returncode or not generated.is_file():raise ValueError('成果物の生成に失敗しました。VOICEVOX・話者・文字量・制作環境を確認してください。完成扱いにはしません。')
+        result=subprocess.run([python,'-X','utf8',str(Path(__file__).with_name('document_media_worker.py')),str(spec),str(generated),ffmpeg or ''],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=1500,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        if result.returncode or not generated.is_file():
+            detail=[l[len('SAIKURU_INPUT_ERROR: '):] for l in result.stderr.decode('utf-8','replace').splitlines() if l.startswith('SAIKURU_INPUT_ERROR: ')]
+            if detail:raise ValueError('成果物の生成に失敗しました（入力を直せば作成できます）: '+detail[-1])
+            raise ValueError('成果物の生成に失敗しました。VOICEVOX・話者・文字量・制作環境を確認してください。完成扱いにはしません。')
         if generated.stat().st_size>500*1024*1024:raise ValueError('成果物は500MB以内です。')
         with path.open('xb') as dest,generated.open('rb') as src:shutil.copyfileobj(src,dest)
     record={'path':str(path.relative_to(root)),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'bytes':path.stat().st_size,'narration':all(bool(s.get('narration','').strip()) for s in slides),'visual_review':'未確認'}
@@ -148,6 +225,85 @@ def office_text(path, limit=16000):
         book.close()
     text = '\n'.join(lines)
     return {'content': text[:limit], 'truncated': len(text) > limit}
+
+
+def pptx_text(path, limit=16000):
+    """Text and design view of a PPTX for review: per-slide text in reading order, real tables, diagram
+    boxes, notes, and a tally of fonts / text colours / fills / sizes. Nothing is rendered or executed."""
+    _safe_office_package(path)
+    from collections import Counter
+    from pptx import Presentation
+    from pptx.util import Emu
+    prs = Presentation(str(path))
+    fonts, colors, fills, sizes = Counter(), Counter(), Counter(), Counter()
+    lines, slides = [], []
+
+    def rgb(color):
+        try:
+            return '#' + str(color.rgb).lower() if color is not None and color.type is not None else None
+        except (AttributeError, KeyError, ValueError, TypeError):
+            return None
+
+    def runs(frame):
+        for paragraph in frame.paragraphs:
+            for run in paragraph.runs:
+                if not run.text.strip():
+                    continue
+                chars = len(run.text.strip())
+                ea = run._r.find('{http://schemas.openxmlformats.org/drawingml/2006/main}rPr')
+                ea = ea.find('{http://schemas.openxmlformats.org/drawingml/2006/main}ea') if ea is not None else None
+                name = (ea.get('typeface') if ea is not None else None) or run.font.name or paragraph.font.name
+                if name:
+                    fonts[name] += chars
+                # Run settings first, then the paragraph defaults (saikuru's PPTX writer sets those).
+                color = rgb(run.font.color) or rgb(paragraph.font.color)
+                if color:
+                    colors[color] += chars
+                size = run.font.size or paragraph.font.size
+                if size:
+                    sizes[round(size.pt, 1)] += chars
+
+    for index, slide in enumerate(prs.slides, 1):
+        lines.append(f'[スライド{index}]')
+        info = {'slide': index, 'tables': [], 'boxes': 0, 'pictures': 0}
+        shapes = sorted(slide.shapes, key=lambda s: (int(s.top or 0) // Emu(300000), int(s.left or 0)))
+        for shape in shapes:
+            try:
+                if shape.fill.type == 1:
+                    fills['#' + str(shape.fill.fore_color.rgb).lower()] += 1
+            except (AttributeError, TypeError, ValueError, KeyError, NotImplementedError):
+                pass
+            if shape.shape_type == 13:
+                info['pictures'] += 1
+                lines.append('[画像]')
+            if getattr(shape, 'has_table', False) and shape.has_table:
+                table = shape.table
+                rows = [[cell.text for cell in row.cells] for row in table.rows]
+                info['tables'].append({'rows': len(rows), 'cols': len(table.columns)})
+                lines.append(f'[表 {len(rows)}行×{len(table.columns)}列]')
+                lines.extend(' | '.join(r) for r in rows)
+                for row in table.rows:
+                    for cell in row.cells:
+                        runs(cell.text_frame)
+                continue
+            if getattr(shape, 'has_text_frame', False) and shape.has_text_frame and shape.text_frame.text.strip():
+                text = shape.text_frame.text.strip()
+                if shape.shape_type == 1 and getattr(shape, 'auto_shape_type', None) is not None and int(shape.auto_shape_type) != 1:
+                    info['boxes'] += 1
+                    lines.append('[図形] ' + text)
+                else:
+                    lines.extend(text.splitlines())
+                runs(shape.text_frame)
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text.strip():
+            lines.append('[発表者メモ] ' + slide.notes_slide.notes_text_frame.text.strip())
+        slides.append(info)
+    text = '\n'.join(lines)
+    return {'content': text[:limit], 'truncated': len(text) > limit, 'slide_count': len(prs.slides),
+            'slide_size_in': [round(prs.slide_width / 914400, 2), round(prs.slide_height / 914400, 2)],
+            'slides': slides,
+            'design': {'fonts': dict(fonts.most_common(6)), 'text_colors': dict(colors.most_common(8)),
+                       'fills': dict(fills.most_common(8)), 'font_sizes_pt': dict(sizes.most_common(8))},
+            'note': '文字・表・図形・書式は読み取り済み。見た目（配置の崩れ・はみ出し・読みやすさ）は画像での確認が別途必要です。'}
 
 
 def _office_base(roots, name, suffix):
@@ -217,6 +373,9 @@ def generate_office(roots, args, writable, job_id):
         if path.suffix == '.docx':
             from docx import Document
             doc = Document(str(base)) if base else Document()
+            if args.get('design_profile'):
+                # Styles always; page size/margins only for a new document (an edited base keeps its layout).
+                design_profile.apply_docx(doc, _design(root, args['design_profile']), page_setup=not base)
             replaced = 0
             for item in (args.get('replacements') or [])[:200]:
                 find, new = str(item.get('find', '')), str(item.get('replace', ''))
@@ -255,6 +414,8 @@ def generate_office(roots, args, writable, job_id):
                     for r, row in enumerate(table):
                         for c, value in enumerate(row):
                             grid.cell(r, c).text = '' if value is None else str(value)[:2000]
+                    if args.get('design_profile'):
+                        design_profile.style_docx_table(grid, _design(root, args['design_profile']))
             doc.save(str(generated))
             summary = {'replaced_paragraphs': replaced, 'added_sections': len(sections)}
         else:
@@ -344,15 +505,15 @@ def main():
     # an ancestor of the source would widen the write scope, so it stays refused.
     if output != source and source.is_relative_to(output):
         raise ValueError('保存先に読み取り元を含む上位フォルダは指定できません。')
-    tools = [dict(t, description='List bounded non-sensitive text files of the read-only source. output_documents lists generated PDF/PPTX/MP4/DOCX/XLSX in the output folder with bytes and SHA256.') if t['name'] == 'list_files' else t for t in TOOLS] + [{'name': 'read_document', 'description': 'Read a document in the approved output folder. Word/Excel files are returned as text (headings, paragraphs, tables, cells) with their SHA256.',
+    tools = [dict(t, description='List bounded non-sensitive text files of the read-only source. output_documents lists generated PDF/PPTX/MP4/DOCX/XLSX in the output folder with bytes and SHA256.') if t['name'] == 'list_files' else t for t in TOOLS] + [{'name': 'read_document', 'description': 'Read a document in the approved output folder. Word/Excel files are returned as text (headings, paragraphs, tables, cells) with their SHA256. PowerPoint (.pptx) returns per-slide text in reading order, tables ([表 r行×c列] + rows), diagram boxes ([図形]), speaker notes, slide_count, per-slide table/box/picture counts, and a design tally (fonts, text colours, fills, font sizes) to compare with a design profile. Visual layout still needs a rendered check.',
         'inputSchema': {'type':'object','properties':{'path':{'type':'string'}},'required':['path'],'additionalProperties':False}}]
     tools.append({'name':'media_environment','description':'Check local movie renderer and list available VOICEVOX speaker names/style IDs. No settings changes.', 'inputSchema':{'type':'object','properties':{},'additionalProperties':False}})
     if writable:
-        tools.append({'name':'generate_media','description':'Generate editable PPTX, slide PDF, or MP4 from structured slides. VOICEVOX narration uses the local engine and explicit speaker_id. Existing output is never overwritten. Return paths and hashes; viewing/listening remains unverified.',
-            'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'speaker_id':{'type':'integer'},'slides':{'type':'array','minItems':1,'maxItems':40,'items':{'type':'object','properties':{'title':{'type':'string'},'body':{'type':'string'},'narration':{'type':'string'},'duration':{'type':'number'},'asset_path':{'type':'string','description':'Relative PNG/JPEG/MP4 path in approved output folder; integrated in this slide'},'scene':{'type':'string','enum':['実画面','モデル設定','台帳','履歴']}},'required':['title','body'],'additionalProperties':False}}},'required':['path','slides'],'additionalProperties':False}})
+        tools.append({'name':'generate_media','description':'Generate editable PPTX, slide PDF, or MP4 from structured slides. PPTX is designed: theme colour, cover/section/content layouts, real tables (table: rows, first row = header), box-and-arrow diagrams (diagram: {type: flow|stack, direction, nodes}), page numbers and speaker notes. Use layout=cover for the first slide and section for chapter dividers; prefer tables/diagrams over long text. If a page does not fit, the error names the page; split it and retry. VOICEVOX narration uses the local engine and explicit speaker_id. Existing output is never overwritten. Return paths and hashes; viewing/listening remains unverified.',
+            'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'speaker_id':{'type':'integer'},'design_profile':{'type':'string','description':'Relative *.design.json from learn_design; applies the learned colours and fonts'},'theme':{'type':'object','properties':{'accent':{'type':'string','description':'#RRGGBB'}},'additionalProperties':False},'document_title':{'type':'string'},'slides':{'type':'array','minItems':1,'maxItems':80,'items':{'type':'object','properties':{'title':{'type':'string'},'body':{'type':'string'},'layout':{'type':'string','enum':['cover','section','content']},'table':{'type':'array','maxItems':20,'items':{'type':'array','maxItems':8,'items':{'type':['string','number','null']}}},'diagram':{'type':'object','properties':{'type':{'type':'string','enum':['flow','stack']},'direction':{'type':'string','enum':['horizontal','vertical']},'nodes':{'type':'array','minItems':2,'maxItems':8,'items':{'type':'string'}}},'required':['nodes'],'additionalProperties':False},'notes':{'type':'string'},'narration':{'type':'string'},'duration':{'type':'number'},'asset_path':{'type':'string','description':'Relative PNG/JPEG/MP4 path in approved output folder; integrated in this slide'},'scene':{'type':'string','enum':['実画面','モデル設定','台帳','履歴']}},'required':['title','body'],'additionalProperties':False}}},'required':['path','slides'],'additionalProperties':False}})
         cell = {'type':['string','number','boolean','null']}
         tools.append({'name':'generate_office','description':'Create a new Word (.docx) or Excel (.xlsx) file in the approved output folder. To edit an existing file, set base_path (relative, in the output folder or read-only source); the result is saved under the new path and the original is never modified. Word: replacements, title, sections(heading/level/paragraphs/bullets/table). Excel: updates(sheet/cell/value), sheets(name/rows/header/column_widths; rows append to an existing sheet). Formulas allowed except external references.',
-            'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'base_path':{'type':'string'},
+            'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'base_path':{'type':'string'},'design_profile':{'type':'string','description':'Relative *.design.json from learn_design; Word styles (fonts, sizes, colours) and, for a new file, page size and margins'},
                 'title':{'type':'string'},
                 'replacements':{'type':'array','maxItems':200,'items':{'type':'object','properties':{'find':{'type':'string'},'replace':{'type':'string'}},'required':['find','replace'],'additionalProperties':False}},
                 'sections':{'type':'array','maxItems':200,'items':{'type':'object','properties':{'heading':{'type':'string'},'level':{'type':'integer','minimum':1,'maximum':3},'paragraphs':{'type':'array','items':{'type':'string'}},'bullets':{'type':'array','items':{'type':'string'}},'table':{'type':'array','items':{'type':'array','items':cell}}},'additionalProperties':False}},
@@ -360,7 +521,9 @@ def main():
                 'sheets':{'type':'array','maxItems':20,'items':{'type':'object','properties':{'name':{'type':'string'},'rows':{'type':'array','items':{'type':'array','items':cell}},'header':{'type':'boolean'},'column_widths':{'type':'object','additionalProperties':{'type':'number'}}},'required':['name'],'additionalProperties':False}}},
                 'required':['path'],'additionalProperties':False}})
         tools.append({'name':'write_document','description':'Create documents only in the approved output folder. Updating a generated document requires its SHA256.',
-            'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'content':{'type':'string'},'expected_sha256':{'type':'string'}},'required':['path','content'],'additionalProperties':False}})
+            'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'content':{'type':'string'},'expected_sha256':{'type':'string'},'design_profile':{'type':'string','description':'HTML only: relative *.design.json; its CSS is inserted into <head>'}},'required':['path','content'],'additionalProperties':False}})
+        tools.append({'name':'learn_design','description':'Learn a unified design from a reference PDF (in the read-only source or the output folder): colours (background, text, heading, primary, secondary, surface, muted), fonts mapped to installed fonts, type sizes, line height, page size and margins. Saves design/<name>.design.json and a Japanese summary design/<name>.design.md (never overwrites). Then pass design_profile to generate_media, generate_office (Word) or write_document (HTML). Reading only; nothing in the PDF is executed.',
+            'inputSchema':{'type':'object','properties':{'pdf_path':{'type':'string','description':'Relative .pdf path'},'name':{'type':'string','description':'Profile name (letters, digits, Japanese, - _; max 40)'}},'required':['pdf_path'],'additionalProperties':False}})
     sys.stdin.reconfigure(encoding='utf-8');sys.stdout.reconfigure(encoding='utf-8')
     calls = 0
     for raw in sys.stdin:
@@ -377,7 +540,7 @@ def main():
                 calls+=1
                 if calls>100: raise ValueError('Tool limit')
                 name=params.get('name');args=params.get('arguments',{})
-                value=(media_environment() if name=='media_environment' else generate_media(output,args,writable,job_id) if name=='generate_media' else generate_office((output,source),args,writable,job_id) if name=='generate_office' else document_operation(output,name,args,writable) if name in ('read_document','write_document') else dict(execute(source,name,args),output_documents=binary_documents(output)) if name=='list_files' else execute(source,name,args))
+                value=(media_environment() if name=='media_environment' else generate_media(output,args,writable,job_id) if name=='generate_media' else generate_office((output,source),args,writable,job_id) if name=='generate_office' else learn_design((output,source),args,writable) if name=='learn_design' else document_operation(output,name,args,writable) if name in ('read_document','write_document') else dict(execute(source,name,args),output_documents=binary_documents(output)) if name=='list_files' else execute(source,name,args))
                 result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}]}
             else: raise ValueError('Unsupported operation')
             reply={'jsonrpc':'2.0','id':msg['id'],'result':result}

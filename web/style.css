@@ -77,3 +77,10 @@ select{max-width:100%;text-overflow:ellipsis}
 /* 閉じているパネルは隠し、ヘッダーの利用枠チップ・メニューから開く */
 .information-panel:not([open]),.mobile-access:not([open]){display:none}
 .page-title{font-size:var(--fs-xl);margin:0 0 12px}
+.failure-card{padding:14px 16px;margin:12px 0;border:1px solid var(--red);border-radius:10px;background:var(--red-bg)}
+.failure-card h3{color:var(--red);margin:0 0 8px}
+.failure-card .failure-cause{font-weight:700}
+.failure-card h4{margin:12px 0 6px}
+.failure-options{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:10px}
+.failure-options li p{margin:2px 0 6px}
+.failure-options button{min-height:36px}

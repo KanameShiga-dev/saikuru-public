@@ -451,6 +451,46 @@ function questionForm(approval){
   return box;
 }
 const recoveryDrafts=new Map();
+// A failed assignment: say so plainly, explain why, and offer alternatives (display only; actions reuse existing APIs).
+function failureDiagnosis(task,job){
+  const recovery=task.recovery||{},reported=recovery.reported_summary||'';
+  const text=[task.summary||'',reported,JSON.stringify(task.result||{})].join('\n');
+  const readOnly=['researcher','planner','reviewer'].includes(task.role)||task.agent_run?.sandbox==='read-only';
+  const limit=stopReason(task);
+  if(limit)return {cause:limit.title,why:limit.detail,kinds:['model','retry']};
+  if(/(コマンド|実行)(の|を)?(実行)?(の)?道具(が|も)?(なく|ない|ありません)|実行の道具がなく|コマンドを実行できません|Bash.{0,12}(使えません|ありません|無い)/.test(text))
+    return {cause:'この担当には、必要な道具（コマンドの実行）がありません',
+      why:(readOnly?'この担当は読み取り専用の役割（'+(task.role==='researcher'?'調査':task.role)+'）で、':'この担当では、')+'コマンドを実行できません。割り当てられた作業にコマンドが必要だったため、何度再試行しても同じ結果になります。'+(job.document_source?'':'この依頼は開発の依頼として扱われています。資料を作る依頼なら、台帳の「相談」で種類を「資料作成」にすると、資料用の道具で進められます。'),
+      kinds:['transfer','skip','redo','cancel']};
+  if(recovery.code==='handoff_rejected')
+    return {cause:'担当の「できない項目を残して先へ進む」報告を受け付けられませんでした',
+      why:'未完了の項目を残して先へ進む範囲は、利用者が決める決まりです。担当が自分で範囲を決めて報告したため、采来は受け付けずに止めました。',
+      kinds:['transfer','skip','retry','cancel']};
+  if(pythonFailure(task))return {cause:'Pythonを起動できませんでした',why:'担当の作業環境でPythonの起動に失敗しました。下の「停止理由と次の操作」で起動確認と回答案を確認してください。',kinds:['retry','model']};
+  if(task.failure_code==='provider'||/^Claude Code:|AI接続|起動確認を受け取れ/.test(task.summary||''))
+    return {cause:'AIとの接続、または担当の報告の形式で失敗しました',why:'内容：'+(task.summary||'').slice(0,240),kinds:['retry','model','cancel']};
+  return {cause:'担当が決められた回数で工程を終えられませんでした',why:'内容：'+(task.summary||'（記録なし）').slice(0,240),kinds:['retry','model','transfer','cancel']};
+}
+function failureCard(task,job){
+  const d=failureDiagnosis(task,job),box=el('section',undefined,'failure-card');box.id='failure-card';
+  box.append(el('h3','この担当は失敗しました'+(task.attempt?'（試行 '+task.attempt+'回で停止）':'')));
+  box.append(el('p','何が起きたか：'+d.cause,'failure-cause'),el('p',d.why));
+  const reported=(task.recovery?.reported_summary||'').trim();
+  if(reported)box.append(el('p','担当の最後の報告（要約・未検証）：'+reported.slice(0,260)+(reported.length>260?'…':''),'hint'));
+  const jump=(selector,label)=>button(label,()=>{const target=document.querySelector(selector);if(target){target.scrollIntoView({behavior:'smooth',block:'center'});const field=target.querySelector?.('textarea')||target;field.focus?.();}});
+  const targets=state.tasks.filter(t=>t.job_id===job.id&&t.after===task.id&&t.role==='builder'&&t.status==='queued');
+  const options={
+    transfer:targets.length?['できない作業を次の担当（'+targets[0].title.slice(0,24)+'）に移して再開する','下の「ボードから復旧する」で、移す作業を書いて保存します。次の担当がコマンドを使える場合に有効です。',jump('#task-recovery','移す作業を書く')]:null,
+    skip:['その作業を未実施として残し、先へ進める','下の回答欄に「〇〇は未実施として残し、残りを完了として報告してよい」と書いて再試行します。未実施の項目は合格扱いにはなりません。',jump('#retry-note','回答欄へ')],
+    retry:['補足を書いて再試行する','原因を解消したうえで、下の回答欄に補足を書いて再試行します。同じ条件のままでは、同じ結果になります。',jump('#retry-note','回答欄へ')],
+    redo:['依頼を中止して、出し直す',job.document_source?'依頼の内容を見直して出し直します。':'資料を作る依頼なら、台帳の「相談」で種類を「資料作成」にして出し直します。',jump('#cancel-job','中止ボタンへ')],
+    model:['担当・モデルを切り替える','利用枠やモデルの不調が原因の場合に有効です。道具が足りない場合は解消しません。',button('担当・モデルを切り替える',()=>openModelSwitch(task.id))],
+    cancel:['この依頼全体を中止する','作業済みの変更は自動では戻しません。',jump('#cancel-job','中止ボタンへ')]};
+  const list=el('ol',undefined,'failure-options');
+  for(const kind of d.kinds){const o=options[kind];if(!o)continue;const li=el('li');li.append(el('strong',o[0]),el('p',o[1],'hint'),o[2]);list.append(li);}
+  box.append(el('h4','代わりの方法'),list);
+  return box;
+}
 function pythonFailure(task){const text=(task.summary||'')+' '+JSON.stringify(task.result||{});return /Python/i.test(text)&&/起動失敗|起動でき|プロセス作成失敗|Unable to create process/i.test(text);}
 function advicePanel(task){
   const box=el('section',undefined,'decision-help');box.id='recovery-advice';
@@ -607,15 +647,24 @@ function renderDetail(task,version) {
   if(task.agent_run_history?.length)body.append(section('過去のAgent実行',task.agent_run_history.map(run=>`${run.name} · 試行 ${run.attempt} · ${run.status}\nセッションID: ${run.session_id||'未取得'}`).join('\n\n')));
   if(!endedJob(task)&&task.next_action)body.append(el('p','おすすめの次の操作：'+task.next_action,'notice'));
   if(!endedJob(task)&&task.previous_findings&&task.result?.status==='needs_changes')body.append(el('p','修正後も指摘が残っています。変更した箇所と根拠を確認してください。未変更のまま再試行せず、修正または未完了項目を残す引き継ぎを選んでください。','notice'));
+  if(!endedJob(task)&&task.status==='failed')body.append(failureCard(task,job));
   if(!endedJob(task)&&group(task)===2)body.append(decisionHelp(task));
   if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status))body.append(advicePanel(task));
   if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status)&&['researcher','builder'].includes(task.role))body.append(recoveryPanel(task,job));
+  if(job.artifact_urls?.length){const box=el('section',undefined,'detail-section');box.append(el('h3','ClaudeのArtifact（claude.ai・デスクトップから送信）'));
+    for(const a of job.artifact_urls){const p=el('p');const link=el('a',a.url);link.href=a.url;link.target='_blank';link.rel='noopener noreferrer';p.append(link,` ・送信 ${a.publishes||0}回`);box.append(p);}
+    box.append(el('p','共有するかどうかはclaude.ai上で利用者が判断してください。','hint'));body.append(box);}
   if(job.attachment_ids?.length){const images=el('section');images.append(el('h3','依頼の添付ファイル'),ImageAttachments.gallery(job.attachment_ids));body.append(images);}
   const instructionHealth=job.instruction_health;
   if(instructionHealth?.warnings?.length){const warning=el('div',undefined,'notice');warning.append(el('strong','指示ファイルの容量警告（依頼作成時点）'));for(const w of instructionHealth.warnings)warning.append(el('p',w.message));warning.append(el('p',instructionHealth.hint));body.append(warning);}
   body.append(section('今回の作業',task.instruction),section('対象と元の依頼',job.project+'\n\n'+job.goal));
   if(task.instruction_history?.length)body.append(section('過去の指示（履歴・現在の命令ではありません）',task.instruction_history.map(h=>`試行 ${h.attempt} · ${new Date(h.at*1000).toLocaleString()} · ${h.reason}\n${h.instruction}${h.submitted_note?'\n\n当時の追加内容:\n'+h.submitted_note:''}`).join('\n\n────────\n\n')));
   if(task.result)body.append(section('担当の報告（AIによる報告）',reportText(task.result)));
+  if(job.status==='blocked'&&!state.tasks.some(t=>t.job_id===job.id&&['queued','running','awaiting_approval'].includes(t.status))){
+    const form=el('form',undefined,'detail-section'),label=el('label','成果物への差し戻し理由・修正範囲'),input=el('textarea'),message=el('p','','hint');input.required=true;input.maxLength=4000;input.rows=4;label.append(input);
+    const submit=el('button','この指摘で修正とレビューを再開','primary');submit.type='submit';message.setAttribute('role','status');form.append(el('h3','成果物を差し戻す'),el('p','元の許可範囲で修正担当→通常レビュー→セキュリティレビューへ進みます。未回答の質問や矛盾がある場合は先に解消してください。'),label,message,submit);body.append(form);
+    form.onsubmit=async event=>{event.preventDefault();submit.disabled=true;try{await api('/api/jobs/rework',{id:job.id,note:input.value});await refresh();}catch(error){message.textContent=error.message;}finally{submit.disabled=false;}};
+  }
   else if(task.summary)body.append(section('状況',task.summary));
   if(endedJob(task))body.append(el('p','この依頼は終了しています。以下の報告と判断は過去の履歴です。現在の回答は不要です。','hint'));
   if(task.handoff_note)body.append(section('引き継ぎ範囲・未完了項目',task.handoff_note));
@@ -637,7 +686,7 @@ function renderDetail(task,version) {
     if(a.payload.questions?.length){body.append(questionForm(a));continue;}
     const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='plan'?'作業計画を承認':a.kind==='completion'?'成果を確認して受け入れる':'操作の承認'),el('div',a.kind==='tool'?JSON.stringify(a.payload,null,2):reportText(a.payload),'text-block'));
     const input=el('textarea');input.id='note-'+a.id;input.rows=3;input.placeholder='回答・判断の理由（任意）';input.setAttribute('aria-label','承認または拒否の補足');input.value=drafts[input.id]||'';
-    box.append(el('p',a.kind==='tool'?'この操作1回だけに適用されます。期限: '+date(a.expires_at):'内容を確認して承認または拒否してください。','hint'),input);
+    box.append(el('p',a.kind==='tool'?'この操作1回だけに適用されます。期限: '+date(a.expires_at):a.kind==='completion'?'内容を確認して受け入れるか拒否してください。拒否する場合は理由・指摘を入力すると、その指摘で修正担当とレビューが自動で再開します（理由なしの拒否は停止）。':'内容を確認して承認または拒否してください。','hint'),input);
     const actions=el('div',undefined,'actions');
     actions.append(button('拒否する',()=>api('/api/decide',{id:a.id,allow:false,note:input.value}),'danger'),button(a.kind==='completion'?(a.payload.pending_items?.length?'未完了項目を残して成果を受領':'確認済みとして受け入れる'):'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value}),'primary'));box.append(actions);body.append(box);
   }

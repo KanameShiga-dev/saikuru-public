@@ -13,8 +13,9 @@ function consultationSubmissionControls(){
  const prompt=$('consultation-prompt').value.trim();
  const docs=$('consultation-kind').value==='documentation';
  const format=$('consultation-document-format').value;
- const supported=['md','html','txt','svg','pptx','pdf','mp4','docx','xlsx'].includes(format);
- $('consultation-capability-note').textContent=supported?'PowerPoint・PDF・スライド動画・Word・Excelを専用ツールで制作できます。既存のWord・Excelは元ファイルを残したまま、編集版を新しい名前で保存します。音声付き動画には起動中のVOICEVOXと話者IDが必要です。制作環境が不足していれば依頼開始前に警告します。':'成果物の形式を選択してください。音声単独の出力は未対応です。';
+ const claudeArtifact=format.startsWith('claude_');
+ const supported=['md','html','txt','svg','pptx','pdf','mp4','docx','xlsx','claude_design','claude_slides','claude_design_system'].includes(format);
+ $('consultation-capability-note').textContent=claudeArtifact?'采来はClaudeのArtifact用のデータファイルを保存先のclaude-artifactsフォルダに作ります（完了時に公開前チェック：認証情報・個人情報・社内ホスト名・PC内のパス・社内の固有名詞）。claude.aiへの作成・送信は、成果の受け入れ後に利用者が承認してから、デスクトップアプリのClaudeが行います。':supported?'PowerPoint・PDF・スライド動画・Word・Excelを専用ツールで制作できます。既存のWord・Excelは元ファイルを残したまま、編集版を新しい名前で保存します。音声付き動画には起動中のVOICEVOXと話者IDが必要です。制作環境が不足していれば依頼開始前に警告します。':'成果物の形式を選択してください。音声単独の出力は未対応です。';
  $('consultation-document-format').disabled=blocked;
  $('consultation-request-scope').value=docs?'documentation':'development';
  $('consultation-document-scope').hidden=!docs;

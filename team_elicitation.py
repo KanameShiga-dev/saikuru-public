@@ -51,6 +51,12 @@ def reply_to_elicitation(ctx, params):
     # Only our explicitly configured, bounded read-only broker may bypass the board.
     read_tool = re.fullmatch(r'Allow the project_read MCP server to run tool "(list_files|read_file|search_files)"\?', message.strip())
     read_config = getattr(ctx, 'read_mcp', {})
+    guarded_search=re.fullmatch(r'Allow the project_read MCP server to run tool "web_search"\?',message.strip())
+    brokers={str(Path(__file__).with_name(name)) for name in ('consultation_read_tools.py','document_tools.py')}
+    if server=='project_read' and guarded_search and any(p in read_config.get('args',[]) for p in brokers):
+        ctx.check()
+        ctx.event('統括のガード付き検索ツールの利用を許可。検索語はツール側で送信前に検査します。')
+        return {'action':'accept','content':content}
     broker = str(Path(__file__).with_name('consultation_read_tools.py'))
     if (server == 'project_read' and read_tool and getattr(ctx, 'text_only', False)
             and getattr(ctx, 'consultation_research', False)
@@ -68,7 +74,7 @@ def reply_to_elicitation(ctx, params):
         return {'action':'accept','content':content}
     # A session-local app confirmation can reuse this user's explicit scope.
     # Every other request reaches the board even with automatic_operations enabled.
-    project_ok = Path(ctx.project).resolve() == Path(r'C:\AI_Work\Projects\Games\bravia-New-Games').resolve()
+    project_ok = False  # No project-specific GUI approval in the public build.
     target = 'bravestrategypcruntimesmoke'
     text = message.casefold()
     scoped = (project_ok and ctx.task['role'] == 'builder'
