@@ -101,7 +101,9 @@ class Parser:
         if not self.paths:return
         if os.name != 'nt':raise Refused('画像のローカルOCRが利用できないため添付を拒否しました。')
         exe=Path(os.environ.get('SystemRoot',r'C:\Windows'))/'System32/WindowsPowerShell/v1.0/powershell.exe'
-        completed=subprocess.run([str(exe),'-NoProfile','-NonInteractive','-File',str(Path(__file__).with_name('attachment_ocr.ps1'))],
+        # 2026-10-08 The machine's script policy stopped this fixed local script, so every image/PDF attachment was refused.
+        # Bypass applies to this one process only (no system setting is changed) and runs only 采来's own OCR script.
+        completed=subprocess.run([str(exe),'-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',str(Path(__file__).with_name('attachment_ocr.ps1'))],
             input=json.dumps({'paths':self.paths}),capture_output=True,text=True,encoding='utf-8',timeout=100,
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         try:result=json.loads(completed.stdout)

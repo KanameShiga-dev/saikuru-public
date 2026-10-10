@@ -18,16 +18,21 @@ DEFAULT_POLICY = {
     'blocked_terms': [],
     # Internal domains such as example.co.jp (blocks the domain and its subdomains/email addresses)
     'blocked_domains': [],
+    # Names of this PC/account/project folder that may appear in searches (exempts only that check;
+    # secrets, paths, e-mail addresses and blocked_terms are still refused).
+    'allowed_terms': [],
 }
 
-SECRET = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\b(?:ghp|gho|github_pat|sk|xox[abpr])[-_][A-Za-z0-9_-]{16,}\b'
-                    r'|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.|(?:api[_ -]?key|access[_ -]?token|secret|password|passwd|パスワード)\s*[:=＝]', re.I)
-EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
-PHONE = re.compile(r'(?<!\d)(?:0\d{1,4}-\d{1,4}-\d{3,4}|0[789]0\d{8}|\+81[- ]?\d{1,4}[- ]?\d{1,4}[- ]?\d{3,4})(?!\d)')
-PRIVATE_IP = re.compile(r'(?<![\d.])(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}(?![\d.])')
-INTERNAL_HOST = re.compile(r'\b[\w-]+(?:\.[\w-]+)*\.(?:local|lan|corp|internal|intra|intranet|localdomain)\b', re.I)
-LOCAL_PATH = re.compile(r'(?:\b[A-Za-z]:[\\/]|\\\\[\w.$-]+\\|(?:^|\s)~[\\/]|/(?:home|Users)/[\w.-]+)')
-MY_NUMBER = re.compile(r'(?<!\d)\d{4}[- ]?\d{4}[- ]?\d{4}(?!\d)')
+# 2026-10-08: project folders named after common words ("skills", "docs") blocked every search containing
+# that word (11 searches in one job). Such names identify nothing and are not treated as identifying names.
+GENERIC_FOLDER_NAMES = {
+    'skills', 'skill', 'docs', 'doc', 'documents', 'research', 'samples', 'sample', 'projects', 'project',
+    'src', 'source', 'test', 'tests', 'work', 'works', 'tools', 'tool', 'data', 'apps', 'app', 'web', 'site',
+    'notes', 'demo', 'temp', 'common', 'shared', 'design', 'reports', 'report', 'output', 'outputs',
+}
+
+# Detectors are shared with the Input Guard and the outbound Tool Guard (team_dlp).
+from team_dlp import SECRET, EMAIL, PHONE, PRIVATE_IP, INTERNAL_HOST, LOCAL_PATH, MY_NUMBER
 
 
 def load_policy():
@@ -38,25 +43,35 @@ def load_policy():
     data = json.loads(POLICY.read_text(encoding='utf-8-sig'))
     if not isinstance(data,dict):raise ValueError('検索ポリシーはオブジェクトで指定してください。')
     policy = dict(DEFAULT_POLICY, **data)
-    if not isinstance(policy['blocked_terms'], list) or not isinstance(policy['blocked_domains'], list):
+    if (not isinstance(policy['blocked_terms'], list) or not isinstance(policy['blocked_domains'], list)
+            or not isinstance(policy['allowed_terms'], list)):
         raise ValueError('websearch-policy.json の形式が不正です。')
     if type(policy['max_length']) is not int or not 1<=policy['max_length']<=200:
         raise ValueError('検索語の上限は1〜200文字です。')
-    if any(not isinstance(v,str) or not v.strip() for v in policy['blocked_terms']+policy['blocked_domains']):
+    if any(not isinstance(v,str) or not v.strip() for v in policy['blocked_terms']+policy['blocked_domains']+policy['allowed_terms']):
         raise ValueError('禁止語は空でない文字列で指定してください。')
-    if len(policy['blocked_terms'])+len(policy['blocked_domains'])>2000:raise ValueError('禁止語は合計2000件以内です。')
+    if len(policy['blocked_terms'])+len(policy['blocked_domains'])+len(policy['allowed_terms'])>2000:raise ValueError('禁止語は合計2000件以内です。')
     return policy
 
 
-def _environment_terms(project=None):
+def _environment_terms(project=None, allowed=()):
     """Names that identify this PC, account or project and should not leave the machine."""
     terms = {os.environ.get(k, '') for k in ('USERNAME', 'COMPUTERNAME', 'USERDOMAIN', 'USERDNSDOMAIN')}
     if project:
         name = Path(project).name
         # Generic sample-style names are too broad to block (e.g. "01-development").
-        if len(name) >= 4 and not re.fullmatch(r'\d+[-_][a-z-]+', name):
+        if (len(name) >= 4 and not re.fullmatch(r'\d+[-_][a-z-]+', name)
+                and name.casefold() not in GENERIC_FOLDER_NAMES):
             terms.add(name)
-    return {t for t in terms if t and len(t) >= 3}
+    exempt = {str(t).strip().casefold() for t in allowed if str(t).strip()}
+    return {t for t in terms if t and len(t) >= 3 and t.casefold() not in exempt}
+
+
+def _mentions(term, text):
+    """ASCII names match as a whole word ("skill" is not found inside "skills"); other names as text."""
+    if term.isascii():
+        return re.search(r'(?<![A-Za-z0-9_])' + re.escape(term) + r'(?![A-Za-z0-9_])', text, re.I) is not None
+    return term.casefold() in text.casefold()
 
 
 def check_query(query, project=None):
@@ -87,12 +102,13 @@ def check_query(query, project=None):
             d = str(domain).strip().casefold().lstrip('.')
             if d and re.search(r'(?:^|[^a-z0-9-])' + re.escape(d) + r'(?:$|[^a-z0-9-])', lowered):
                 return False, '社内ドメイン（ポリシー指定）'
-        for term in policy['blocked_terms']:
+        from team_dlp import load_policy as security_policy
+        for term in list(policy['blocked_terms']) + list(security_policy()['confidential_terms']):
             t = str(term).strip().casefold()
             if t and t in lowered:
                 return False, '社内の固有名詞（ポリシー指定）'
-        for term in _environment_terms(project):
-            if term.casefold() in lowered:
+        for term in _environment_terms(project, policy['allowed_terms']):
+            if _mentions(term, text):
                 return False, 'このPC・アカウント・プロジェクトの固有名'
         return True, ''
     except Exception:

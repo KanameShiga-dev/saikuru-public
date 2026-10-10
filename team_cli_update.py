@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 
 from team_config import discover, environment_status
 
@@ -12,6 +14,10 @@ from team_config import discover, environment_status
 VERSION = re.compile(r'^\d+\.\d+\.\d+$')
 CHECK_INTERVAL = 24 * 60 * 60
 FLAGS = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+LABELS = {'codex': 'Codex', 'claude': 'Claude Code', 'copilot': 'GitHub Copilot'}
+# The public "latest release" page redirects to .../releases/tag/vX.Y.Z. Reading only that redirect avoids the
+# unauthenticated API rate limit (shared by everyone behind the same office address). No token is sent.
+COPILOT_RELEASES = 'https://github.com/github/copilot-cli/releases/latest'
 
 
 def version_tuple(value):
@@ -22,11 +28,11 @@ def version_tuple(value):
 
 class CliUpdateMonitor:
     def __init__(self, app, provider='codex'):
-        if provider not in ('codex', 'claude'):
+        if provider not in LABELS:
             raise ValueError('未対応のCLIです。')
         self.app = app
         self.provider = provider
-        self.label = 'Codex' if provider == 'codex' else 'Claude Code'
+        self.label = LABELS[provider]
         self.package = '@openai/codex' if provider == 'codex' else '@anthropic-ai/claude-code'
         self.lock = threading.Lock()
         self.info = {'state': 'checking', 'installed': None, 'latest': None,
@@ -76,7 +82,7 @@ class CliUpdateMonitor:
             self.thread = threading.current_thread()
         try:
             installed = self._installed()
-            latest = self._run([self._npm(), 'view', self.package, 'version'], 30)
+            latest = self._latest_copilot() if self.provider == 'copilot' else self._run([self._npm(), 'view', self.package, 'version'], 30)
             version_tuple(installed)
             version_tuple(latest)
             available = version_tuple(latest) > version_tuple(installed)
@@ -91,6 +97,22 @@ class CliUpdateMonitor:
             if self.thread is threading.current_thread():
                 self.thread = None
             return self.snapshot_unlocked()
+
+    def _latest_copilot(self):
+        class Stop(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *_args, **_kwargs):
+                return None
+        request = urllib.request.Request(COPILOT_RELEASES, method='HEAD', headers={'User-Agent': 'saikuru-cli-update-check'})
+        try:
+            urllib.request.build_opener(Stop()).open(request, timeout=20).close()
+            location = ''
+        except urllib.error.HTTPError as exc:
+            location = exc.headers.get('Location', '') if exc.code in (301, 302, 303, 307, 308) else ''
+            exc.close()
+        match = re.fullmatch(r'https://github\.com/github/copilot-cli/releases/tag/v?(\d+\.\d+\.\d+)', location)
+        if not match:
+            raise RuntimeError('Copilot CLIの公開版を読めませんでした。')
+        return match.group(1)
 
     def snapshot_unlocked(self):
         return dict(self.info)
@@ -113,10 +135,9 @@ class CliUpdateMonitor:
                     raise ValueError('先に更新情報を再確認してください。')
                 if time.time() - self.info['checked_at'] > CHECK_INTERVAL:
                     raise ValueError('更新情報が古いため、再確認してください。')
-                if self.provider != 'codex' and self.app.cli_update.snapshot()['state'] == 'updating':
-                    raise ValueError('Codex CLIの更新が終わってから実行してください。')
-                if self.provider != 'claude' and self.app.claude_update.snapshot()['state'] == 'updating':
-                    raise ValueError('Claude Code CLIの更新が終わってから実行してください。')
+                for other in self.app.update_monitors():
+                    if other is not self and other.snapshot()['state'] == 'updating':
+                        raise ValueError(f'{other.label} CLIの更新が終わってから実行してください。')
                 if self.app.engine.active or any(t['status'] == 'running' for t in self.app.store.all('task')):
                     raise ValueError('実行中の作業が終わってから更新してください。')
                 if self.app.archives.thread and self.app.archives.thread.is_alive():
@@ -141,13 +162,15 @@ class CliUpdateMonitor:
                 if self._installed() != target:
                     raise RuntimeError('更新後の版数が一致しません。')
             else:
-                command = discover()['claude']
+                # Claude Code and Copilot CLI both ship their own official update command.
+                command = discover()[self.provider]
                 self._run(command + ['update'], 300)
                 if version_tuple(self._installed()) <= version_tuple(previous):
                     raise RuntimeError('更新後も采来 — サイクル —が使用するCLIの版数が変わりません。Claudeの起動用パスを確認してください。')
             self._refresh_runtime()
             installed = self._installed()
-            quota_ok = self.app.usage.refresh_now(self.provider, mark_loading=True)
+            # Copilot credits are counted locally; there is no provider quota to re-read.
+            quota_ok = self.provider == 'copilot' or self.app.usage.refresh_now(self.provider, mark_loading=True)
             with self.lock:
                 self.info.update(state='current', installed=installed, latest=installed,
                                  checked_at=time.time(), message=('更新が完了し、利用枠も再取得しました。' if quota_ok else
@@ -156,7 +179,7 @@ class CliUpdateMonitor:
             return
         except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
             message = str(exc)
-            restored = self.provider == 'claude' and self._installed_safe() == previous
+            restored = self.provider != 'codex' and self._installed_safe() == previous
             if self.provider == 'codex':
                 try:
                     if self._installed() != previous:
@@ -169,7 +192,7 @@ class CliUpdateMonitor:
             installed = self._installed_safe()
             with self.lock:
                 self.info.update(state='error', installed=installed, checked_at=time.time(),
-                                 message=message + (' 以前の版は使用できます。' if restored and self.provider == 'claude' else
+                                 message=message + (' 以前の版は使用できます。' if restored and self.provider != 'codex' else
                                                     ' 元の版へ戻しました。' if restored else ' CLIの版数を確認してください。'))
             self.app.store.event(f'{self.provider}_cli_update_failed', f'{self.label} CLIの更新に失敗しました。画面で状態を確認してください。')
         finally:

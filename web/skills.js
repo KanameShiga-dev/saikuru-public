@@ -17,7 +17,7 @@ async function load(){
  const groups=new Map();
  for(const item of data.skills){if(!groups.has(item.id))groups.set(item.id,Object.assign({},item,{applied:[]}));groups.get(item.id).applied.push(item.applied_project);}
  for(const skill of groups.values()){const box=element('details');box.className='skill-card'+(skill.imported?' imported':'');
- const name=skill.imported?skill.name:skill.description;
+ const name=skill.display_name||(skill.imported?skill.name:skill.description);
  const scriptCount=skill.imported?(skill.tools.match(/^- /gm)||[]).length:0;
  const head=element('summary'),titleRow=element('div',name);titleRow.className='skill-title';head.append(titleRow);
  if(skill.imported){const desc=element('p',skill.description.split('。')[0]+'。');desc.className='skill-desc';head.append(desc);}
@@ -35,8 +35,21 @@ async function load(){
  const meta=element('dl');meta.className='skill-meta';
  const row=(k,v)=>{meta.append(element('dt',k),element('dd',v));};
  row('作成元',skill.imported?'取り込み（'+skill.skill_dir+'）':label(skill.source_project));row('版',skill.id.slice(0,12));
- if(skill.imported)row('説明',skill.description);
+ row('内部の名前',skill.name);
+ if(skill.imported||skill.display_name!==skill.description)row('説明',skill.description);
  body.append(meta);
+ // Display name only: the internal name (folder, read and script checks) stays the same.
+ const rename=element('form');rename.className='rename-box';
+ const renameLabel=element('label','表示名'),renameInput=element('input'),renameSave=element('button','表示名を保存'),renameReset=element('button','元の名前に戻す'),renameMessage=element('p');
+ renameInput.id='rename-'+skill.id.slice(0,12);renameLabel.htmlFor=renameInput.id;renameInput.maxLength=60;renameInput.value=name;
+ renameSave.type='submit';renameReset.type='button';renameMessage.setAttribute('role','status');renameMessage.className='hint';
+ renameMessage.textContent='画面・依頼のスキル選択・担当への引き継ぎで使う名前です。内部の名前（'+skill.name+'）とフォルダは変わりません。';
+ const saveTitle=async title=>{renameSave.disabled=renameReset.disabled=true;
+  try{await api('/api/skills/rename',{version_id:skill.id,title});await load();}
+  catch(error){renameMessage.textContent=error.message;renameSave.disabled=renameReset.disabled=false;}};
+ rename.onsubmit=event=>{event.preventDefault();saveTitle(renameInput.value);};
+ renameReset.onclick=()=>saveTitle('');
+ rename.append(renameLabel,renameInput,renameSave,renameReset,renameMessage);body.append(rename);
  // Projects using this skill, each with an unassign button.
  body.append(element('h3','適用先プロジェクト'));
  const where=element('ul');where.className='assigned';
@@ -44,7 +57,7 @@ async function load(){
   const li=element('li'),name=element('span',label(path)),off=element('button','解除');off.type='button';off.className='small';
   const project=data.projects.find(p=>p.path.toLowerCase()===path.toLowerCase());
   off.disabled=!project;
-  const skillTitle=skill.imported?skill.name:skill.description.slice(0,30);
+  const skillTitle=skill.display_name||skill.name;
   off.onclick=async()=>{if(!confirm('「'+label(path)+'」でのスキル「'+skillTitle+'」の使用を解除します。\nこのプロジェクトの依頼では、このスキルを担当に渡さなくなります。よろしいですか？'))return;
    off.disabled=true;try{await api('/api/skills/unassign',{version_id:skill.id,project_id:project.id,confirmed:true});await load();}catch(error){alert(error.message);off.disabled=false;}};
   li.append(name,off);where.append(li);}
@@ -67,7 +80,7 @@ async function load(){
  let desktopBox=null;
  if(skill.imported){const l=element('label');desktopBox=element('input');desktopBox.type='checkbox';l.append(desktopBox,document.createTextNode(' デスクトップ（~\\.claude\\skills\\'+skill.name+'）に置いた分も控えに移す'));danger.append(l,element('br'));}
  const del=element('button','削除する');del.type='button';del.className='danger';
- del.onclick=async()=>{const title=skill.imported?skill.name:skill.description.slice(0,40);
+ del.onclick=async()=>{const title=name;
   if(!confirm('スキル「'+title+'」を削除します。\n適用先 '+skill.applied.length+'件すべてで使えなくなります。よろしいですか？'))return;
   del.disabled=true;try{await api('/api/skills/delete',{version_id:skill.id,confirmed:true,remove_desktop:!!desktopBox?.checked});await load();}catch(error){alert(error.message);del.disabled=false;}};
  danger.append(del);body.append(danger);list.append(box);

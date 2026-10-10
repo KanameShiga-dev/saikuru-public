@@ -1,5 +1,6 @@
 """Bounded document output broker; source is always read-only."""
 import hashlib
+import io
 import json
 import os
 import re
@@ -7,6 +8,7 @@ from pathlib import Path
 import sys
 import subprocess
 import tempfile
+import time
 import shutil
 import urllib.request
 import zipfile
@@ -25,7 +27,113 @@ def output_path(root, name):
         raise ValueError('資料はmd/html/txt/svg/pptx/pdf/mp4/docx/xlsxのみです（jsonはデザインプロファイルの読み取りだけ）。')
     path = (root / relative).resolve()
     path.relative_to(root)
-    return path
+    # Lower-case the extension so 'X.PDF' is handled like 'x.pdf' (Windows names are case-insensitive).
+    return path.with_suffix(path.suffix.lower())
+
+def pdf_text(path, max_pages=60, max_chars=16000):
+    """Text of a PDF, page by page (read only; nothing in the PDF is executed). Without this a request such as
+    "check the PDF's contents" could never be completed, and the checking role kept stopping (2026-10-08)."""
+    from pypdf import PdfReader
+    raw = path.read_bytes()
+    if not raw.startswith(b'%PDF-'):
+        raise ValueError('PDFの形式を確認できません。')
+    reader = PdfReader(io.BytesIO(raw))
+    if reader.is_encrypted:
+        return {'page_count': None, 'pages': [], 'note': 'パスワード付きPDFのため本文を読めません。'}
+    count, pages, used, truncated = len(reader.pages), [], 0, False
+    for index, page in enumerate(reader.pages[:max_pages]):
+        text = (page.extract_text() or '').strip()
+        if used + len(text) > max_chars:
+            text, truncated = text[:max(0, max_chars - used)], True
+        used += len(text)
+        pages.append({'page': index + 1, 'text': text})
+        if truncated:
+            break
+    note = '本文の文字だけです。レイアウト・配色・図の見た目は、受け入れ時の自動画像化で利用者が確認します。'
+    # PDFs made by generate_media hold each page as a picture: read those pages with the local Windows OCR
+    # (the same fixed script as the attachment check; nothing is sent outside this PC).
+    empty = [p for p in pages if not p['text']][:20]
+    if empty:
+        try:
+            for page, text in zip(empty, _ocr_pdf_pages(raw, [p['page'] for p in empty])):
+                page['text'], page['ocr'] = text[:max(0, max_chars - used)], True
+                used += len(page['text'])
+            note += ' 文字のないページは画像から文字認識（OCR）で読み取りました。誤認識が含まれる場合があります。'
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            note += ' 画像だけのページの文字認識（OCR）ができませんでした。'
+    if truncated or count > max_pages:
+        note += f' 長いため途中までです（{max_chars}文字・{max_pages}ページまで）。'
+    if not any(p['text'] for p in pages):
+        note += ' 文字を取り出せませんでした。'
+    return {'page_count': count, 'pages': pages, 'note': note}
+
+
+def _ocr_pdf_pages(raw, numbers):
+    import pypdfium2 as pdfium
+    folder = tempfile.TemporaryDirectory(prefix='saikuru-pdf-ocr-')
+    try:
+        paths, document = [], pdfium.PdfDocument(raw)
+        try:
+            for number in numbers:
+                page = document[number - 1]
+                try:
+                    width, height = page.get_size()
+                    bitmap = page.render(scale=min(2.5, 1800 / max(width, height, 1)))
+                    try:
+                        target = Path(folder.name) / f'{number}.png'
+                        bitmap.to_pil().convert('RGB').save(target)
+                        paths.append(str(target.resolve()))
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+        finally:
+            document.close()
+        exe = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        # Same process-only policy bypass as the attachment check; only this fixed local OCR script is run.
+        done = subprocess.run([str(exe), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', str(Path(__file__).with_name('attachment_ocr.ps1'))],
+                              input=json.dumps({'paths': paths}), capture_output=True, text=True, encoding='utf-8', timeout=120,
+                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        result = json.loads(done.stdout)
+        if done.returncode or result.get('ok') is not True or len(result.get('texts') or []) != len(paths) * 2:
+            raise RuntimeError('OCR unavailable')
+        # Two results per image (Japanese, then English engine); the Japanese one covers mixed text.
+        # Windows OCR separates every Japanese character with a space; keep spaces only around ASCII words.
+        return [re.sub(r'(?<=[^\x00-\x7f]) +(?=[^\x00-\x7f])', '', str(result['texts'][index * 2])).strip()
+                for index in range(len(paths))]
+    finally:
+        folder.cleanup()
+
+def _own_output(root, path, job_id):
+    """True when an existing path is a deliverable this job generated and nobody has changed since.
+    2026-10-08: the user allowed re-generating one's own documents; any other existing file is still never overwritten."""
+    if not path.exists():
+        return False
+    manifest = root / ('.saikuru-output-' + str(job_id) + '.json')
+    try:
+        records = json.loads(manifest.read_text(encoding='utf-8')) if job_id and manifest.is_file() and not manifest.is_symlink() else []
+    except ValueError:
+        records = []
+    if path.is_file() and not path.is_symlink() and isinstance(records, list):
+        key, actual = str(path.relative_to(root)), hashlib.sha256(path.read_bytes()).hexdigest()
+        if any(isinstance(r, dict) and r.get('path') == key and r.get('sha256') == actual for r in records):
+            return True
+    raise ValueError('既存のファイルは上書きしません（この依頼で作った資料だけ作り直せます）。新しい名前を指定してください。')
+
+
+def _set_aside(root, path):
+    """Keep the previous version under .saikuru-versions/ before the new one is written."""
+    folder = root / '.saikuru-versions'
+    if folder.is_symlink():
+        raise ValueError('旧版の退避先にリンクは使えません。')
+    folder.mkdir(exist_ok=True)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    target, number = folder / f'{path.stem}-{stamp}{path.suffix}', 1
+    while target.exists():
+        target, number = folder / f'{path.stem}-{stamp}-{number}{path.suffix}', number + 1
+    os.replace(path, target)
+    return str(target.relative_to(root))
+
 
 def document_operation(root, name, args, writable):
     path = output_path(root, args.get('path', ''))
@@ -36,7 +144,10 @@ def document_operation(root, name, args, writable):
         if path.suffix == '.pptx':
             return dict(pptx_text(path), path=str(path.relative_to(root)), bytes=path.stat().st_size,
                         sha256=hashlib.sha256(path.read_bytes()).hexdigest())
-        if path.suffix in ('.pdf','.mp4'):
+        if path.suffix == '.pdf':
+            return dict(pdf_text(path), path=str(path.relative_to(root)), bytes=path.stat().st_size,
+                        sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        if path.suffix == '.mp4':
             return {'path':str(path.relative_to(root)), 'bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'note':'バイナリ成果物です。内容の視聴・表示確認は別途必要です。'}
         if path.stat().st_size > 200000: raise ValueError('資料が大きすぎます。')
         data = path.read_bytes()
@@ -137,7 +248,8 @@ def learn_design(roots, args, writable):
 def generate_media(root,args,writable,job_id):
     if not writable:raise ValueError('制作はbuilderのみです。')
     path=output_path(root,args.get('path',''))
-    if path.suffix not in ('.pptx','.pdf','.mp4') or path.exists():raise ValueError('新しいPPTX・PDF・MP4の名前を指定してください。既存成果物は上書きしません。')
+    if path.suffix not in ('.pptx','.pdf','.mp4'):raise ValueError('PPTX・PDF・MP4の名前を指定してください。')
+    replace=_own_output(root,path,job_id)
     slides=args.get('slides')
     if not isinstance(slides,list) or not 1<=len(slides)<=80:raise ValueError('ページ・章は1〜80件です。')
     design=_design(root,args['design_profile']) if args.get('design_profile') else None
@@ -190,8 +302,10 @@ def generate_media(root,args,writable,job_id):
             if detail:raise ValueError('成果物の生成に失敗しました（入力を直せば作成できます）: '+detail[-1])
             raise ValueError('成果物の生成に失敗しました。VOICEVOX・話者・文字量・制作環境を確認してください。完成扱いにはしません。')
         if generated.stat().st_size>500*1024*1024:raise ValueError('成果物は500MB以内です。')
+        previous=_set_aside(root,path) if replace else None  # only after generation succeeded
         with path.open('xb') as dest,generated.open('rb') as src:shutil.copyfileobj(src,dest)
     record={'path':str(path.relative_to(root)),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'bytes':path.stat().st_size,'narration':all(bool(s.get('narration','').strip()) for s in slides),'visual_review':'未確認'}
+    if previous:record['previous_version']=previous
     record['assets']=assets
     if job_id:
         manifest=root/('.saikuru-output-'+job_id+'.json')
@@ -360,8 +474,9 @@ def generate_office(roots, args, writable, job_id):
         raise ValueError('制作はbuilderのみです。')
     root = roots[0]
     path = output_path(root, args.get('path', ''))
-    if path.suffix not in ('.docx', '.xlsx') or path.exists():
-        raise ValueError('新しいDOCX・XLSXの名前を指定してください。既存成果物は上書きしません。')
+    if path.suffix not in ('.docx', '.xlsx'):
+        raise ValueError('DOCX・XLSXの名前を指定してください。')
+    replace = _own_output(root, path, job_id)
     from team_document_capabilities import require_supported
     require_supported(path.suffix[1:])
     base = _office_base(roots, args['base_path'], path.suffix) if args.get('base_path') else None
@@ -466,11 +581,14 @@ def generate_office(roots, args, writable, job_id):
                 raise ValueError('シートを1つ以上指定してください。')
             book.save(str(generated))
             summary = {'updated_cells': len(updates), 'sheets': book.sheetnames}
+        previous = _set_aside(root, path) if replace else None  # only after the new file was built
         with path.open('xb') as dest, generated.open('rb') as src:
             shutil.copyfileobj(src, dest)
     record = {'path': str(path.relative_to(root)), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
               'bytes': path.stat().st_size, 'edited_from': args.get('base_path') or None, 'assets': [],
               'visual_review': '未確認', 'summary': summary}
+    if previous:
+        record['previous_version'] = previous
     if job_id:
         manifest = root / ('.saikuru-output-' + job_id + '.json')
         if manifest.is_symlink():
@@ -505,11 +623,11 @@ def main():
     # an ancestor of the source would widen the write scope, so it stays refused.
     if output != source and source.is_relative_to(output):
         raise ValueError('保存先に読み取り元を含む上位フォルダは指定できません。')
-    tools = [dict(t, description='List bounded non-sensitive text files of the read-only source. output_documents lists generated PDF/PPTX/MP4/DOCX/XLSX in the output folder with bytes and SHA256.') if t['name'] == 'list_files' else t for t in TOOLS] + [{'name': 'read_document', 'description': 'Read a document in the approved output folder. Word/Excel files are returned as text (headings, paragraphs, tables, cells) with their SHA256. PowerPoint (.pptx) returns per-slide text in reading order, tables ([表 r行×c列] + rows), diagram boxes ([図形]), speaker notes, slide_count, per-slide table/box/picture counts, and a design tally (fonts, text colours, fills, font sizes) to compare with a design profile. Visual layout still needs a rendered check.',
+    tools = [dict(t, description='List bounded non-sensitive text files of the read-only source. output_documents lists generated PDF/PPTX/MP4/DOCX/XLSX in the output folder with bytes and SHA256.') if t['name'] == 'list_files' else t for t in TOOLS] + [{'name': 'read_document', 'description': 'Read a document in the approved output folder. Word/Excel files are returned as text (headings, paragraphs, tables, cells) with their SHA256. PowerPoint (.pptx) returns per-slide text in reading order, tables ([表 r行×c列] + rows), diagram boxes ([図形]), speaker notes, slide_count, per-slide table/box/picture counts, and a design tally (fonts, text colours, fills, font sizes) to compare with a design profile. PDF returns page_count and per-page text (up to 60 pages / 16,000 characters). Visual layout still needs a rendered check.',
         'inputSchema': {'type':'object','properties':{'path':{'type':'string'}},'required':['path'],'additionalProperties':False}}]
     tools.append({'name':'media_environment','description':'Check local movie renderer and list available VOICEVOX speaker names/style IDs. No settings changes.', 'inputSchema':{'type':'object','properties':{},'additionalProperties':False}})
     if writable:
-        tools.append({'name':'generate_media','description':'Generate editable PPTX, slide PDF, or MP4 from structured slides. PPTX is designed: theme colour, cover/section/content layouts, real tables (table: rows, first row = header), box-and-arrow diagrams (diagram: {type: flow|stack, direction, nodes}), page numbers and speaker notes. Use layout=cover for the first slide and section for chapter dividers; prefer tables/diagrams over long text. If a page does not fit, the error names the page; split it and retry. VOICEVOX narration uses the local engine and explicit speaker_id. Existing output is never overwritten. Return paths and hashes; viewing/listening remains unverified.',
+        tools.append({'name':'generate_media','description':'Generate editable PPTX, slide PDF, or MP4 from structured slides. PPTX is designed: theme colour, cover/section/content layouts, real tables (table: rows, first row = header), box-and-arrow diagrams (diagram: {type: flow|stack, direction, nodes}), page numbers and speaker notes. Use layout=cover for the first slide and section for chapter dividers; prefer tables/diagrams over long text. If a page does not fit, the error names the page; split it and retry. VOICEVOX narration uses the local engine and explicit speaker_id. Pages are always landscape 16:9 slides (PDF included); A4 or portrait pages are not possible, so make an A4 document with generate_office (docx) instead. A file this request generated can be re-generated under the same name (the previous version moves to .saikuru-versions/); any other existing file is never overwritten. Return paths and hashes; viewing/listening remains unverified.',
             'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'speaker_id':{'type':'integer'},'design_profile':{'type':'string','description':'Relative *.design.json from learn_design; applies the learned colours and fonts'},'theme':{'type':'object','properties':{'accent':{'type':'string','description':'#RRGGBB'}},'additionalProperties':False},'document_title':{'type':'string'},'slides':{'type':'array','minItems':1,'maxItems':80,'items':{'type':'object','properties':{'title':{'type':'string'},'body':{'type':'string'},'layout':{'type':'string','enum':['cover','section','content']},'table':{'type':'array','maxItems':20,'items':{'type':'array','maxItems':8,'items':{'type':['string','number','null']}}},'diagram':{'type':'object','properties':{'type':{'type':'string','enum':['flow','stack']},'direction':{'type':'string','enum':['horizontal','vertical']},'nodes':{'type':'array','minItems':2,'maxItems':8,'items':{'type':'string'}}},'required':['nodes'],'additionalProperties':False},'notes':{'type':'string'},'narration':{'type':'string'},'duration':{'type':'number'},'asset_path':{'type':'string','description':'Relative PNG/JPEG/MP4 path in approved output folder; integrated in this slide'},'scene':{'type':'string','enum':['実画面','モデル設定','台帳','履歴']}},'required':['title','body'],'additionalProperties':False}}},'required':['path','slides'],'additionalProperties':False}})
         cell = {'type':['string','number','boolean','null']}
         tools.append({'name':'generate_office','description':'Create a new Word (.docx) or Excel (.xlsx) file in the approved output folder. To edit an existing file, set base_path (relative, in the output folder or read-only source); the result is saved under the new path and the original is never modified. Word: replacements, title, sections(heading/level/paragraphs/bullets/table). Excel: updates(sheet/cell/value), sheets(name/rows/header/column_widths; rows append to an existing sheet). Formulas allowed except external references.',

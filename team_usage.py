@@ -7,7 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from team_adapters import Process
@@ -25,6 +25,9 @@ def recovery_ready(snapshot, profile, minimum=10):
     if value.get('status') != 'ok' or value.get('stale', True):
         return False
     rows = value.get('rows', [])
+    if provider == 'copilot':
+        monthly = (rows[0] if rows else {}).get('monthly') or {}
+        return type(monthly.get('remaining_percent')) in (int, float) and monthly['remaining_percent'] >= minimum
     common_id = 'claude' if provider == 'claude' else 'codex'
     common = next((row for row in rows if row.get('id') == common_id), None)
     if not common or not common.get('short') or not common.get('weekly'):
@@ -166,9 +169,77 @@ def claude_usage(_command):
     return rows
 
 
+COPILOT_LEDGER = ROOT / 'data' / 'copilot-credits.json'
+_copilot_lock = threading.Lock()
+
+
+def _month_start(now=None):
+    """Copilot allowances reset on the 1st of each month, 00:00 UTC."""
+    moment = datetime.fromtimestamp(now if now is not None else time.time(), timezone.utc)
+    return moment.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _next_month(start):
+    return start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
+
+
+def _read_copilot_ledger(now=None):
+    month = _month_start(now).strftime('%Y-%m')
+    try:
+        value = json.loads(COPILOT_LEDGER.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        value = {}
+    if not isinstance(value, dict) or value.get('month') != month:
+        return {'month': month, 'credits': 0.0, 'premium_requests': 0, 'runs': 0, 'updated_at': None}
+    return value
+
+
+def record_copilot_usage(credits, premium_requests):
+    """Add one Copilot run's consumption (numbers only, from the CLI's own usage events)."""
+    with _copilot_lock:
+        value = _read_copilot_ledger()
+        if type(credits) in (int, float) and math.isfinite(credits) and credits >= 0:
+            value['credits'] = round(value['credits'] + credits, 6)
+        if type(premium_requests) in (int, float) and math.isfinite(premium_requests) and premium_requests >= 0:
+            value['premium_requests'] += premium_requests
+        value['runs'] += 1
+        value['updated_at'] = time.time()
+        try:
+            COPILOT_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+            temporary = COPILOT_LEDGER.with_suffix('.tmp')
+            temporary.write_text(json.dumps(value), encoding='utf-8')
+            temporary.replace(COPILOT_LEDGER)
+        except OSError:
+            pass
+
+
+def copilot_usage(limit, now=None):
+    """Monthly credit view: the configured allowance and the consumption recorded by 采来's own Copilot runs."""
+    value = _read_copilot_ledger(now)
+    resets_at = _next_month(_month_start(now)).timestamp()
+    used = value['credits']
+    # Local numbers, never stale. updated_at is the last recorded run (None before the first one), so the
+    # snapshot stays identical between runs and the screen does not redraw on every poll.
+    base = {'updated_at': value['updated_at'], 'stale': False}
+    if not limit:
+        return dict(base, status='unavailable', rows=[{'id': 'copilot', 'label': '月間AIクレジット', 'short': None,
+            'weekly': None, 'minutes': None, 'monthly_only': True,
+            'monthly': {'remaining_percent': None, 'resets_at': resets_at, 'used': used, 'limit': None,
+                        'premium_requests': value['premium_requests']}}],
+            note='設定画面で「月間の最大クレジット」を入力すると残り％を表示します。')
+    remaining = round(max(0, min(100, 100 - used / limit * 100)), 1)
+    return dict(base, status='ok', rows=[{'id': 'copilot', 'label': '月間AIクレジット', 'short': None, 'weekly': None,
+        'minutes': None, 'monthly_only': True,
+        'monthly': {'remaining_percent': remaining, 'resets_at': resets_at, 'used': used, 'limit': limit,
+                    'premium_requests': value['premium_requests']}}],
+        note='采来から実行した分の消費を集計しています（VS Code等、他での利用は含みません）。毎月1日（UTC）にリセット。')
+
+
 class UsageMonitor:
-    def __init__(self, commands, shutdown):
+    def __init__(self, commands, shutdown, settings=None):
         self.commands, self.shutdown = commands, shutdown
+        # Current provider settings (enabled list, Copilot allowance); read on each use so saves apply at once.
+        self.settings = settings or (lambda: {'enabled': ['codex', 'claude'], 'copilot_monthly_credits': None})
         self.lock = threading.Lock()
         self.reader_locks = {name: threading.Lock() for name in ('codex', 'claude')}
         self.values = {name: {'status': 'loading', 'rows': [], 'updated_at': None,
@@ -188,6 +259,13 @@ class UsageMonitor:
     def _loop(self, name):
         delay = 300
         while not self.shutdown.is_set():
+            if name not in self.settings().get('enabled', ()):
+                # Unused provider: do not contact it. Re-check the setting each minute.
+                with self.lock:
+                    self.values[name].update(status='unavailable', note='使用しないプロバイダに設定されています。')
+                if self.shutdown.wait(60):
+                    return
+                continue
             success = self.refresh_now(name)
             delay = max(1,self.claude_next-time.time()) if name=='claude' else (300 if success else min(3600, max(900, delay * 2)))
             with self.lock:
@@ -250,4 +328,5 @@ class UsageMonitor:
                     if item and item['resets_at'] and item['resets_at'] <= now:
                         row[key] = None  # Reset has passed; never invent 100% remaining.
                         value['stale'] = True
+        result['copilot'] = copilot_usage(self.settings().get('copilot_monthly_credits'), now)
         return result

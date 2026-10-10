@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-from team_config import ROOT, discover, environment_status, load_config, validate_config
+from team_config import ROOT, default_provider_settings, discover, environment_status, load_config, validate_config
 from team_engine import Engine, canonical
 from team_store import Store
 from team_usage import UsageMonitor
@@ -75,14 +75,22 @@ class App:
         self.engine.project_blocked = lambda path: self.archives.blocked(path) or self.moves.blocked(path)
         for job in self.store.all('job'):
             self.engine.sync_handoff(job['id'])
-        self.usage = UsageMonitor(self.commands, self.engine.shutdown)
+        self.usage = UsageMonitor(self.commands, self.engine.shutdown,
+                                  settings=lambda: self.config.get('provider_settings') or default_provider_settings())
         self.engine.usage_snapshot = self.usage.snapshot
         self.cli_update = CliUpdateMonitor(self, 'codex')
         self.claude_update = CliUpdateMonitor(self, 'claude')
+        self.copilot_update = CliUpdateMonitor(self, 'copilot')
         self.mobile = None
         self.mobile_error = None
         from team_notifications import Notifications
         self.notifications = Notifications(self)
+
+    def update_monitors(self):
+        return (self.cli_update, self.claude_update, self.copilot_update)
+
+    def cli_updating(self):
+        return any(m.snapshot()['state'] == 'updating' for m in self.update_monitors())
 
     def refresh_claude_auth(self):
         self.health.update(environment_status({'claude': self.commands.get('claude')}))
@@ -90,6 +98,18 @@ class App:
             self.usage.refresh_now('claude')
 
     def auth_loop(self):
+        # Right after a restart a CLI's first start can time out; re-check those soon (every 10s, 3 times)
+        # instead of showing "cannot start" until the next minute (Copilot was otherwise never re-checked).
+        for _ in range(3):
+            pending = {name: command for name, command in self.commands.items() if command and (
+                not self.health.get(name, {}).get('available')
+                or (name == 'claude' and 'authenticated' not in self.health.get(name, {})))}
+            if not pending or self.engine.shutdown.wait(10):
+                break
+            current = environment_status(pending)
+            self.health.update(current)
+            if current.get('claude', {}).get('authenticated'):
+                self.usage.refresh_now('claude')
         while not self.engine.shutdown.wait(60):
             previous = self.health.get('claude', {}).get('authenticated')
             current = environment_status({'claude': self.commands.get('claude')})
@@ -149,7 +169,8 @@ class App:
                 'config': self.config, 'providers': self.health, 'paused': self.engine.paused,
                 'sample_project': str(ROOT / 'sample-project'), 'server_time': time.time(),
                 'usage': self.usage.snapshot(), 'cli_update': self.cli_update.snapshot(),
-                'claude_update': self.claude_update.snapshot(), 'notifications': self.notifications.snapshot()}
+                'claude_update': self.claude_update.snapshot(), 'copilot_update': self.copilot_update.snapshot(),
+                'notifications': self.notifications.snapshot()}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -286,10 +307,26 @@ class Handler(BaseHTTPRequestHandler):
                     raise PermissionError('画面を再読み込みしてください。')
                 query = parse_qs(urlparse(self.path).query)
                 return self.send(200, self.app.moves.preview_status((query.get('id') or [''])[0]))
+            if path in ('/api/jobs/previews', '/api/previews/image'):
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                import team_preview
+                query = parse_qs(urlparse(self.path).query)
+                if path == '/api/previews/image':
+                    return self.send(200, team_preview.image((query.get('job') or [''])[0], (query.get('key') or [''])[0],
+                                                             int((query.get('page') or ['0'])[0] or 0)), 'image/png')
+                job = self.app.store.get((query.get('id') or [''])[0], 'job')
+                snapshot = team_preview.snapshot(job)
+                if any(f['status'] == 'pending' for f in snapshot['files']) and not snapshot['rendering']:
+                    team_preview.start(job)
+                    snapshot = team_preview.snapshot(job)
+                return self.send(200, snapshot)
             if path == '/api/skills':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
                 from team_skill_import import inbox as skill_inbox
+                if (parse_qs(urlparse(self.path).query).get('for') or [''])[0] == 'request':
+                    return self.send(200,{'skills':self.app.engine.handoff.selectable_skills()})
                 return self.send(200,{'skills':self.app.engine.handoff.skill_library(),
                                      'projects':self.app.ledger.snapshot()['projects'],
                                      'inbox':skill_inbox()})
@@ -319,7 +356,7 @@ class Handler(BaseHTTPRequestHandler):
             files = {'/history': 'history.html', '/history.js': 'history.js', '/history.css': 'history.css', '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/theme.css': 'theme.css', '/shell.js': 'shell.js',
                      '/skills': 'skills.html', '/skills.js': 'skills.js', '/skills.css': 'skills.css',
                      '/operation-tests': 'operation-tests.html', '/operation-tests.js': 'operation-tests.js',
-                     '/attachments.js': 'attachments.js', '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
+                     '/attachments.js': 'attachments.js', '/skill-picker.js': 'skill-picker.js', '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
             if path not in files:
                 return self.send(404, {'error': '見つかりません。'})
             file = ROOT / 'web' / files[path]
@@ -327,7 +364,7 @@ class Handler(BaseHTTPRequestHandler):
         except PermissionError as exc:
             self.send(403, {'error': str(exc)})
         except ValueError as exc:
-            if path in ('/api/attachments/image', '/api/attachments/meta'):
+            if path in ('/api/attachments/image', '/api/attachments/meta', '/api/ledger/consultation/models'):
                 self.send(400, {'error': str(exc)[:300]})
             else:
                 self.send(500, {'error': 'ファイルを読み込めませんでした。'})
@@ -345,6 +382,9 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError('JSONオブジェクトが必要です。')
+            if path == '/worker/tool-result':
+                token = self.headers.get('Authorization', '').removeprefix('Bearer ')
+                return self.send(200, self.app.engine.tool_result(token, body))
             if path == '/worker/tool':
                 token = self.headers.get('Authorization', '').removeprefix('Bearer ')
                 consultation = self.app.consultations.tool_request(token, body)
@@ -433,11 +473,39 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('依頼名と内容を入力してください（内容は16,000文字まで）。')
                 self.app.attachments.select(body.get('attachment_ids',[]))
                 # 依頼を追加: ledger registration and harness conversion run before planning starts.
+                # Input Guard (Security by Default): secrets are refused; personal data / confidential names need confirmation.
+                from team_dlp import require_clean_input
+                found = require_clean_input(str(body.get('title', '')) + '\n' + str(body.get('goal', '')),
+                                            body.get('sensitive_confirmed') is True, '依頼名・依頼内容')
+                goal, document = str(body.get('goal', '')), {}
+                if body.get('kind') == 'documentation':
+                    # 資料作成: the chosen folder is both the read source and the save folder; document tools only.
+                    from team_document_capabilities import document_goal, require_supported
+                    format_name = str(body.get('document_format', ''))
+                    require_supported(format_name, goal)
+                    folder = Path(str(body.get('project', ''))).resolve()
+                    goal = document_goal(folder, folder, format_name, goal)
+                    document = {'document_source': str(folder), 'document_format': format_name}
+                role_profiles = body.get('role_profiles') or None
+                if role_profiles is not None:
+                    if not isinstance(role_profiles, dict):
+                        raise ValueError('担当の指定が不正です。')
+                    for profile in role_profiles.values():
+                        self.app.models.validate(profile)
                 prepared = self.app.prepare_new_request(str(body.get('project', '')))
-                result = engine.create_job(str(body.get('title', '')), str(body.get('goal', '')),
+                result = engine.create_job(str(body.get('title', '')), goal,
                                            str(body.get('project', '')), body.get('auto_execute') is True,
-                                           attachment_ids=body.get('attachment_ids', []))
+                                           attachment_ids=body.get('attachment_ids', []),
+                                           skill_mode=str(body.get('skill_mode') or 'auto'), skill_ids=body.get('skill_ids', []),
+                                           evaluation_mode=body.get('evaluation_mode') or None,
+                                           evaluation_confirmed=body.get('evaluation_confirmed') is True,
+                                           role_profiles=role_profiles, **document)
                 self.app.store.event('new_request_harness', ' '.join(prepared), job_id=result['id'])
+                if found['confirm']:
+                    from team_audit import record as audit
+                    self.app.store.event('input_guard', '利用者が確認して送信: ' + '、'.join(found['confirm']), job_id=result['id'])
+                    audit(result['project'], {'kind': 'input_guard', 'job_id': result['id'], 'categories': found['confirm'],
+                                              'outcome': 'sent_after_confirmation'})
                 result = dict(result, prepared=prepared)
             elif path == '/api/jobs/artifact-url':
                 result = engine.record_artifact_url(str(body.get('id', '')), str(body.get('url', '')), str(body.get('note', '')))
@@ -446,7 +514,13 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/decide':
                 if type(body.get('allow')) is not bool:
                     raise ValueError('承認または拒否を選んでください。')
-                engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'))
+                engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'),
+                              body.get('review_checklist'))
+                result = {'ok': True}
+            elif path == '/api/jobs/accept-without-fix':
+                if body.get('confirmed') is not True:
+                    raise ValueError('修正せずに受け入れへ進めることを確認してください。')
+                engine.accept_without_fix(body['id'])
                 result = {'ok': True}
             elif path == '/api/cancel':
                 engine.cancel_job(body['id'])
@@ -454,7 +528,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/retry':
                 if body.get('checked_changes') is not True:
                     raise ValueError('既に行われた変更を確認してください。')
-                engine.retry(body['id'], body.get('note', ''))
+                engine.retry(body['id'], body.get('note', ''), body.get('handoff_allowed') is True)
                 result = {'ok': True}
             elif path == '/api/document/resume':
                 if body.get('confirmed') is not True:
@@ -487,12 +561,12 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/tasks/restore':
                 result = engine.restore_team_model(body['id'], body.get('include_waiting') is True)
             elif path == '/api/pause':
-                if self.app.cli_update.snapshot()['state'] == 'updating' or self.app.claude_update.snapshot()['state'] == 'updating':
+                if self.app.cli_updating():
                     raise ValueError('CLI更新中は一時停止の状態を変更できません。')
                 engine.paused = body.get('paused') is True
                 result = {'paused': engine.paused}
             elif path == '/api/stop':
-                if self.app.cli_update.snapshot()['state'] == 'updating' or self.app.claude_update.snapshot()['state'] == 'updating':
+                if self.app.cli_updating():
                     raise ValueError('CLI更新中は完了を待ってから全作業を中止してください。')
                 engine.paused = True
                 for job in self.app.store.all('job'):
@@ -540,6 +614,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.app.store.event('skill_deleted','スキル「'+skill['name']+'」を削除しました（全プロジェクトで解除'
                                      +('、ファイルは控えへ移動' if moved else '')+'）。')
                 result={'ok':True,'moved':moved}
+            elif path == '/api/skills/rename':
+                result = engine.handoff.rename_skill(str(body.get('version_id', '')), body.get('title', ''))
+                self.app.store.event('skill_renamed', 'スキル「' + result['name'] + '」の表示名を'
+                                     + ('「' + result['display_name'] + '」に変更しました。' if result['display_name'] else '元に戻しました。'))
             elif path == '/api/skills/import':
                 from team_skill_import import import_skill, registry_fields
                 projects=self.app.ledger.snapshot()['projects']
@@ -593,6 +671,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.app.claude_update.request_check()
             elif path == '/api/claude-update/install':
                 result = self.app.claude_update.request_update(body.get('version'))
+            elif path == '/api/copilot-update/check':
+                result = self.app.copilot_update.request_check()
+            elif path == '/api/copilot-update/install':
+                result = self.app.copilot_update.request_update(body.get('version'))
             elif path == '/api/decision-settings':
                 config = json.loads(json.dumps(self.app.config))
                 config['decision'] = body
@@ -606,6 +688,13 @@ class Handler(BaseHTTPRequestHandler):
                 result = route_agent('researcher','common-explorer',settings)
             elif path == '/api/profiles':
                 config = json.loads(json.dumps(self.app.config))
+                if 'provider_settings' in body:
+                    # Saved together with the roles so enabling/disabling and reassigning is one validated change.
+                    settings = body['provider_settings']
+                    if not isinstance(settings, dict):
+                        raise ValueError('プロバイダ設定が不正です。')
+                    config['provider_settings'] = {'enabled': settings.get('enabled'),
+                                                   'copilot_monthly_credits': settings.get('copilot_monthly_credits')}
                 for role in ('planner', 'builder', 'researcher', 'reviewer'):
                     item = body.get(role)
                     if not isinstance(item, dict):
@@ -669,6 +758,7 @@ def main():
     server.app.notifications.start()
     server.app.cli_update.start()
     server.app.claude_update.start()
+    server.app.copilot_update.start()
     threading.Thread(target=server.app.auth_loop, daemon=True).start()
     threading.Thread(target=server.app.engine.loop, daemon=True).start()
     print(f'采来 — サイクル —: {server.app.origin}', flush=True)
@@ -692,6 +782,8 @@ def main():
             server.app.cli_update.thread.join(timeout=650)
         if server.app.claude_update.snapshot()['state'] == 'updating' and server.app.claude_update.thread:
             server.app.claude_update.thread.join(timeout=310)
+        if server.app.copilot_update.snapshot()['state'] == 'updating' and server.app.copilot_update.thread:
+            server.app.copilot_update.thread.join(timeout=310)
         server.server_close()
         server.app.notifications.stop()
         server.app.store.db.close()

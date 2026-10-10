@@ -93,3 +93,8 @@ PDFのデザイン抽出、PPTX本文・表・ノート読み取り、Artifact�
 - [外部スキルの取り込み](docs/SKILL_IMPORT.md)
 
 新規PCでは専用のPython仮想環境に requirements-documents.txt を導入し、data/attachment-runtime.json のpythonへ実行ファイルの絶対パスを設定してください。MP4はFFmpegと日本語フォント、音声付きの場合は起動中のVOICEVOXが必要です。ローカル設定・Python環境・認証情報・DBは公開物に含めません。
+
+
+## 2026-10-10 更新
+
+Copilot実装担当・コマンド結果の引き継ぎ・資料プレビュー等を更新しました。公開対象と未解消の制限は[更新記録](docs/RELEASE_20261010.md)を参照してください。評価実行用資材は今回の公開に含みません。

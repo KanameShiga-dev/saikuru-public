@@ -16,7 +16,8 @@ from server import make_server, DataLock
 
 
 PLAN = {'summary': '計画', 'tasks': [{'title': '調査', 'instruction': '調査する', 'role': 'researcher'},
-                                   {'title': '実装', 'instruction': '実装する', 'role': 'builder'}]}
+                                   {'title': '実装', 'instruction': '実装する', 'role': 'builder'}],
+        'security_review_required': False}
 DONE = {'status': 'done', 'summary': '完了報告', 'checks': ['fixtureのみ'], 'question': ''}
 
 
@@ -59,7 +60,7 @@ class EngineTests(unittest.TestCase):
         job = self.job()
         self.until(lambda: self.store.get(job['id'])['status'] == 'awaiting_acceptance')
         tasks = self.store.all('task')
-        self.assertEqual([t['profile']['adapter'] for t in tasks], ['codex', 'codex', 'claude', 'codex'])
+        self.assertEqual([t['profile']['adapter'] for t in tasks], ['codex', 'codex', 'claude', 'codex', 'codex'])
         self.assertTrue(all(t['status'] == 'succeeded' for t in tasks))
         a = self.store.all('approval')[-1]
         self.engine.decide(a['id'], True, '人が確認')
@@ -75,6 +76,44 @@ class EngineTests(unittest.TestCase):
         self.engine.tick()
         self.assertEqual(len(self.store.all('task')), 1)
         self.assertEqual(self.store.get(job['id'])['status'], 'blocked')
+
+    def test_retry_with_user_scope_accepts_handoff(self):
+        handoff = {'status': 'handoff', 'summary': 'PDF本文の確認は未実施', 'checks': ['存在のみ確認'], 'question': ''}
+        class HandoffAdapter:  # a fresh report per run, like a real provider
+            def run(s, ctx, prompt, schema):
+                return PLAN if ctx.task['role'] == 'planner' else dict(handoff) if ctx.task['role'] == 'researcher' else DONE
+        ADAPTERS.update(codex=HandoffAdapter, claude=HandoffAdapter)
+        job = self.job()
+        researcher = lambda: next(t for t in self.store.all('task') if t['role'] == 'researcher')
+        # 2026-10-09: a handoff without the user's scope becomes a question (not a failed task).
+        question = lambda: next((a for a in self.store.all('approval') if a['kind'] == 'question' and a['status'] == 'pending'
+                                 and a['task_id'] == researcher()['id']), None)
+        self.until(lambda: any(t['role'] == 'researcher' for t in self.store.all('task')) and researcher()['status'] == 'blocked'
+                   and researcher()['id'] not in self.engine.active and question())
+        asked = question()['payload']['questions'][0]
+        self.assertEqual([o['id'] for o in asked['options']], ['leave', 'do'])
+        self.assertIn('存在のみ確認', asked['text'])
+        # Choosing "leave" records the scope and the same report is then accepted.
+        self.engine.decide(question()['id'], True, '', answers={asked['id']: {'option_id': 'leave', 'text': ''}})
+        self.assertEqual(self.store.get(job['id'])['handoff_scope'][-1]['task_id'], researcher()['id'])
+        self.until(lambda: researcher()['status'] == 'handed_off')
+
+    def test_handoff_question_do_retries_without_scope(self):
+        handoff = {'status': 'handoff', 'summary': '一部未実施', 'checks': ['未実施：テスト'], 'question': ''}
+        class HandoffAdapter:
+            def run(s, ctx, prompt, schema):
+                return PLAN if ctx.task['role'] == 'planner' else dict(handoff) if ctx.task['role'] == 'researcher' else DONE
+        ADAPTERS.update(codex=HandoffAdapter, claude=HandoffAdapter)
+        job = self.job()
+        researcher = lambda: next(t for t in self.store.all('task') if t['role'] == 'researcher')
+        question = lambda: next((a for a in self.store.all('approval') if a['kind'] == 'question' and a['status'] == 'pending'
+                                 and a['task_id'] == researcher()['id']), None)
+        self.until(lambda: any(t['role'] == 'researcher' for t in self.store.all('task')) and question()
+                   and researcher()['id'] not in self.engine.active)
+        asked = question()['payload']['questions'][0]
+        self.engine.decide(question()['id'], True, '', answers={asked['id']: {'option_id': 'do', 'text': ''}})
+        self.assertFalse(self.store.get(job['id']).get('handoff_scope'))
+        self.assertNotEqual(researcher()['status'], 'handed_off')
 
     def test_recovery_does_not_auto_retry(self):
         job = self.job()

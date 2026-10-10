@@ -5,6 +5,8 @@ let consultationModels=[], consultationModelsLoading=false, consultationModelEpo
 let consultationSending=false, consultationSubmitting=false, consultationRegistering=false, consultationActivityTimer=null, consultationStartedAt=null, consultationPendingMode=null;
 const consultDialog=document.getElementById('consultation-dialog');
 const consultationImages = new ImageAttachments(document.getElementById('consultation-attachments'));
+const consultationSkills = new SkillPicker(document.getElementById('consultation-skills'));
+consultationSkills.load(api);
 const consultStatus=text=>{document.getElementById('consultation-status').textContent=text;document.getElementById('consultation-action-status').textContent=text;document.getElementById('consultation-submit-status').textContent=text;};
 
 function consultationSubmissionControls(){
@@ -208,7 +210,7 @@ async function sendConsultation(mode,retry=false){
  try{
   const attachment_ids=await consultationImages.upload(api);
   if(epoch!==consultationEpoch)return;
-  const value=await api('/api/ledger/consultation/send',{id:consultation.id,revision:consultation.revision,
+  const value=await sendWithInputGuard(api,'/api/ledger/consultation/send',{id:consultation.id,revision:consultation.revision,
    mode,message:text,title:$('consultation-name').value.trim(),attachment_ids,kind:$('consultation-kind').value,consent:true,retry,profile:selectedConsultationProfile()});
   if(epoch!==consultationEpoch)return;
   input.value='';consultationImages.clear();renderConsultation(value);
@@ -272,12 +274,13 @@ $('consultation-submit').onclick=async()=>{
  if(consultationDraftStale){consultStatus('現在の内容で計画プロンプトを作成し直してください。');return;}
  if(!$('consultation-confirm').checked){consultStatus('計画プロンプトの内容を確認してください。');return;}
  if(consultationSubmitting)return;
+ let skills;try{skills=consultationSkills.value();}catch(e){consultStatus(e.message);return;}
  const epoch=consultationEpoch,id=consultation.id;
  consultationSubmitting=true;consultationSubmissionControls();consultationModelControls();consultStatus('作業ボードへ計画を依頼しています…');
  try{
-  await api('/api/ledger/consultation/submit',{id,revision:consultation.revision,
+  await sendWithInputGuard(api,'/api/ledger/consultation/submit',{id,revision:consultation.revision,
    plan_prompt:$('consultation-prompt').value,title:$('consultation-name').value.trim(),confirmed:true,kind:$('consultation-kind').value,
-   document_format:$('consultation-document-format').value});
+   document_format:$('consultation-document-format').value,...skills});
   const value=await api('/api/ledger/consultation?id='+encodeURIComponent(id));
   if(epoch!==consultationEpoch)return;
   renderConsultation(value);

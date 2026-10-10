@@ -1,8 +1,10 @@
 """CLI model discovery without starting an inference turn."""
+import re
+import subprocess
 import threading
 import time
 from team_adapters import Process
-from team_config import ROOT
+from team_config import COPILOT_MODELS, PROVIDERS, ROOT
 from team_usage import Deadline
 
 
@@ -74,11 +76,29 @@ def claude_models(command):
         process.close()
 
 
+def copilot_models(command):
+    run = subprocess.run(command + ['help', 'config'], capture_output=True, text=True, encoding='utf-8',
+                         errors='replace', timeout=20, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    if run.returncode != 0:
+        raise ValueError('Copilotのモデル一覧を取得できません。')
+    listed, inside = set(), False
+    for line in run.stdout.splitlines():
+        if re.match(r'^\s+`model`:', line):
+            inside = True
+        elif inside:
+            match = re.match(r'^\s+- "([A-Za-z0-9._-]+)"\s*$', line)
+            if not match:
+                break
+            listed.add(match.group(1))
+    return [{'id': model, 'label': f'{label}（約{credits:g}クレジット/回）', 'efforts': ['low', 'medium'] if effort else ['medium']}
+            for model, (label, effort, credits) in COPILOT_MODELS.items() if model in listed and 'astra' not in model]
+
+
 class ModelCatalog:
     def __init__(self, commands):
         self.commands = commands
         self.cache = {}
-        self.locks = {name: threading.Lock() for name in ('codex', 'claude')}
+        self.locks = {name: threading.Lock() for name in PROVIDERS}
 
     def get(self, provider, force=False):
         if provider not in self.locks:
@@ -92,7 +112,7 @@ class ModelCatalog:
                 command = self.commands.get(provider)
                 if not command:
                     raise ValueError('CLIが見つかりません。')
-                rows = (codex_models if provider == 'codex' else claude_models)(command)
+                rows = {'codex': codex_models, 'claude': claude_models, 'copilot': copilot_models}[provider](command)
                 rows = list({row['id']: row for row in rows}.values())
                 note = 'CLIから取得したモデル候補です。利用枠・権限によって実行時に拒否される場合があります。'
                 if not rows:

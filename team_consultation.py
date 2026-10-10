@@ -46,7 +46,9 @@ RULES += '''
 質問は目標、優先順位、望む挙動、受入条件など利用者が決める事項に限定します。
 ユーザーの声は observation として扱い、事実確認・改善案・合意済み条件を分けてください。
 mode=plan の下書きには相談で合意した内容、根拠、UNKNOWN、受入条件、検証方法を引き継ぎます。
-既存の会話にある根拠なしの推測は、今回の調査結果で訂正してください。'''
+既存の会話にある根拠なしの推測は、今回の調査結果で訂正してください。
+UNKNOWNには、可能な限り「標準案：〜」を併記してください（例：ファイル名、縦横比、枚数、表現の細部）。利用者が標準案で良ければ回答不要となり、作業中の質問を減らせます。
+範囲・方針・公開・費用・安全など利用者が決めるべきUNKNOWNには、標準案を付けず「要回答」と明記してください。'''
 
 
 class ConsultationContext:
@@ -63,7 +65,8 @@ class ConsultationContext:
         definition = load_agent('planner', self.task['profile']['adapter'])
         self.agent_definition = replace(definition, sandbox='read-only', tools=(
             'WebSearch', 'mcp__project_read__list_files',
-            'mcp__project_read__read_file', 'mcp__project_read__search_files'))
+            'mcp__project_read__read_file', 'mcp__project_read__search_files',
+            'mcp__project_read__read_document'))
         self.consultation_research = True
         if self.task['profile']['adapter']=='codex':
             self.agent_definition=replace(self.agent_definition,tools=tuple(t for t in self.agent_definition.tools if t!='WebSearch')+('mcp__project_read__web_search',))
@@ -158,6 +161,14 @@ class Consultations:
         if health.get('authenticated') is False:
             return {'state': 'unavailable', 'label': '未ログイン'}
         value = self.app.usage.snapshot().get(adapter, {})
+        if adapter == 'copilot':
+            monthly = ((value.get('rows') or [{}])[0].get('monthly') or {})
+            percent = monthly.get('remaining_percent')
+            if value.get('status') != 'ok' or type(percent) not in (int, float):
+                return {'state': 'unknown', 'label': '月間クレジット残量不明（上限未設定）'}
+            if percent <= 0:
+                return {'state': 'exhausted', 'label': '月間クレジット 残り0%'}
+            return {'state': 'available', 'label': f'月間クレジット 残り{percent:g}%'}
         if value.get('status') != 'ok' or value.get('stale', True):
             return {'state': 'unknown', 'label': '残量不明（未取得・古い情報）'}
         rows = value.get('rows', [])
@@ -191,8 +202,8 @@ class Consultations:
         return {'state': 'available', 'label': label}
 
     def choices(self, adapter, refresh=False):
-        if adapter not in ('codex', 'claude'):
-            raise ValueError('担当を選択してください。')
+        if adapter not in self.app.config.get('provider_settings', {}).get('enabled', ('codex', 'claude')):
+            raise ValueError('このプロバイダは使用しない設定です。チーム設定で有効にしてください。')
         catalog = self.app.models.get(adapter, force=refresh)
         return {'adapter': adapter, 'note': catalog['note'],
                 'models': [dict(m, quota=self.quota(adapter, m['id'])) for m in catalog['models']]}
@@ -200,6 +211,8 @@ class Consultations:
     def validate_profile(self, profile):
         if not isinstance(profile, dict) or set(profile) != {'adapter', 'model', 'effort'}:
             raise ValueError('相談モデル・推論設定を選択してください。')
+        if profile['adapter'] not in self.app.config.get('provider_settings', {}).get('enabled', ('codex', 'claude')):
+            raise ValueError('このプロバイダは使用しない設定です。チーム設定で有効にしてください。')
         self.app.models.validate(profile)
         quota = self.quota(profile['adapter'], profile['model'])
         if quota['state'] in ('unavailable', 'exhausted'):
@@ -253,6 +266,8 @@ class Consultations:
             raise ValueError('相談の種類を選択してください。')
         if mode not in ('discuss', 'plan') or (mode == 'discuss' and not text.strip() and not body.get('attachment_ids') and body.get('retry') is not True):
             raise ValueError('相談内容を入力してください。')
+        from team_dlp import require_clean_input
+        require_clean_input(str(body.get('title') or '') + '\n' + text, body.get('sensitive_confirmed') is True, '相談内容')
         with self.lock:
             item = self._get(body.get('id'))
             if item['busy'] or self.active:
@@ -389,6 +404,8 @@ class Consultations:
         text = body.get('plan_prompt')
         if body.get('confirmed') is not True or not isinstance(text, str) or not 1 <= len(text.strip()) <= 16000:
             raise ValueError('計画プロンプトの内容を確認してください。')
+        from team_dlp import require_clean_input
+        require_clean_input(str(body.get('title') or '') + '\n' + text, body.get('sensitive_confirmed') is True, '計画プロンプト')
         with self.lock:
             item = self._get(body.get('id'))
             if item['job_id']:
@@ -411,7 +428,6 @@ class Consultations:
             if documentation:
                 from team_document_capabilities import require_supported
                 require_supported(body.get('document_format'), text)
-                goal = '必須成果物形式: '+body['document_format']+'。下書きや手順書だけでは完了しない。\n'+goal
                 from team_folders import project_folder
                 source = Path(project['path']).resolve()
                 # The output folder is the one written in the plan (no separate input field).
@@ -422,17 +438,16 @@ class Consultations:
                 if str(output).casefold() not in {str(Path(p).resolve()).casefold() for p in config['approved_roots']}:
                     config['approved_roots'].append(str(output))
                     self.app.save_config(config)
-                from team_artifact_guard import is_artifact_format
-                publishing = ('公開は、利用者が承認したclaude.ai上の非公開Artifact（この依頼で作成する1件）への送信だけ。それ以外の公開は禁止。'
-                              if is_artifact_format(body.get('document_format')) else '公開は禁止。')
-                goal = ('資料作成のみ。読み取り元: '+str(source)+'\n保存先: '+str(output)
-                        +'\nソース・設定変更、コマンド実行、起動停止は禁止。'+publishing+'資料だけを専用ツールで作成する。\n'+goal)
+                from team_document_capabilities import document_goal
+                goal = document_goal(source, output, body['document_format'], goal)
                 job = self.app.engine.create_job(item.get('title') or project['name']+'：資料作成計画', goal, str(output), False,
-                                                 planner_profile=profile, document_source=str(source), attachment_ids=item.get('attachment_ids', []),document_format=body.get('document_format'))
+                                                 planner_profile=profile, document_source=str(source), attachment_ids=item.get('attachment_ids', []),document_format=body.get('document_format'),
+                                                 skill_mode=str(body.get('skill_mode') or 'auto'), skill_ids=body.get('skill_ids', []))
             else:
                 job = self.app.engine.create_job(item.get('title') or project['name'] + '：相談からの改修計画',
                                                  goal, project['path'], False, planner_profile=profile,
-                                                 attachment_ids=item.get('attachment_ids', []))
+                                                 attachment_ids=item.get('attachment_ids', []),
+                                                 skill_mode=str(body.get('skill_mode') or 'auto'), skill_ids=body.get('skill_ids', []))
             item.update(job_id=job['id'], plan_prompt=text.strip(), revision=item['revision'] + 1)
             self._save(item)
             return {'job_id': job['id'], 'already_submitted': False}

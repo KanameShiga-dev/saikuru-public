@@ -29,3 +29,8 @@ button.small{font-size:var(--fs-xs);padding:3px 12px}
 .danger-box{margin-top:18px;padding:12px;border:1px solid var(--red);border-radius:10px;background:var(--red-bg)}
 .danger-box h3{color:var(--red);margin-top:0}
 button.danger{border-color:var(--red);color:var(--red);background:var(--surface)}
+
+/* Display-name form */
+.rename-box{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}
+.rename-box input{flex:1 1 220px;min-width:0}
+.rename-box p{flex-basis:100%;margin:2px 0}

@@ -83,6 +83,10 @@ class Attachments:
             if not isinstance(prepared,dict) or prepared.get('kind') not in ('image','text'):
                 raise ValueError('添付の検査形式が不正なため拒否しました。')
             check(prepared.get('text'))
+            # Input Guard: credentials are never needed by the AI, so an attachment carrying one is not sent.
+            from team_dlp import scan_input
+            if scan_input(prepared.get('text') or '')['block']:
+                raise ValueError('添付に認証情報・秘密情報らしき文字列（パスワード・APIキー・トークン・秘密鍵）が含まれるため拒否しました。該当部分を削除して添付し直してください。')
             if prepared['kind']=='image':
                 image=base64.b64decode(prepared['image'],validate=True)
                 if prepared.get('mime')!='image/png' or len(image)>MAX_FILE:

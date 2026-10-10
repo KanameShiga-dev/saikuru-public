@@ -45,3 +45,9 @@ main{max-width:1440px}
 
 .ledger-detail-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0}.ledger-detail-tabs [aria-selected="true"]{background:var(--green);color:var(--on-accent)}
 #editor [hidden]{display:none!important}
+
+/* Request-form skill picker */
+.skill-picker{border:1px solid var(--line,#d0d7de);border-radius:8px;padding:8px 12px;margin:8px 0}
+.skill-picker legend{font-weight:600;padding:0 4px}
+.skill-picker-list{display:grid;gap:4px;max-height:220px;overflow:auto;margin-top:6px}
+.skill-picker-item{align-items:baseline}

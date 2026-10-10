@@ -2,6 +2,7 @@
 let state = null, selected = null, detailVersion = '', busy = false, providerVersion = '';
 const $ = id => document.getElementById(id);
 const jobImages = new ImageAttachments(document.getElementById('job-attachments'));
+const jobSkills = new SkillPicker(document.getElementById('job-skills'));
 const roles = {planner:'計画',researcher:'調査',builder:'実装',reviewer:'レビュー'};
 const statuses = {queued:'待機',running:'実行中',awaiting_approval:'承認待ち',succeeded:'担当作業終了',handed_off:'未完了項目を残して引き継ぎ済み',failed:'失敗',cancelled:'中止',interrupted:'中断',blocked:'判断が必要'};
 const jobStatuses = {...statuses,planning:'計画中',awaiting_acceptance:'成果の確認待ち',accepted:'利用者が確認済み',accepted_with_pending_checks:'成果を受領・未完了項目あり'};
@@ -21,15 +22,24 @@ function waitingReason(task){
 function reviewRepairProposal(review,job){
  const artifact=job.artifacts?.[0]?.path;
  const findings=(review.result?.summary||'').trim();
+ const shown=findings.length<=2400?findings:findings.slice(0,2400)+'\n（表示上限です。最新レビュー全文は担当に別途渡されます。）';
+ if(job.document_source)return `${artifact?'修正対象は '+artifact+' です。この依頼で作った資料は同じ名前で作り直せます（旧版は .saikuru-versions/ に退避されます）。':'修正対象の資料を確認し、この依頼の範囲外のファイルは変更しないでください。'}
+【直す内容】
+次の最新レビューの指摘を、資料の本文・構成・表・図に反映してください。
+${shown}
+【残す内容】
+指摘のない部分（構成・表現・デザイン）はそのまま残してください。作り直す前に最新の資料を read_document で読み、変える箇所と残す箇所を確認してください。
+【確認すること】
+指摘ごとに、直したページ・節と内容を対応づけて報告してください。作り直した資料を read_document で読み、指摘が反映されていることと、以前に直した指摘が戻っていないことを確かめてください。見た目（配色・レイアウト）の確認は受け入れ時に利用者が行うため、未確認として残してかまいません。確認していないことを確認済みとは報告しないでください。`;
  return `${artifact?'修正対象は '+artifact+' だけです。':'修正対象と許可範囲を確認し、範囲外の変更は行わないでください。'}
 【変更箇所・修正方針】
 次の最新レビューの指摘を、設計・対応表・受入条件・確認方法へ反映してください。具体的な遷移・音声ID・終了条件の修正案が指摘にある場合は、それを落とさず扱ってください。
-${findings.length<=2400?findings:findings.slice(0,2400)+'\n（表示上限です。最新レビュー全文は担当に別途渡されます。）'}
+${shown}
 【維持する動作】
 変更前に、指摘が参照する既存コードの前後と関連経路、最新成果物、過去の修正結果を読み取り、維持する動作を明示してください。前回報告だけを根拠に推測しないでください。新しい仕様が必要なら確定せずUNKNOWNとして残してください。
 【確認条件】
-指摘ごとに変更箇所・維持した動作・根拠ファイルと行・計画上の検証項目を対応づけて報告してください。本文と対応表、回数上限、次の工程への遷移が整合し、過去の解消済み指摘が再発していないことを読み取りで確認してください。
-実装コード変更、起動、テスト実行、モデル取得・更新、公開は許可しません。未実施の検証を実施済みとは報告しないでください。`;
+指摘ごとに変更箇所・維持した動作・根拠ファイルと行・計画上の検証項目を対応づけて報告してください。修正後は、元の依頼と計画にある検証（テスト・完了条件のコマンドなど）を現行版でやり直し、実行した内容と結果を記録してください。過去の解消済み指摘が再発していないことも確認してください。
+依頼範囲外の変更、モデル取得・更新、公開は行わないでください。未実施の検証を実施済みとは報告しないでください。`;
 }
 function reviewResolutionHint(review,job){
  const box=el('div',undefined,'stop-reason-box');
@@ -88,6 +98,15 @@ function stalledReview(job){
     .sort((a,b)=>(a.finished_at||a.updated_at||0)-(b.finished_at||b.updated_at||0)).pop()||null;
 }
 function isStalledReview(task){return stalledReview(state.jobs.find(j=>j.id===task.job_id))?.id===task.id;}
+// 停止理由の欄の先頭に出す、止まった原因の一文（担当の報告の前に、何が止めたのかを示す）。
+function stopCause(task,job){
+  if(isStalledReview(task))return `原因：自動修正の上限（${state.config?.max_repairs??'設定'}回）に達しました。最後のレビューが、まだ修正・確認を求めています（下の報告）。`;
+  if(pending(task.id).length)return '原因：担当が利用者の回答・承認を待っています。';
+  if(task.status==='blocked')return '原因：担当が停止を報告しました（下の報告）。';
+  if(task.status==='failed')return '原因：担当の実行が失敗しました（下の報告）。';
+  if(task.status==='interrupted')return '原因：担当の実行が中断されました。';
+  return '原因：依頼が停止しています（'+(jobStatuses[job.status]||job.status)+'）。';
+}
 function group(task) { if(endedJob(task))return 3; if(isStalledReview(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
 const completedFolds=new Map();
 function completedTime(task){
@@ -101,9 +120,15 @@ function completedPeriod(task){
   const morning=Number(parts.hour)<12;
   return {key:`${parts.year}-${parts.month}-${parts.day}-${morning?'00':'12'}`,label:`${parts.year}/${parts.month}/${parts.day} ${morning?'午前（00:00〜11:59）':'午後（12:00〜23:59）'}`};
 }
+// 2026-10-08 GitHub Copilot追加：使用するプロバイダを設定で選び、選んだものだけを表示する。
+const providerLabels={codex:'Codex',claude:'Claude Code',copilot:'GitHub Copilot'};
+const providerShortLabels={codex:'Codex',claude:'Claude',copilot:'Copilot'};
+const copilotRoles=['planner','reviewer','builder'];
+function enabledProviders(){return state?.config?.provider_settings?.enabled||['codex','claude'];}
+function usageWindow(row){return row?.monthly_only?row?.monthly:row?.weekly_only?row?.weekly:row?.short;}
 function quotaView(name) {
   const usage=state.usage?.[name],box=el('section',undefined,'quota');
-  box.setAttribute('aria-label',(name==='codex'?'Codex':'Claude Code')+'の利用枠の残量');
+  box.setAttribute('aria-label',providerLabels[name]+'の利用枠の残量');
   const models=[...new Set(Object.values(state.config.roles).map(id=>state.config.profiles[id]).filter(p=>p?.adapter===name).map(p=>p.model))];
   box.append(el('p','設定モデル: '+(models.join(' / ')||'未設定'),'quota-models'));
   const percent=w=>typeof w?.remaining_percent==='number'?`${w.remaining_percent}％`:'不明';
@@ -113,20 +138,23 @@ function quotaView(name) {
     const period=row.minutes?(row.minutes%60===0?`${row.minutes/60}時間枠`:`${row.minutes}分枠`):'';
     item.append(el('small',`${row.label}${period?' · '+period:''}`));
     const line=el('div',undefined,'quota-value');
-    if(row.weekly_only)line.append(el('span',`（週間残り ${percent(row.weekly)}）`));
+    const credits=v=>typeof v==='number'?v.toLocaleString('ja-JP',{maximumFractionDigits:2}):'未設定';
+    if(row.monthly_only)line.append(el('strong',`残り ${percent(row.monthly)}`),el('span',`（使用 ${credits(row.monthly?.used)} ／ 月間上限 ${credits(row.monthly?.limit)} クレジット）`));
+    else if(row.weekly_only)line.append(el('span',`（週間残り ${percent(row.weekly)}）`));
     else line.append(el('strong',`残り ${percent(row.short)}`),el('span',`（週間残り ${percent(row.weekly)}）`));
     item.append(line);
+    if(row.monthly_only&&row.monthly?.premium_requests)item.append(el('small',`今月のプレミアムリクエスト：${row.monthly.premium_requests}回`,'quota-note'));
     if(usage?.stale&&usage.updated_at)item.append(el('small','前回取得値・最新値は未確認','quota-warning'));
-    const meterWindow=row.weekly_only?row.weekly:row.short;
-    if(meterWindow){const meter=el('meter');meter.min=0;meter.max=100;meter.low=20;meter.high=50;meter.optimum=100;meter.value=meterWindow.remaining_percent;meter.setAttribute('aria-label',row.label+'の残量');item.append(meter);}
-    const resets=[];for(const [key,label] of [['short','短期'],['weekly','週間']])if(row[key]?.resets_at)resets.push(`${label}リセット: ${new Date(row[key].resets_at*1000).toLocaleString('ja-JP')}`);
+    const meterWindow=usageWindow(row);
+    if(typeof meterWindow?.remaining_percent==='number'){const meter=el('meter');meter.min=0;meter.max=100;meter.low=20;meter.high=50;meter.optimum=100;meter.value=meterWindow.remaining_percent;meter.setAttribute('aria-label',row.label+'の残量');item.append(meter);}
+    const resets=[];for(const [key,label] of [['short','短期'],['weekly','週間'],['monthly','月間']])if(row[key]?.resets_at)resets.push(`${label}リセット: ${new Date(row[key].resets_at*1000).toLocaleString('ja-JP')}`);
     if(resets.length)item.append(el('small',resets.join(' / '),'quota-reset'));
     box.append(item);
   }
   box.append(el('small',usage?.note||'利用枠を取得中…','quota-note'));
-  if(usage?.updated_at)box.append(el('small','取得: '+new Date(usage.updated_at*1000).toLocaleString('ja-JP'),'quota-note'));
+  if(usage?.updated_at)box.append(el('small',(name==='copilot'?'最終記録: ':'取得: ')+new Date(usage.updated_at*1000).toLocaleString('ja-JP'),'quota-note'));
   if(usage?.status==='unavailable'&&usage.next_update_at)box.append(el('small','次回取得: '+new Date(usage.next_update_at*1000).toLocaleTimeString('ja-JP'),'quota-note'));
-  box.append(el('small','アカウントの利用枠です。会話のコンテキスト残量とは異なります。','quota-note'));
+  box.append(el('small',name==='copilot'?'采来での消費と、設定した月間上限から計算した値です。':'アカウントの利用枠です。会話のコンテキスト残量とは異なります。','quota-note'));
   box.append(button('停止・待機タスクのモデルを切り替える',()=>openModelSwitch(null,name)));
   return box;
 }
@@ -155,6 +183,17 @@ function renderCliUpdate(){
   $('claude-update-check').disabled=['checking','updating'].includes(claude.state);
   $('claude-update-install').disabled=claude.state!=='available';
   $('claude-update-install').textContent=claude.state==='updating'?'更新中…':'Claude Code CLIを更新';
+  const copilot=state.copilot_update||{},copilotNow=copilot.installed||'不明',copilotLatest=copilot.latest||'不明';
+  badge('copilot-update-fold',copilot);
+  $('copilot-update-status').textContent=copilot.state==='available'?`更新あり：${copilotNow} → ${copilotLatest}。${copilot.message}`:
+    `現在 ${copilotNow}／公開版 ${copilotLatest}。${copilot.message||'更新情報を確認しています。'}`;
+  $('copilot-update-checked').textContent=copilot.checked_at?'最終確認: '+new Date(copilot.checked_at*1000).toLocaleString('ja-JP'):'';
+  $('copilot-update-check').disabled=['checking','updating'].includes(copilot.state);
+  $('copilot-update-install').disabled=copilot.state!=='available';
+  $('copilot-update-install').textContent=copilot.state==='updating'?'更新中…':`GitHub Copilot CLIを${copilot.state==='available'?copilotLatest+'へ':''}更新`;
+  // Only the CLIs of the providers in use. A CLI that is updating stays visible until it finishes.
+  for(const [name,id,update] of [['codex','codex-update-fold',info],['claude','claude-update-fold',claude],['copilot','copilot-update-fold',copilot]])
+    $(id).hidden=!enabledProviders().includes(name)&&update.state!=='updating';
 }
 // 2026-10-03 UI改善：判断待ちを最上部の常設バナーに表示する（浮いた通知は廃止）。PC通知・音声通知は従来どおり新しい判断だけに出す。
 function renderDecisionBanner(items){
@@ -173,9 +212,9 @@ function renderDecisionBanner(items){
 // 2026-10-03 UI改善：ヘッダーに利用枠の残量を常に表示する。取得できない値は「不明」とする。
 function renderUsageChips(){
   const box=$('usage-chips');if(!box)return;
-  box.replaceChildren(...Object.keys(state.providers||{}).map(name=>{
-    const usage=state.usage?.[name],row=usage?.rows?.[0],w=row?.weekly_only?row?.weekly:row?.short;
-    const value=typeof w?.remaining_percent==='number'?w.remaining_percent:null,label=name==='codex'?'Codex':'Claude';
+  box.replaceChildren(...enabledProviders().filter(name=>state.providers?.[name]).map(name=>{
+    const usage=state.usage?.[name],row=usage?.rows?.[0],w=usageWindow(row);
+    const value=typeof w?.remaining_percent==='number'?w.remaining_percent:null,label=providerShortLabels[name];
     const chip=el('button',undefined,'usage-chip');chip.type='button';
     const dot=el('span',undefined,'dot'+(value===null?' unknown':value<20?' warn':''));dot.setAttribute('aria-hidden','true');
     chip.append(dot,document.createTextNode(`${label} 残り${value===null?'不明':value+'％'}${usage?.stale?'（前回値）':''}`));
@@ -189,30 +228,33 @@ function render() {
   $('connection').classList.toggle('paused',!!state.paused);
   $('pause').textContent=state.paused?'新規着手を再開':'新規着手を一時停止';
   renderCliUpdate();
-  const nextProviderVersion=JSON.stringify([state.providers,state.usage,state.config.roles,state.config.profiles,state.cli_update,state.claude_update]);
+  const nextProviderVersion=JSON.stringify([state.providers,state.usage,state.config.roles,state.config.profiles,state.config.provider_settings,state.cli_update,state.claude_update,state.copilot_update]);
   if(nextProviderVersion!==providerVersion){
   providerVersion=nextProviderVersion;
   renderUsageChips();
   $('providers').replaceChildren();
-  for(const [name,p] of Object.entries(state.providers)){
-    const box=el('article',undefined,'provider'), text=el('div');box.append(el('div',name==='codex'?'C':'✳','symbol'));
-    text.append(el('h2',name==='codex'?'Codex':'Claude Code'),el('p',p.available?p.version:'接続の準備が必要'),el('small',p.note),quotaView(name));
+  for(const [name,p] of Object.entries(state.providers).filter(([name])=>enabledProviders().includes(name))){
+    const box=el('article',undefined,'provider'), text=el('div');box.append(el('div',{codex:'C',claude:'✳',copilot:'G'}[name],'symbol'));
+    text.append(el('h2',providerLabels[name]),el('p',p.available?p.version:'接続の準備が必要'),el('small',p.note),quotaView(name));
+    if(name==='copilot')text.append(el('small','月間上限・CLIの更新は「チーム設定」で行います。ログインは端末で copilot login を実行します。'));
     if(name==='codex'&&state.cli_update?.state==='available')text.append(button(`CLI更新あり：${state.cli_update.latest}。設定を開く`,()=>{$('settings-open').click();$('codex-update-fold').open=true;}));
     if(name==='claude'&&state.claude_update?.state==='available')text.append(button(`CLI更新あり：${state.claude_update.latest}。設定を開く`,()=>{$('settings-open').click();$('claude-update-fold').open=true;}));
-    if(name==='codex')text.append(button('利用枠を再取得',()=>action(async()=>{
+    if(name==='copilot'&&state.copilot_update?.state==='available')text.append(button(`CLI更新あり：${state.copilot_update.latest}。設定を開く`,()=>{$('settings-open').click();$('copilot-update-fold').open=true;}));
+    // button() は処理を action() で包む。ここでさらに action() で包むと、二重押し防止で中の処理が実行されない（2026-10-09 修正）。
+    if(name==='codex')text.append(button('利用枠を再取得',async()=>{
       const result=await api('/api/codex-usage/refresh',{});
       notice(result.success?'Codexの利用枠を更新しました。':result.usage.note);
-    })));
+    }));
     if(name==='claude'){
       text.append(el('small','采来専用ログインを使用。通常のClaude Codeとは保存先を分けています。'));
-      text.append(button('ログイン状態・残量を再確認',()=>action(async()=>{await api('/api/claude-auth/refresh',{});} )));
+      text.append(button('ログイン状態・残量を再確認',async()=>{await api('/api/claude-auth/refresh',{});}));
       if(p.authenticated!==true){
-        text.append(button('サイクルでClaudeにログイン',()=>action(async()=>{
+        text.append(button('サイクルでClaudeにログイン',async()=>{
           const login=await api('/api/claude-auth/login',{});
           if(login.state==='authenticated'){notice('ログイン済みです。');return;}
-          notice('PCのブラウザーでClaudeのログインを完了してください。保存した認証を次回以降も使用します。');
+          notice('ログイン画面を準備しています。このPCのブラウザーに開いたら、ログインを完了してください。');
           watchClaudeLogin();
-        })));
+        }));
         text.append(el('p','ログインはサイクルが動いているPCのブラウザーで行います。通常は保存済み認証を使用します。認証切れの場合だけ再ログインしてください。','hint'));
       }
     }
@@ -267,13 +309,19 @@ function render() {
   }
 }
 
-let claudeLoginTimer=null;
+let claudeLoginTimer=null,claudeLoginBrowserShown=null;
 function watchClaudeLogin(){
  clearTimeout(claudeLoginTimer);
  claudeLoginTimer=setTimeout(async()=>{
   try{
    const result=await api('/api/claude-auth/login-status',{});
+   // 采来がPCの既定ブラウザーでログイン画面を開いたか（URLは画面に出さない）。
+   if(result.browser_opened!=null&&result.browser_opened!==claudeLoginBrowserShown){
+    claudeLoginBrowserShown=result.browser_opened;
+    notice(result.browser_opened?'このPCのブラウザーでClaudeのログイン画面を開きました。ログインを完了すると、ここに結果が出ます。':'ブラウザーを開けませんでした。このPCで既定のブラウザーが設定されているか確認してください。');
+   }
    if(result.state==='running'){watchClaudeLogin();return;}
+   claudeLoginBrowserShown=null;
    await refresh();
    notice(result.authenticated?'Claudeのログインが完了しました。停止した作業はカードから再試行してください。':'ログインを完了できませんでした。ブラウザーが開かない場合はPCの Login-ClaudeCode.ps1 を使い、ログイン状態を再確認してください。');
   }catch(e){notice(e.message);}
@@ -287,9 +335,11 @@ function revealSection(node){
 function foldDetailSections(body,task){
   const previous=detailFolds.get(task.id)||{signature:null,open:{}};
   const requests=endedJob(task)?[]:pending(task.id);
-  const signature=JSON.stringify([task.status,task.attempt,endedJob(task),task.recovery_advice?.code||null,requests.map(a=>[a.id,a.status])]);
+  // 自動修正の上限では担当の状態は変わらず依頼だけが止まるため、依頼の状態と上限の判定も署名に含める。
+  const stalled=isStalledReview(task),jobStatus=state.jobs.find(j=>j.id===task.job_id)?.status||'';
+  const signature=JSON.stringify([task.status,task.attempt,endedJob(task),stalled,jobStatus,task.recovery_advice?.code||null,requests.map(a=>[a.id,a.status])]);
   const changed=previous.signature!==signature;
-  const stopped=!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status);
+  const stopped=!endedJob(task)&&(stalled||['failed','blocked','interrupted'].includes(task.status));
   const scopeError=/未完了項目の引き継ぎには利用者の範囲指定/.test(task.summary||'');
   const completedReport=task.recovery_advice?.code==='task_completion';
   const focus=requests.length?'.approval-box':(isStalledReview(task)||stopped)?'#decision-guide':null;
@@ -307,7 +357,11 @@ function foldDetailSections(body,task){
     }else fold.classList.add('detail-fold');
     fold.dataset.foldKey=key;
     const isFocus=focusNode&&(node===focusNode||node.contains(focusNode));
-    fold.open=changed?Boolean(isFocus):Boolean(previous.open[key]);
+    // 2026-10-08 停止したタスクの「この担当は失敗しました」（原因）は、閉じたままだと気づきにくいので開いて色を付ける。
+    const isFailure=node.id==='failure-card';if(isFailure)fold.classList.add('failure-fold');
+    // 停止理由の欄も同じく開いて色を付ける（自動修正の上限・blocked を含む、止まったすべての場合）。
+    const isCause=stopped&&node.id==='decision-guide';if(isCause)fold.classList.add('failure-fold','stop-fold');
+    fold.open=changed?Boolean(isFocus||(stopped&&(isFailure||isCause))):Boolean(previous.open[key]);
     if(isFocus)focusFold=fold;
     fold.addEventListener('toggle',()=>{const saved=detailFolds.get(task.id);if(saved&&fold.isConnected)saved.open[key]=fold.open;});
   }
@@ -321,6 +375,7 @@ function reportText(result){
   if(result.checks?.length)text+='\n\n報告された検証:\n'+result.checks.map(c=>'・'+c).join('\n');
   if(result.question)text+='\n\n確認したいこと:\n'+result.question;
   if(result.note)text+='\n\n'+result.note;
+  if(result.review_findings?.length)text+='\n\nレビュー指摘（未修正。受け入れるか差し戻すかを決めてください）:\n'+result.review_findings.map(f=>`・${f.reviewer}：${f.summary}`).join('\n');
   if(result.pending_items?.length)text+='\n\n未完了として残す項目（合格・全体完了ではありません）:\n'+result.pending_items.map(item=>`${item.title}\n${item.note}\n${item.checks.join('\n')}`).join('\n\n');
   return text;
 }
@@ -395,6 +450,30 @@ function questionForm(approval){
   }
   if(approval.payload.summary){const details=el('details');details.append(el('summary',approval.kind==='context_conflict'?'新旧の内容と根拠を読む':'作業計画と背景を読む'),el('div',approval.payload.summary,'text-block'));box.append(details);}
   const drafts=answerDrafts.get(approval.id)||{};answerDrafts.set(approval.id,drafts);
+  // 2026-10-08 レビュー担当の質問では、担当が「何を確認したか」を並べ、利用者が項目ごとに承認し、足りない確認を指示できるようにする。
+  const reviewTask=state.tasks.find(t=>t.id===approval.task_id),reviewChecks=reviewTask?.role==='reviewer'?(reviewTask.result?.checks||[]):[];
+  let checklist=null;
+  if(approval.kind==='question'&&reviewChecks.length){
+    const saved=drafts.__checklist||(drafts.__checklist={approved:[],instruction:''});
+    const box2=el('fieldset',undefined,'review-checklist');box2.append(el('legend','レビューで確認したこと（承認する項目にチェック）'));
+    box2.append(el('p','「確認」の項目は、内容に納得できればチェックを入れてください。チェックしなかった項目は、担当に見直しを求めます。「未確認」「推奨」は担当が確認できなかったこと・提案です。','hint'));
+    const kindOf=text=>/^未確認/.test(text)?'unchecked':/^推奨/.test(text)?'advice':/^確認/.test(text)?'checked':'other';
+    const labels={checked:'確認済み',unchecked:'未確認',advice:'推奨',other:'その他'};
+    const boxes=[];
+    reviewChecks.forEach((text,index)=>{
+      const kind=kindOf(text),row=el('div',undefined,'review-check review-check-'+kind),body=String(text).replace(/^(確認|未確認|推奨)[：:]\s*/,'');
+      if(kind==='checked'){const input=el('input');input.type='checkbox';input.id=`review-check-${approval.id}-${index}`;input.checked=saved.approved.includes(index);
+        input.onchange=()=>{saved.approved=boxes.filter(([,b])=>b.checked).map(([i])=>i);};boxes.push([index,input]);
+        const label=el('label',undefined,'check'),words=el('span');label.htmlFor=input.id;words.append(el('strong',labels[kind]+'：'),document.createTextNode(body));label.append(input,words);row.append(label);}
+      else row.append(el('strong',labels[kind]+'：'),document.createTextNode(body));
+      box2.append(row);
+    });
+    if(boxes.length){const all=el('button','確認済みの項目をすべて承認','link-button');all.type='button';all.onclick=()=>{boxes.forEach(([,b])=>{b.checked=true;});saved.approved=boxes.map(([i])=>i);};box2.append(all);}
+    const instructionLabel=el('label','足りない確認・追加の指示（任意）'),instruction=el('textarea');instruction.rows=3;instruction.maxLength=1000;
+    instruction.placeholder='例：PDFは本文の個人情報だけ確認すれば十分。操作記録が無いのは資料作成でコマンドを使わないため。';instruction.value=saved.instruction;
+    instruction.oninput=()=>{saved.instruction=instruction.value;};instructionLabel.append(instruction);box2.append(instructionLabel);
+    box.append(box2);checklist=saved;
+  }
   for(const q of approval.payload.questions){
     const field=el('fieldset',undefined,'question-field');field.append(el('legend',q.text));
     if(q.context){
@@ -440,11 +519,13 @@ function questionForm(approval){
       const d=drafts[q.id],option=q.options.find(o=>o.id===d.option_id);let text=d.texts[d.option_id]||'';
       if(!text.trim()&&fileDraft?.widget.files.length&&/ファイル|素材|画像|PDF|添付/.test(q.text))text='添付ファイル: '+fileDraft.widget.files.map(e=>e.file.name).join('、');
       if(!option){message.textContent='未回答の質問があります。すべて選択してください。';return;}
+      // レビューの確認結果・指示を書いた場合は、それを入力必須欄の回答として扱う（同じ内容を二度書かせない）。
+      if(option.input_required&&!text.trim()&&checklist&&(checklist.approved.length||checklist.instruction.trim()))text='上の「レビューで確認したこと」の承認結果と指示を参照してください。';
       if(option.input_required&&!text.trim()){message.textContent='選択した項目の入力欄を記入してください。';return;}
       answers[q.id]={option_id:option.id,text};
     }
     submit.disabled=true;message.textContent='回答を送信しています…';
-    try{const attachment_ids=fileDraft?await fileDraft.widget.upload(api):[];await api('/api/decide',{id:approval.id,allow:true,answers,attachment_ids});answerDrafts.delete(approval.id);fileDraft?.widget.clear();answerFiles.delete(approval.id);await refresh();}
+    try{const attachment_ids=fileDraft?await fileDraft.widget.upload(api):[];await api('/api/decide',{id:approval.id,allow:true,answers,attachment_ids,...(checklist?{review_checklist:{approved:checklist.approved,instruction:checklist.instruction}}:{})});answerDrafts.delete(approval.id);fileDraft?.widget.clear();answerFiles.delete(approval.id);await refresh();}
     catch(error){message.textContent=error.message;}
     finally{submit.disabled=false;}
   });
@@ -466,6 +547,11 @@ function failureDiagnosis(task,job){
     return {cause:'担当の「できない項目を残して先へ進む」報告を受け付けられませんでした',
       why:'未完了の項目を残して先へ進む範囲は、利用者が決める決まりです。担当が自分で範囲を決めて報告したため、采来は受け付けずに止めました。',
       kinds:['transfer','skip','retry','cancel']};
+  // 2026-10-09 AIの報告の形の問題は、利用者が補足を書いても解決しない。書くことはないと示し、ボタン1つで再試行できるようにする。
+  if(task.failure_code==='format'||/形式が不正|JSON形式|JSONオブジェクト|配列で返して|形式または大きさ|指定の形と違|項目がそろいません/.test(task.summary||''))
+    return {cause:'担当（AI）の報告の形が、決まりに合いませんでした',
+      why:'内容：'+(task.summary||'').slice(0,160)+'　AIが返した報告に、項目の欠けや形の違いがありました。作業の内容やあなたの判断の問題ではないので、書き足すことはありません。そのまま再試行すると多くの場合は解消します。繰り返す場合は担当・モデルを切り替えてください。',
+      kinds:['rerun','model','cancel']};
   if(pythonFailure(task))return {cause:'Pythonを起動できませんでした',why:'担当の作業環境でPythonの起動に失敗しました。下の「停止理由と次の操作」で起動確認と回答案を確認してください。',kinds:['retry','model']};
   if(task.failure_code==='provider'||/^Claude Code:|AI接続|起動確認を受け取れ/.test(task.summary||''))
     return {cause:'AIとの接続、または担当の報告の形式で失敗しました',why:'内容：'+(task.summary||'').slice(0,240),kinds:['retry','model','cancel']};
@@ -481,14 +567,52 @@ function failureCard(task,job){
   const targets=state.tasks.filter(t=>t.job_id===job.id&&t.after===task.id&&t.role==='builder'&&t.status==='queued');
   const options={
     transfer:targets.length?['できない作業を次の担当（'+targets[0].title.slice(0,24)+'）に移して再開する','下の「ボードから復旧する」で、移す作業を書いて保存します。次の担当がコマンドを使える場合に有効です。',jump('#task-recovery','移す作業を書く')]:null,
-    skip:['その作業を未実施として残し、先へ進める','下の回答欄に「〇〇は未実施として残し、残りを完了として報告してよい」と書いて再試行します。未実施の項目は合格扱いにはなりません。',jump('#retry-note','回答欄へ')],
+    skip:['その作業を未実施として残し、先へ進める','下の回答欄に残す項目が入ります。内容を確かめて「回答・補足を送って再試行」を押してください。未実施の項目は合格扱いにはなりません。',
+      button('未実施として残す項目を書く',()=>{const input=$('retry-note'),allow=$('retry-handoff');if(!input||!allow)return;
+        if(!input.value.trim())input.value='【未実施として残す項目】\n- （例：PDF本文の内容確認、見た目の確認）\n\n上の項目は未実施として残し、残りを完了として報告してよい。';
+        allow.checked=true;revealSection(input);input.scrollIntoView({behavior:'smooth',block:'center'});input.focus();})],
     retry:['補足を書いて再試行する','原因を解消したうえで、下の回答欄に補足を書いて再試行します。同じ条件のままでは、同じ結果になります。',jump('#retry-note','回答欄へ')],
+    rerun:['そのまま再試行する（書き足すことはありません）','同じ指示のまま、この担当をもう一度動かします。この担当がすでに行った変更はそのまま残ります。',
+      button('そのまま再試行する',async()=>{
+        if(!confirm('同じ指示のまま、この担当を再試行します。よろしいですか？'))return;
+        await api('/api/retry',{id:task.id,checked_changes:true,note:'担当の報告の形が決まりに合わなかったため、同じ指示で再試行します。報告は指定の形で返してください。'});
+        notice('再試行しました。担当が動き始めます。');},'primary')],
     redo:['依頼を中止して、出し直す',job.document_source?'依頼の内容を見直して出し直します。':'資料を作る依頼なら、台帳の「相談」で種類を「資料作成」にして出し直します。',jump('#cancel-job','中止ボタンへ')],
     model:['担当・モデルを切り替える','利用枠やモデルの不調が原因の場合に有効です。道具が足りない場合は解消しません。',button('担当・モデルを切り替える',()=>openModelSwitch(task.id))],
     cancel:['この依頼全体を中止する','作業済みの変更は自動では戻しません。',jump('#cancel-job','中止ボタンへ')]};
   const list=el('ol',undefined,'failure-options');
+  // 2026-10-08 資料作成では、修正やその失敗で止まった依頼を、修正せずに受け入れ画面へ進められる（指摘は受け入れ画面に残る）。
+  if(state.config?.document_review_relaxed && job.document_source&&['failed','blocked','interrupted'].includes(job.status)&&state.tasks.some(t=>t.job_id===job.id&&t.role==='reviewer'&&t.status==='succeeded')){
+    const li=el('li');li.append(el('strong','修正せずに受け入れへ進める'),el('p','残っている修正・再レビューを取りやめ、受け入れ画面へ進めます。レビュー指摘は受け入れ画面に表示され、受け入れるか差し戻すかをそこで決められます。','hint'),
+      button('受け入れ画面へ進める',async()=>{if(!confirm('修正せずに受け入れ画面へ進めます。残っている修正・再レビューは取りやめます。よろしいですか？'))return;
+        try{await api('/api/jobs/accept-without-fix',{id:job.id,confirmed:true});await refresh();notice('受け入れ画面へ進めました。成果物とレビュー指摘を確認してください。');}catch(error){notice(error.message);}},'primary'));
+    list.prepend(li);
+  }
   for(const kind of d.kinds){const o=options[kind];if(!o)continue;const li=el('li');li.append(el('strong',o[0]),el('p',o[1],'hint'),o[2]);list.append(li);}
   box.append(el('h4','代わりの方法'),list);
+  return box;
+}
+// Page images of PPTX/DOCX/PDF deliverables, rendered by the server when the job reaches acceptance.
+function previewPanel(job){
+  const box=el('section',undefined,'preview-panel');box.append(el('h4','成果物の見た目（自動で画像化）'));
+  const area=el('div');area.append(el('p','読み込み中…','hint'));box.append(area);
+  const load=async()=>{
+    if(!box.isConnected&&area.dataset.started)return;area.dataset.started='1';
+    let data;try{data=await api('/api/jobs/previews?id='+encodeURIComponent(job.id));}catch(error){area.replaceChildren(el('p',error.message,'hint'));return;}
+    area.replaceChildren();
+    if(!data.files.length){area.append(el('p','画像にできる成果物（PowerPoint・Word・PDF）は見つかりませんでした。','hint'));return;}
+    for(const file of data.files){
+      const head=el('p',file.file+(file.pages?'（'+file.pages+'ページ）':''),'preview-file');area.append(head);
+      if(file.status==='done'){const grid=el('div',undefined,'preview-grid');
+        for(let n=1;n<=file.pages;n++){const url='/api/previews/image?job='+job.id+'&key='+file.key+'&page='+n;const link=el('a');link.href=url;link.target='_blank';link.rel='noopener';
+          const img=el('img');img.src=url;img.alt=file.file+' '+n+'ページ目';img.loading='lazy';link.append(img,el('span',String(n)));grid.append(link);}
+        area.append(grid);}
+      else if(file.status==='failed')area.append(el('p','画像にできませんでした：'+(file.error||''),'hint'));
+      else area.append(el('p','画像を作成中です（Office の場合、1ファイル20秒ほど）。自動で表示を更新します。','hint'));
+    }
+    if(data.rendering||data.files.some(f=>f.status==='pending'))setTimeout(()=>{if(box.isConnected)load();},5000);
+  };
+  setTimeout(load,0);
   return box;
 }
 function pythonFailure(task){const text=(task.summary||'')+' '+JSON.stringify(task.result||{});return /Python/i.test(text)&&/起動失敗|起動でき|プロセス作成失敗|Unable to create process/i.test(text);}
@@ -581,9 +705,13 @@ function renderDetail(task,version) {
   const drafts={};$('detail-body').querySelectorAll('textarea').forEach(t=>drafts[t.id]=t.value);
   detailVersion=version;const job=state.jobs.find(j=>j.id===task.job_id);$('detail-title').textContent=task.title;
   const body=$('detail-body');body.replaceChildren(el('p',`${roles[task.role]} / ${task.profile.adapter} / ${task.profile.model} / ${task.profile.effort} · 試行 ${task.attempt}`),el('p',`状態: ${statuses[task.status]||task.status} · 依頼の状態: ${jobStatuses[job.status]||job.status}`));
+  const skillMode=job.skill_selection?.mode;
+  if(job.evaluation?.mode)body.append(el('p','効果検証用の依頼：モード'+job.evaluation.mode+'（再利用の文脈だけを切り替え）'));
+  if(skillMode!=='none'&&job.skill_selection?.names?.length)body.append(el('p','依頼時にプロジェクトへ追加したスキル（候補）: '+job.skill_selection.names.join('、')));
+  else if(skillMode==='none')body.append(el('p','この依頼ではスキルを使いません（依頼時の選択）。'));
   if(!endedJob(task)&&group(task)===2){
     const guide=el('section',undefined,'detail-section');guide.id='decision-guide';
-    guide.append(el('h3','停止理由・判断材料・次の操作'),el('p',task.summary||task.result?.summary||'下の確認事項と担当の報告を確認してください。'));
+    guide.append(el('h3','停止理由・判断材料・次の操作'),el('p',stopCause(task,job),'failure-cause'),el('p',task.summary||task.result?.summary||'下の確認事項と担当の報告を確認してください。'));
     if(task.recovery_advice?.message)guide.append(el('p','統括の確認結果：'+task.recovery_advice.message));
     const choices=el('div',undefined,'actions');
     const jump=(label,target)=>choices.append(button(label,()=>{const dest=body.querySelector(target);if(!dest){notice('対象の操作欄がありません。担当の報告と履歴を確認してください。');return;}revealSection(dest);dest.scrollIntoView({block:'center'});const focus=dest.querySelector('button,textarea,input')||dest;focus.focus();}));
@@ -684,7 +812,10 @@ function renderDetail(task,version) {
   if(['queued','failed','interrupted','blocked'].includes(task.status)&&!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status))body.append(button('担当・モデルを切り替える',()=>openModelSwitch(task.id)));
   for(const a of endedJob(task)?[]:pending(task.id)){
     if(a.payload.questions?.length){body.append(questionForm(a));continue;}
-    const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='plan'?'作業計画を承認':a.kind==='completion'?'成果を確認して受け入れる':'操作の承認'),el('div',a.kind==='tool'?JSON.stringify(a.payload,null,2):reportText(a.payload),'text-block'));
+    const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='plan'?'作業計画を承認':a.kind==='completion'?'成果を確認して受け入れる':'操作の承認'));
+    if(a.kind==='tool'&&a.payload?.guard)box.append(el('p','送信の防御：'+a.payload.guard.label+'。'+a.payload.guard.note+' 送信先・送る内容・依頼に必要かを確認してから許可してください。','notice'));
+    box.append(el('div',a.kind==='tool'?JSON.stringify(a.payload,null,2):reportText(a.payload),'text-block'));
+    if(a.kind==='completion')box.append(previewPanel(job));
     const input=el('textarea');input.id='note-'+a.id;input.rows=3;input.placeholder='回答・判断の理由（任意）';input.setAttribute('aria-label','承認または拒否の補足');input.value=drafts[input.id]||'';
     box.append(el('p',a.kind==='tool'?'この操作1回だけに適用されます。期限: '+date(a.expires_at):a.kind==='completion'?'内容を確認して受け入れるか拒否してください。拒否する場合は理由・指摘を入力すると、その指摘で修正担当とレビューが自動で再開します（理由なしの拒否は停止）。':'内容を確認して承認または拒否してください。','hint'),input);
     const actions=el('div',undefined,'actions');
@@ -713,13 +844,20 @@ function renderDetail(task,version) {
   if(!endedJob(task)&&['failed','interrupted','blocked','cancelled'].includes(task.status)&&!pending(task.id).some(a=>a.payload.questions?.length)){
     const s=el('section',undefined,'detail-section'),input=el('textarea');input.id='retry-note';input.rows=4;input.placeholder='ここに回答・追加の作業指示、または解決した条件を入力してください。';input.value=drafts[input.id]||'';input.setAttribute('aria-label','回答・再開の補足');
     const label=el('label','回答・補足の入力欄');label.htmlFor=input.id;
-    s.append(el('h3','回答・補足を入力して再開'),label,input,el('p','入力は再開する担当へ渡します。システムエラーの場合は、原因を解消してから再開してください。','hint'),button('回答・補足を送って再試行',async()=>{if(confirm('既に行われた編集や処理を確認しましたか？ 同じ依頼が再実行されます。'))await api('/api/retry',{id:task.id,note:input.value,checked_changes:true});}));body.append(s);
+    // 2026-10-08 「未実施として残して先へ進める」を、回答欄の文章だけでなく利用者の範囲指定として記録できるようにする。
+    const scope=el('input');scope.type='checkbox';scope.id='retry-handoff';const scopeLabel=el('label',undefined,'check');
+    scopeLabel.append(scope,el('span','この欄に書いた項目は、未実施として残して先へ進めることを許可する（未実施の項目は合格扱いになりません）'));
+    const canScope=['builder','researcher'].includes(task.role);
+    s.append(el('h3','回答・補足を入力して再開'),label,input,...(canScope?[scopeLabel]:[]),el('p','入力は再開する担当へ渡します。システムエラーの場合は、原因を解消してから再開してください。','hint'),button('回答・補足を送って再試行',async()=>{
+      if(scope.checked&&!input.value.trim()){notice('未実施として残す項目を入力欄に書いてください。');input.focus();return;}
+      if(confirm(scope.checked?'書いた項目を未実施として残し、先へ進めることを許可して再試行します。よろしいですか？':'既に行われた編集や処理を確認しましたか？ 同じ依頼が再実行されます。'))await api('/api/retry',{id:task.id,note:input.value,checked_changes:true,handoff_allowed:scope.checked});}));body.append(s);
   }
   if(!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status)){const cancel=button('この依頼全体を中止',async()=>{if(confirm('実行中・待機中の作業を中止します。既存の変更は自動では戻しません。'))await api('/api/cancel',{id:job.id});},'danger');cancel.id='cancel-job';body.append(cancel);}
   body.querySelectorAll('textarea').forEach(t=>{if(drafts[t.id])t.value=drafts[t.id];});
   foldDetailSections(body,task);
 }
-function openTask(id){selected=id;detailVersion='';const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
+// 2026-10-08 カードを開くたびに折りたたみを初期状態（停止理由を開く）から始める。以前の開閉を引き継ぐと、停止後も閉じたままになっていた。
+function openTask(id){selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
 async function refresh(){try{state=await api('/api/state');render();notifyDecisions();}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
 const decisionNotificationObjects=new Map(),decisionPopupObjects=new Map();
 let seenDecisions=new Set();
@@ -874,7 +1012,7 @@ async function checkJobInstructionSize(){
  catch(error){if(sequence===jobInstructionSequence)box.replaceChildren(el('p','指示ファイルの容量は未確認です。'+error.message,'notice'));}
 }
 $('project-select').addEventListener('change',checkJobInstructionSize);
-$('new-job').addEventListener('click',()=>{if(!state)return;$('project-select').replaceChildren(...state.config.approved_roots.map(p=>new Option(p,p)));$('new-dialog').showModal();checkJobInstructionSize();});
+$('new-job').addEventListener('click',()=>{if(!state)return;$('project-select').replaceChildren(...state.config.approved_roots.map(p=>new Option(p,p)));$('new-dialog').showModal();checkJobInstructionSize();jobSkills.load(api);});
 let folderState=null, folderBusy=false, folderGeneration=0;
 function folderControls(loading){
   folderBusy=loading;
@@ -934,13 +1072,92 @@ $('folder-use').addEventListener('click',()=>{
     $('folder-dialog').close();select.focus();await refresh();
   });
 });
-$('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.target);action(async()=>{const attachment_ids=await jobImages.upload(api);const created=await api('/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids});$('new-dialog').close();e.target.reset();jobImages.clear();notice('依頼を受け付けました。計画の作成を始めます。'+(created.prepared?.length?' '+created.prepared.join(' '):''));});});
+$('job-template')?.addEventListener('click',()=>{const goal=$('job-goal');if(goal.value.trim()&&!confirm('入力済みの内容を記入例で置き換えます。よろしいですか？'))return;goal.value='【目的】\n\n【材料】\n\n【完了の条件】\n\n【決まっていない点は標準で】ファイル名・表現の細部はおまかせ。迷ったら元の依頼を優先し、採用した標準を報告に書く。';goal.focus();});
+// Requests for documents get the document tools only through the ledger consultation (kind: documentation).
+const DOCUMENT_REQUEST=/PowerPoint|PPTX|パワポ|スライド|プレゼン|説明資料|報告書|Word|DOCX|Excel|XLSX|PDF|動画|MP4|チラシ|ポスター/i;
+const syncJobKind=()=>{const docs=$('job-kind').value==='documentation';$('job-document').hidden=!docs;$('job-document-format').required=docs;};
+$('job-kind').addEventListener('change',syncJobKind);
+// 2026-10-08 依頼フォームの点検：「計画を開始する」で問題があれば、どの項目に不備があるかと解消方法をボタンの上に示す。
+// ブラウザ標準の必須チェックは、閉じた欄の項目だと何も表示されないことがあるため使わず、ここでまとめて点検する。
+const jobFields={
+  title:{label:'依頼名',el:()=>$('job-form').elements.title},
+  project:{label:'対象プロジェクト',el:()=>$('project-select')},
+  format:{label:'成果物の形式',el:()=>$('job-document-format')},
+  goal:{label:'達成したいこと・完了の条件',el:()=>$('job-goal')},
+  skills:{label:'スキルをプロジェクトに追加して候補にする',el:()=>$('job-skills')},
+  evaluation:{label:'効果検証（検証モード）',el:()=>$('job-evaluation-mode'),open:()=>{$('job-evaluation').open=true;}},
+  attachments:{label:'参考ファイルを添付',el:()=>$('job-attachments')},
+  consent:{label:'AIへの送信の確認',el:()=>$('job-form').elements.consent},
+  other:{label:'送信・接続'}};
+$('job-form').noValidate=true;
+function checkJobForm(form,f,docs){
+  const issues=[],add=(field,problem,fix)=>issues.push({field,problem,fix});
+  if(!String(f.get('title')||'').trim())add('title','入力されていません。','依頼の内容が分かる短い名前を入力してください（例：単位変換モジュールの作成）。');
+  if(!f.get('project'))add('project','選ばれていません。','一覧から選ぶか、「既存フォルダを選択」「＋ 新規フォルダを作成」で対象を登録してください。');
+  if(docs&&!f.get('document_format'))add('format','選ばれていません。','作りたい資料の形式（PowerPoint・PDF・Markdownなど）を選んでください。');
+  const goal=String(f.get('goal')||'');
+  if(!goal.trim())add('goal','入力されていません。','やってほしいことと完了の条件を書いてください。「記入例を入れる」で書き方の型を入れられます。');
+  else if(goal.length>16000)add('goal',`長すぎます（${goal.length.toLocaleString('ja-JP')}文字／上限16,000文字）。`,'要点に絞って短くしてください。詳しい資料は「参考ファイルを添付」で渡せます。');
+  let skills=null;try{skills=jobSkills.value();}catch(error){add('skills',error.message,'追加するスキルのチェックを10件以内に減らしてください。');}
+  if(f.get('evaluation_mode')){
+    if(!f.has('evaluation_confirmed'))add('evaluation','「検証用の課題で、実業務のデータを含みません。」にチェックがありません。','検証をする場合はチェックを入れてください。普段の依頼なら、検証モードを「使わない（普段の依頼）」に戻してください。');
+    if(skills&&(skills.skill_mode==='none'||skills.skill_ids.length))add('evaluation','検証モードと、スキルの追加（または「この依頼ではスキルを使わない」）は同時に使えません。','普段の依頼なら、検証モードを「使わない（普段の依頼）」に戻してください。検証をする場合は、スキルの欄のチェックをすべて外してください（スキルの有無は検証モードA〜Dで切り替わります）。');
+  }
+  if(!f.has('consent'))add('consent','チェックが入っていません。','内容を確認のうえ、「依頼内容・添付ファイルと必要な作業情報をAIに送信し、CLIの利用枠を使うことを確認しました。」にチェックを入れてください。');
+  return issues;
+}
+function jobServerIssue(error){
+  const text=String(error?.message||error||'');
+  const rules=[
+    [/AIへの送信と作業範囲の確認/,'consent','「AIに送信し、CLIの利用枠を使うことを確認しました。」にチェックを入れてください。'],
+    [/検証モードは A〜D/,'evaluation','検証モードを選び直してください。普段の依頼なら「使わない（普段の依頼）」です。'],
+    [/実業務のデータを含まない/,'evaluation','検証をする場合は確認のチェックを入れ、普段の依頼なら検証モードを「使わない（普段の依頼）」に戻してください。'],
+    [/スキル追加と「スキルを使わない」/,'evaluation','普段の依頼なら検証モードを「使わない（普段の依頼）」に戻してください。検証をする場合は、スキルの欄のチェックをすべて外してください。'],
+    [/未登録のプロジェクト/,'project','「既存フォルダを選択」で対象フォルダを選び直し、登録してから送信してください。'],
+    [/対象フォルダが見つかりません/,'project','フォルダが移動・削除されていないか確認し、対象プロジェクトを選び直してください。'],
+    [/アーカイブ・移動処理中|フォルダの復旧/,'project','プロジェクト台帳で処理の完了・フォルダの復旧を確認してから、もう一度送信してください。'],
+    [/スキル/,'skills','スキル一覧で状態を確認し、チェックを付け直してください（10件まで）。'],
+    [/添付/,'attachments','該当する添付を外すか、内容を見直して添付し直してください。'],
+    [/成果物形式|制作ライブラリ|資料生成用Python/,'format','別の形式を選ぶか、管理者に制作環境の準備を依頼してください。'],
+    [/が含まれています/,'goal','依頼名・内容から該当する箇所を削除するか伏せ字にしてから、もう一度送信してください。'],
+    [/送信を取りやめました/,'goal','内容を見直してから、もう一度「計画を開始する」を押してください。'],
+    [/依頼名と内容を入力/,'goal','依頼名と内容を入力してください（内容は16,000文字まで）。'],
+    [/画面を再読み込み|403/,'other','采来が再起動された可能性があります。入力内容を控えてから、ページを再読み込みしてもう一度送信してください。'],
+    [/Failed to fetch|NetworkError|接続/,'other','采来に接続できません。少し待ってからもう一度送信してください。続く場合は采来が起動しているか確認してください。']];
+  const hit=rules.find(([pattern])=>pattern.test(text));
+  return hit?{field:hit[1],problem:text,fix:hit[2]}:{field:'other',problem:text||'理由が分からないまま受付できませんでした。',fix:'入力内容を見直して、もう一度送信してください。解消しない場合は、この文面を管理者に伝えてください。'};
+}
+function clearJobIssues(){
+  const box=$('job-form-message');box.hidden=true;box.replaceChildren();
+  for(const field of Object.values(jobFields)){const target=field.el?.();if(target){target.removeAttribute('aria-invalid');target.classList.remove('field-error');}}
+}
+function showJobIssues(issues){
+  clearJobIssues();const box=$('job-form-message');
+  box.append(el('strong',issues.length>1?`依頼を開始できません。次の${issues.length}件を直してください。`:'依頼を開始できません。次の項目を直してください。'));
+  const list=el('ol');
+  for(const issue of issues){
+    const field=jobFields[issue.field]||jobFields.other,target=field.el?.(),item=el('li');
+    item.append(el('b',field.label+'：'),document.createTextNode(issue.problem),el('div','解消方法：'+issue.fix,'form-error-fix'));
+    if(target){target.setAttribute('aria-invalid','true');target.classList.add('field-error');
+      const jump=el('button','この項目へ移動','link-button');jump.type='button';
+      jump.onclick=()=>{field.open?.();target.scrollIntoView({behavior:'smooth',block:'center'});(target.matches('input,select,textarea')?target:target.querySelector('input,select,textarea,button'))?.focus({preventScroll:true});};
+      item.append(jump);}
+    list.append(item);
+  }
+  box.append(list);box.hidden=false;box.scrollIntoView({block:'nearest'});
+}
+$('job-form').addEventListener('input',event=>{event.target.closest('.field-error')?.classList.remove('field-error');});
+$('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.target);const docs=f.get('kind')==='documentation';
+clearJobIssues();const issues=checkJobForm(e.target,f,docs);if(issues.length){showJobIssues(issues);return;}
+if(!docs&&DOCUMENT_REQUEST.test(String(f.get('title'))+' '+String(f.get('goal')))&&!confirm('資料（PowerPoint・Word・PDFなど）を作る依頼のようです。\n\n「依頼の種類」を「資料作成」にすると、図・表付きの資料を作る道具で進められます。開発・作業の依頼では、資料用の道具は使えません。\n\nこのまま開発・作業の依頼として出しますか？（キャンセルで入力に戻ります）'))return;
+action(async()=>{try{await submitJob(f,docs,e.target);}catch(error){showJobIssues([jobServerIssue(error)]);throw error;}});});
+async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice('依頼を受け付けました。計画の作成を始めます。'+(created.prepared?.length?' '+created.prepared.join(' '):''));}
 $('pause').addEventListener('click',()=>action(()=>api('/api/pause',{paused:!state.paused})));
 $('stop').addEventListener('click',()=>action(async()=>{if(confirm('全ての実行中の依頼を中止し、新規着手を停止しますか？'))await api('/api/stop',{});}));
 $('backup').addEventListener('click',()=>action(async()=>{const r=await api('/api/backup',{});notice('DBのバックアップを保存しました: data/'+r.file+'、data/'+r.handoff_file);}));
 let modelCatalog={}, catalogLoading=false;
 function modelSaveState(){
-  $('models-save').disabled=catalogLoading||Object.keys(roles).some(role=>{
+  $('models-save').disabled=catalogLoading||!checkedProviders().length||Object.keys(roles).some(role=>{
     const m=document.querySelector(`[name="${role}-model"]`);
     return !m?.value||m.selectedOptions[0]?.disabled;
   });
@@ -965,18 +1182,61 @@ function fillEfforts(role){
   effort.replaceChildren(...options.map(v=>new Option(v,v)));effort.disabled=!options.length;
   if(options.includes(old))effort.value=old;else if(options.includes('medium'))effort.value='medium';
 }
+// 2026-10-08 チーム設定の注書き：Copilotの担当範囲と、その安全の仕組みを説明する（2026-10-09 実装担当に対応）。
+function openCopilotLimits(){
+  const dialog=el('dialog',undefined,'copilot-limits'),head=el('div',undefined,'dialog-title'),close=el('button','×');
+  close.type='button';close.setAttribute('aria-label','説明を閉じる');close.onclick=()=>dialog.close();
+  head.append(el('h2','GitHub Copilotの担当範囲と安全の仕組み'),close);
+  const section=(title,...lines)=>{const box=el('section');box.append(el('h3',title));for(const line of lines)box.append(el('p',line));return box;};
+  const list=(...items)=>{const ul=el('ul');for(const item of items)ul.append(el('li',item));return ul;};
+  dialog.append(head,
+    section('ひとことで言うと',
+      '采来は、AIがファイルを書き換える・コマンドを実行する・Webを検索する前に、毎回その操作が安全かを確かめています。GitHub Copilot CLIには、この「実行前の確認」を采来に渡す仕組みがありません。そこで、Copilot自身のファイル操作・コマンド実行・Web接続はすべて禁止し、采来が用意した道具だけを使わせています。'),
+    section('「計画」「レビュー」「相談」',
+      '采来の読み取り専用の道具（プロジェクト内のファイル一覧・読み取り・検索・資料の読み取り）だけを使います。'),
+    section('「実装」（資料作成の依頼）',
+      '采来の資料作成用の道具（保存先の中だけ・資料形式だけ）を使います。コマンドは使えません。ClaudeのArtifact形式の資料は対象外です（Claudeに切り替えてください）。'),
+    section('「実装」（開発の依頼）',
+      '采来の道具（ファイルの書き込み・置き換え・コマンドの実行）を使います。どの操作も、実行の前に采来がClaude・Codexと同じ確認をし、許可したときだけ采来が実行します。'),
+    list('対象プロジェクトの外には書き込ませない',
+         'AGENTS.md・CLAUDE.md・.env・.git・セキュリティ方針などの設定や認証情報は変更させない',
+         '既存ファイルを上書きする前に、元のファイルを退避する',
+         '外部への送信・公開・導入のコマンドは、自動承認の設定でも利用者が確認する'),
+    el('p','コマンドは Windows PowerShell で実行します。承認を待つあいだにCopilotが要求を取り消した場合は、その後に承認されても実行しません。'),
+    section('「調査」を担当できない理由',
+      '調査担当は、読み取り用のコマンド実行とWeb検索を使います。Web検索は、采来が検索語を検査してから送る仕組みで、Copilotの検索ではこの検査を通せません。そのため調査は、Codex・Claudeに任せています。'));
+  document.body.append(dialog);dialog.addEventListener('close',()=>dialog.remove());dialog.showModal();close.focus();
+}
+function checkedProviders(){return [...document.querySelectorAll('[name="provider-enabled"]:checked')].map(input=>input.value);}
+function fillProviderOptions(role){
+  const select=document.querySelector(`[name="${role}-adapter"]`),old=select.value;
+  const names=checkedProviders().filter(name=>name!=='copilot'||copilotRoles.includes(role));
+  select.replaceChildren(...names.map(name=>new Option(providerShortLabels[name],name)));
+  if(!names.length)select.add(new Option('使用する担当がありません',''));
+  select.disabled=!names.length;
+  if(names.includes(old))select.value=old;
+  return select.value!==old;
+}
+function providersChanged(){
+  const credits=$('copilot-credits-label');if(credits)credits.hidden=!checkedProviders().includes('copilot');
+  for(const role of Object.keys(roles))if(fillProviderOptions(role))fillModelOptions(role,'');
+  loadModelCatalog();
+}
 async function loadModelCatalog(force=false){
   if(catalogLoading)return;
+  const names=checkedProviders();
   catalogLoading=true;modelSaveState();$('models-reload').disabled=true;
-  $('models-message').textContent='Codex・Claudeのモデル一覧を取得しています…';
+  $('models-message').textContent=(names.map(name=>providerLabels[name]).join('・')||'選択中のプロバイダ')+'のモデル一覧を取得しています…';
   try{
-    const results=await Promise.allSettled(['codex','claude'].map(adapter=>api('/api/models',{adapter,refresh:force})));
-    ['codex','claude'].forEach((name,i)=>{modelCatalog[name]=results[i].status==='fulfilled'?results[i].value:{models:[],note:'一覧を取得できませんでした。'};});
-    $('models-message').textContent=['codex','claude'].map(name=>`${name==='codex'?'Codex':'Claude'}: ${modelCatalog[name].models.length}件。${modelCatalog[name].models.length?'':modelCatalog[name].note}`).join(' ');
+    const results=await Promise.allSettled(names.map(adapter=>api('/api/models',{adapter,refresh:force})));
+    names.forEach((name,i)=>{modelCatalog[name]=results[i].status==='fulfilled'?results[i].value:{models:[],note:'一覧を取得できませんでした。'};});
+    $('models-message').textContent=names.length?names.map(name=>`${providerLabels[name]}: ${modelCatalog[name].models.length}件。${modelCatalog[name].models.length?'':modelCatalog[name].note}`).join(' '):'使用するプロバイダを1つ以上選択してください。';
   }finally{
     catalogLoading=false;$('models-reload').disabled=false;
     for(const role of Object.keys(roles)){const select=document.querySelector(`[name="${role}-model"]`);if(select)fillModelOptions(role,select.value);}
     modelSaveState();
+    // A provider checked while the list was loading is fetched afterwards.
+    if(checkedProviders().some(name=>!modelCatalog[name]))loadModelCatalog();
   }
 }
 const decisionSettings=el('details');
@@ -994,20 +1254,37 @@ const decisionSave=el('button','判断設定を保存');decisionSave.type='butto
 decisionSave.addEventListener('click',async()=>{decisionSave.disabled=true;decisionMessage.textContent='保存中…';try{await api('/api/decision-settings',{provider:decisionProvider.value,model:decisionModel.value,shadow:true});await refresh();decisionMessage.textContent='保存しました。次に開始する作業から使用します。';}catch(e){decisionMessage.textContent=e.message;}finally{decisionSave.disabled=false;}});
 const decisionCheck=el('button','保存済み設定で接続確認');decisionCheck.type='button';
 decisionCheck.addEventListener('click',async()=>{decisionCheck.disabled=true;decisionMessage.textContent='接続確認中…';try{const d=await api('/api/decision-check',{});decisionMessage.textContent=d.status==='ok'?`確認成功：${d.provider}、${d.latency_ms} ms`:`確認失敗：${d.reason_code}。Ollamaの起動とモデルの導入を確認してください。`;}catch(e){decisionMessage.textContent=e.message;}finally{decisionCheck.disabled=false;}});
-decisionSettings.append(decisionSave,decisionCheck,decisionMessage);$('settings-dialog').querySelector('.cli-update').before(decisionSettings);
+decisionSettings.append(decisionSave,decisionCheck,decisionMessage);
 $('settings-open').addEventListener('click',()=>{
   const d=state?.config.decision||{provider:'ollama',model:'tev1:0.8b',shadow:true};decisionProvider.value=d.provider;decisionModel.value=d.model;decisionMessage.textContent='';decisionSummary.textContent='判断Provider：'+decisionProvider.selectedOptions[0].textContent;decisionSettings.open=false;
   if(!state)return;$('profile-inputs').replaceChildren(el('p',state.config.automatic_operations?'操作の承認：自動。仕様・方針の質問は利用者に確認します。':'操作の承認：個別確認（既知の読み取りは自動）。','hint'));
   $('profile-inputs').append(el('p','共通Agentを自動起動：計画・調査はcommon-explorer、実装はcommon-implementer、レビューはcommon-reviewer。セキュリティに関わる変更ではcommon-security-reviewerも順番に実行します。Agent名・セッションIDは各カードの詳細で確認できます。'));
+  const providerBox=el('fieldset',undefined,'provider-choice');providerBox.append(el('legend','使用するプロバイダ'));
+  for(const name of ['codex','claude','copilot']){
+    const label=el('label',undefined,'check'),input=el('input');input.type='checkbox';input.name='provider-enabled';input.value=name;
+    input.checked=enabledProviders().includes(name);input.addEventListener('change',providersChanged);
+    const available=state.providers?.[name]?.available;
+    label.append(input,el('span',providerLabels[name]+(available?'':'（CLI未検出）')));providerBox.append(label);
+  }
+  const creditsLabel=el('label','GitHub Copilotの月間の最大クレジット'),credits=el('input');creditsLabel.id='copilot-credits-label';
+  credits.type='number';credits.name='copilot-credits';credits.min='1';credits.step='any';credits.inputMode='decimal';
+  credits.value=state.config.provider_settings?.copilot_monthly_credits??'';credits.placeholder='例：1000';
+  creditsLabel.append(credits);creditsLabel.hidden=!enabledProviders().includes('copilot');
+  providerBox.append(creditsLabel,el('p','使用しないプロバイダは、担当の選択肢・利用枠表示・残量取得から外れます。GitHub Copilotは計画・実装・レビュー担当と相談で使えます（道具は采来の確認付きのものだけ。調査担当は不可）。残り％は采来から実行した分の消費で計算します。Copilotのモデル名の（約○クレジット/回）は、短い問いかけ1回の実測値です。実際の作業では、読み込む資料の量や回答の長さに応じて数倍〜数十倍になります。','hint'));
+  $('profile-inputs').append(providerBox);
   for(const role of Object.keys(roles)){
     const p=state.config.profiles[state.config.roles[role]],row=el('div',undefined,'profile-row');row.append(el('span',roles[role]));
-    const provider=el('select');provider.name=role+'-adapter';provider.setAttribute('aria-label',roles[role]+'の担当');provider.append(new Option('Codex','codex'),new Option('Claude','claude'));provider.value=p.adapter;
+    const provider=el('select');provider.name=role+'-adapter';provider.setAttribute('aria-label',roles[role]+'の担当');provider.append(new Option(providerShortLabels[p.adapter],p.adapter));provider.value=p.adapter;
     const model=el('select');model.name=role+'-model';model.required=true;model.setAttribute('aria-label',roles[role]+'のモデル');model.append(new Option(p.model,p.model));model.disabled=true;
     const effort=el('select');effort.name=role+'-effort';effort.setAttribute('aria-label',roles[role]+'の推論設定');effort.append(new Option('low','low'),new Option('medium','medium'));effort.value=p.effort;
     provider.addEventListener('change',()=>fillModelOptions(role,''));
     model.addEventListener('change',()=>{fillEfforts(role);modelSaveState();});
-    row.append(provider,model,effort);$('profile-inputs').append(row);
-  }$('settings-dialog').showModal();loadModelCatalog();
+    row.append(provider,model,effort);$('profile-inputs').append(row);fillProviderOptions(role);
+  }
+  const limitsNote=el('p',undefined,'hint copilot-limits-note'),limitsLink=el('button','GitHub Copilotの担当範囲と安全の仕組み（「調査」は選べません）','link-button');
+  limitsLink.type='button';limitsLink.setAttribute('aria-haspopup','dialog');limitsLink.onclick=openCopilotLimits;
+  limitsNote.append(document.createTextNode('※ '),limitsLink);$('profile-inputs').append(limitsNote);
+  $('settings-dialog').showModal();loadModelCatalog();
 });
 const claudeUpdateSection=el('section',undefined,'cli-update');
 claudeUpdateSection.append(el('h3','Claude Code CLIの更新'));
@@ -1029,12 +1306,31 @@ function foldCliUpdate(section,title,id){
 }
 foldCliUpdate($('settings-dialog').querySelector('.cli-update'),'Codex CLIの更新','codex-update-fold');
 foldCliUpdate(claudeUpdateSection,'Claude Code CLIの更新','claude-update-fold');
+// 2026-10-08 設定画面の並び：モデル選択 → 使用中のCLIの更新（Codex／Claude Code／GitHub Copilot）→ 判断Provider。
+const copilotUpdateSection=el('section',undefined,'cli-update');
+const copilotUpdateStatus=el('p','更新情報を確認しています。');copilotUpdateStatus.id='copilot-update-status';copilotUpdateStatus.setAttribute('role','status');copilotUpdateStatus.setAttribute('aria-live','polite');
+const copilotUpdateChecked=el('p',undefined,'hint');copilotUpdateChecked.id='copilot-update-checked';
+const copilotUpdateActions=el('div',undefined,'folder-actions');
+const copilotUpdateCheck=el('button','今すぐ確認');copilotUpdateCheck.id='copilot-update-check';copilotUpdateCheck.type='button';
+const copilotUpdateInstall=el('button','GitHub Copilot CLIを更新','primary');copilotUpdateInstall.id='copilot-update-install';copilotUpdateInstall.type='button';copilotUpdateInstall.disabled=true;
+copilotUpdateActions.append(copilotUpdateCheck,copilotUpdateInstall);
+copilotUpdateSection.append(copilotUpdateStatus,copilotUpdateChecked,copilotUpdateActions,
+  el('p','起動時と24時間ごとにGitHubの公開版を確認します。更新はボタンを押した場合だけ、CLIの公式の更新コマンド（copilot update）で実行します。','hint'));
+$('claude-update-fold').after(copilotUpdateSection);
+foldCliUpdate(copilotUpdateSection,'GitHub Copilot CLIの更新','copilot-update-fold');
+$('copilot-update-fold').after(decisionSettings);
 $('models-reload').addEventListener('click',()=>loadModelCatalog(true));
 $('cli-update-check').addEventListener('click',async()=>{try{await api('/api/cli-update/check',{});await refresh();}catch(e){notice(e.message);}});
 $('cli-update-install').addEventListener('click',async()=>{
   const version=state?.cli_update?.latest;
   if(!version||!confirm(`Codex CLIを${version}へ更新します。実行中の作業がある場合は開始できません。更新中は新規着手を止め、完了後に元の状態へ戻します。続けますか？`))return;
   try{await api('/api/cli-update/install',{version});await refresh();}catch(e){notice(e.message);}
+});
+$('copilot-update-check').addEventListener('click',async()=>{try{await api('/api/copilot-update/check',{});await refresh();}catch(e){notice(e.message);}});
+$('copilot-update-install').addEventListener('click',async()=>{
+  const version=state?.copilot_update?.latest;
+  if(!version||!confirm(`GitHub Copilot CLIを${version}へ更新します。実行中の作業がある場合は開始できません。続けますか？`))return;
+  try{await api('/api/copilot-update/install',{version});await refresh();}catch(e){notice(e.message);}
 });
 $('claude-update-check').addEventListener('click',async()=>{try{await api('/api/claude-update/check',{});await refresh();}catch(e){notice(e.message);}});
 $('claude-update-install').addEventListener('click',async()=>{
@@ -1046,6 +1342,8 @@ $('profiles-form').addEventListener('submit',e=>{
   e.preventDefault();if(catalogLoading||$('models-save').disabled)return;
   const f=new FormData(e.target),data={};
   for(const role of Object.keys(roles))data[role]={adapter:f.get(role+'-adapter'),model:f.get(role+'-model'),effort:f.get(role+'-effort')};
+  const credits=String(f.get('copilot-credits')||'').trim();
+  data.provider_settings={enabled:checkedProviders(),copilot_monthly_credits:credits?Number(credits):null};
   $('models-save').disabled=true;
   api('/api/profiles',data).then(async()=>{await refresh();notice('今後作成するタスクのモデル設定を保存しました。');$('settings-dialog').close();}).catch(e=>{$('models-message').textContent=e.message;}).finally(modelSaveState);
 });
@@ -1076,7 +1374,10 @@ function openModelSwitch(taskId,source){
   target.required=model.required=true;
   for(const t of candidates){const job=state.jobs.find(j=>j.id===t.job_id);target.add(new Option(`${job.title} / ${t.title}（${statuses[t.status]}）`,t.id));}
   if(taskId)target.value=taskId;
-  provider.append(new Option('Codex','codex'),new Option('Claude','claude'));
+  function providerChoices(){const t=candidates.find(c=>c.id===target.value),old=provider.value;
+    const names=enabledProviders().filter(name=>name!=='copilot'||copilotRoles.includes(t?.role));
+    provider.replaceChildren(...names.map(name=>new Option(providerShortLabels[name],name)));if(names.includes(old))provider.value=old;}
+  providerChoices();
   field('切り替えるタスク',target);field('切替先の担当',provider);field('切替先のモデル',model);field('推論設定',effort);
   const include=el('input');include.type='checkbox';const incLabel=el('label',undefined,'check');incLabel.append(include,el('span','同じ依頼・同じ役割の後続待機タスクと、今後の修正担当にも適用'));form.append(incLabel);
   const checked=el('input');checked.type='checkbox';const ckLabel=el('label',undefined,'check');ckLabel.append(checked,el('span','実施済みの変更を確認しました。回答済みの内容と作業指示を引き継ぎ、再実行してよい'));form.append(ckLabel);
@@ -1091,7 +1392,8 @@ function openModelSwitch(taskId,source){
   function enabled(){restore.disabled=sending||!current();reload.disabled=loading||sending||!current();save.disabled=loading||sending||!current()||!model.value||!effort.value;resume.disabled=save.disabled||!checked.checked||pending(target.value).length>0;}
   function efforts(){effort.replaceChildren(...(rows.find(m=>m.id===model.value)?.efforts||[]).map(e=>new Option(e,e)));if([...effort.options].some(o=>o.value==='medium'))effort.value='medium';enabled();}
   async function load(force=false){const seq=++generation;loading=true;rows=[];model.replaceChildren();effort.replaceChildren();enabled();message.textContent='モデル一覧を取得中…';try{const data=await api('/api/models',{adapter:provider.value,refresh:force===true});if(seq!==generation||!dialog.open)return;rows=data.models;model.replaceChildren(new Option('モデルを選択',''),...rows.map(m=>new Option(`${m.label} — ${m.id}`,m.id)));message.textContent=data.note;efforts();}catch(e){if(seq===generation&&dialog.open)message.textContent=e.message+' 「モデル一覧を再取得」でやり直せます。';}finally{if(seq===generation){loading=false;enabled();}}}
-  function targetChanged(){checked.checked=false;include.checked=false;autoReturn.checked=true;const t=current();provider.value=t?.profile.adapter==='claude'?'codex':'claude';load();}
+  function targetChanged(){checked.checked=false;include.checked=false;autoReturn.checked=true;const t=current();providerChoices();
+    const other=[...provider.options].map(o=>o.value).find(name=>name!==t?.profile.adapter);if(other)provider.value=other;load();}
   reload.onclick=()=>load(true);provider.onchange=()=>load();target.onchange=targetChanged;model.onchange=efforts;checked.onchange=enabled;
   async function send(restart){
     if(save.disabled||(restart&&resume.disabled))return;sending=true;enabled();

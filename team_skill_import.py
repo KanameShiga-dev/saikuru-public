@@ -316,10 +316,17 @@ def script_check(command, active_names):
         return None
     root = str(SKILLS).replace('\\', '/').casefold()
     normalized = command.replace('\\', '/')
-    if root not in normalized.casefold() and '_inbox' not in normalized:
+    # Only a path into the inbox counts (…/skills/_inbox/… or skills/_inbox/…). The word "_inbox" in text,
+    # such as slide content written by a script, is not a reference to an unimported skill.
+    inbox = re.search(r'(?:^|[\s"\'=(:/])skills/_inbox(?:/|$|[\s"\'])', normalized, re.I)
+    if root not in normalized.casefold() and not inbox:
         return None
-    if '_inbox' in normalized:
+    if inbox:
         return False, '取り込み前（_inbox）のスキルは実行できません。', []
+    writes = (r'(?:>{1,2}\s*["\']?|\b(?:Set-Content|Add-Content|Out-File|Remove-Item|Move-Item|Copy-Item|Rename-Item|New-Item'
+              r'|rm|mv|cp|del|tee|touch|mkdir|sed\s+-i)\b[^;&|\n]*?)' + re.escape(root))
+    if re.search(writes, normalized.casefold(), re.I):
+        return False, '取り込んだスキルのファイルは変更できません（読み取りと、取り込み時のままのスクリプトの実行だけ）。', []
     names = []
     for match in re.finditer(re.escape(root) + r'/([a-z0-9-]+)/([^\s"\'|&;<>]+)', normalized.casefold()):
         name, relative = match.group(1), match.group(2)

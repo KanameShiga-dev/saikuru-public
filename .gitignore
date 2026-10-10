@@ -8,3 +8,9 @@ docs/manual/capture-data/
 
 # Local operational evidence must not enter distribution exports.
 docs/evidence/
+
+# Change-request bundles are delivery artifacts, not sources.
+saikuru-change-request-*.zip
+
+# Model evaluation results hold this PC's folders and measured values; not shared.
+eval/model_eval/results/

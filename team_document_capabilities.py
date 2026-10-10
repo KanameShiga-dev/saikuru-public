@@ -67,7 +67,7 @@ def require_artifacts(job):
     if not manifest.is_file() or manifest.is_symlink():raise ValueError('指定された成果物が未作成です。完了扱いにできません。')
     for record in json.loads(manifest.read_text(encoding='utf-8')):
         path=(root/record['path']).resolve()
-        if path.is_relative_to(root) and path.suffix=='.'+expected and path.is_file() and path.stat().st_size>0:
+        if path.is_relative_to(root) and path.suffix.lower()=='.'+expected and path.is_file() and path.stat().st_size>0:
             assets=record.get('assets',[])
             required=required_visuals(job)
             covered={a.get('scene') for a in assets}
@@ -109,3 +109,13 @@ def environment_check(format_name,goal,output):
         if result.returncode or b'libx264' not in result.stdout or b' aac ' not in result.stdout:raise ValueError('MP4制作に必要なH.264/AACエンコーダーがありません。')
         checks.update(ffmpeg='available',encoders='libx264/aac',voicevox='available' if re.search('VOICEVOX|ナレーション|音声',goal,re.I) else 'not_required')
     return checks
+
+
+def document_goal(source, output, format_name, text):
+    """Goal text of a document-only job (shared by the ledger consultation and the board's new request form)."""
+    from team_artifact_guard import is_artifact_format
+    publishing = ('公開は、利用者が承認したclaude.ai上の非公開Artifact（この依頼で作成する1件）への送信だけ。それ以外の公開は禁止。'
+                  if is_artifact_format(format_name) else '公開は禁止。')
+    return ('資料作成のみ。読み取り元: ' + str(source) + '\n保存先: ' + str(output)
+            + '\nソース・設定変更、コマンド実行、起動停止は禁止。' + publishing + '資料だけを専用ツールで作成する。\n'
+            + '必須成果物形式: ' + format_name + '。下書きや手順書だけでは完了しない。\n' + text)

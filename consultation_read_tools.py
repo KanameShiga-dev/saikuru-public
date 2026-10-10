@@ -81,6 +81,53 @@ def safe_path(root, name):
         raise ValueError('ファイルがないか、読み取りサイズ上限を超えています。')
     return path
 
+DOCUMENTS = {'.pdf', '.pptx', '.docx', '.xlsx'}
+
+
+def safe_document(root, name):
+    """2026-10-08: planning/review roles of development jobs could not read PDF/PowerPoint/Word/Excel at all and
+    stopped to ask the user. Same exclusions as text files; documents are read as text only (nothing executed)."""
+    path = (root / name).resolve()
+    relative = path.relative_to(root)
+    for part in relative.parts:
+        lowered = part.casefold()
+        if lowered in BLOCKED or re.search(r'(^\.env|credential|secret|token|cookie|private.key)', lowered):
+            raise ValueError('認証情報・個人データ・生成物は読み取り対象外です。')
+    if path.suffix.casefold() not in DOCUMENTS:
+        raise ValueError('PDF・PowerPoint・Word・Excel を指定してください。')
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 50_000_000:
+        raise ValueError('ファイルがないか、読み取りサイズ上限を超えています。')
+    return path
+
+
+def read_document(root, name):
+    import document_tools
+    path = safe_document(root, name)
+    suffix = path.suffix.casefold()
+    if suffix == '.pdf':
+        value = document_tools.pdf_text(path)
+    elif suffix == '.pptx':
+        value = document_tools.pptx_text(path)
+    else:
+        value = document_tools.office_text(path)
+    return dict(value, path=str(path.relative_to(root)), bytes=path.stat().st_size)
+
+
+def document_files(root, limit=100):
+    found = []
+    for directory, dirs, names in os.walk(root, followlinks=False):
+        dirs[:] = [d for d in dirs if d.casefold() not in BLOCKED and not (Path(directory)/d).is_symlink()]
+        for name in names:
+            if Path(name).suffix.casefold() in DOCUMENTS:
+                try:
+                    found.append(str(safe_document(root, str((Path(directory)/name).relative_to(root))).relative_to(root)))
+                except (ValueError, OSError):
+                    continue
+                if len(found) >= limit:
+                    return found
+    return found
+
+
 def files(root):
     scanned = 0
     for directory, dirs, names in os.walk(root, followlinks=False):
@@ -102,7 +149,9 @@ def execute(root, name, args):
         for path in files(root):
             output.append(str(path.relative_to(root)))
             if len(output) >= 400: break
-        return {'files': output, 'limit': 400}
+        return {'files': output, 'limit': 400, 'documents': document_files(root)}
+    if name == 'read_document':
+        return read_document(root, args.get('path', ''))
     if name == 'read_file':
         path = safe_path(root, args.get('path', ''))
         start = max(1, min(100000, int(args.get('start_line', 1))))
@@ -134,6 +183,7 @@ TOOLS = [
  {'name':'list_files','description':'List bounded non-sensitive project text files.', 'inputSchema':{'type':'object','properties':{},'additionalProperties':False}},
  {'name':'read_file','description':'Read a project-relative text file, bounded lines; never writes.', 'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'start_line':{'type':'integer'},'line_count':{'type':'integer'}},'required':['path'],'additionalProperties':False}},
  {'name':'search_files','description':'Search a literal term in project text files.', 'inputSchema':{'type':'object','properties':{'query':{'type':'string'}},'required':['query'],'additionalProperties':False}},
+ {'name':'read_document','description':'Read a project PDF/PPTX/DOCX/XLSX as text (PDF pages; picture-only pages via local OCR; PPTX slides, tables, notes). list_files returns their paths under documents. Visual layout is checked by the user at acceptance.', 'inputSchema':{'type':'object','properties':{'path':{'type':'string'}},'required':['path'],'additionalProperties':False}},
 ]
 
 def main():

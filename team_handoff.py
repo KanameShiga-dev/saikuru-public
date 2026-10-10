@@ -20,6 +20,14 @@ CJK = re.compile(r'[぀-ヿ㐀-鿿]+')
 CONTENT = re.compile(r'[゠-ヿ㐀-鿿]')
 
 
+def default_skill_title(item):
+    """Imported skills keep their folder name; skills made from experience get their description's start."""
+    if item.get('imported'):
+        return item['name']
+    text=str(item.get('description') or '').split('：')[0].strip()
+    return text[:40] or item['name']
+
+
 def skill_matches(query, text):
     """Does a request (query) call for a reviewed skill (text)? Latin/digit words of 2+ chars match as words
     (the original rule). Japanese has no spaces, so it is compared as 2-character pairs that contain a kanji or
@@ -73,6 +81,8 @@ class HandoffDB:
             CREATE TABLE IF NOT EXISTS skill_active (
                 project TEXT NOT NULL, name TEXT NOT NULL, version_id TEXT NOT NULL,
                 enabled INTEGER NOT NULL, PRIMARY KEY(project,name));
+            CREATE TABLE IF NOT EXISTS skill_titles (
+                name TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at REAL NOT NULL);
         ''')
         if 'resolution' not in [r[1] for r in self.db.execute('PRAGMA table_info(conflicts)')]:
             self.db.execute('ALTER TABLE conflicts ADD COLUMN resolution TEXT')
@@ -359,9 +369,12 @@ class HandoffDB:
                 FROM skill_versions v LEFT JOIN skill_active a ON a.project=? AND a.name=v.name
                 WHERE v.project=? OR a.version_id=v.id ORDER BY v.created_at DESC LIMIT 100''',
                 (canonical(project),canonical(project))).fetchall()
+            titles=dict(self.db.execute('SELECT name,title FROM skill_titles'))
         items=[dict(json.loads(payload),id=identifier,created_at=at,
                     source_project=source_project,active=identifier==current and bool(enabled))
                     for identifier,payload,at,current,enabled,source_project in rows]
+        for item in items:
+            item['display_name']=titles.get(item['name']) or default_skill_title(item)
         eligible={}
         for source in {i['source_project'] for i in items}:
             eligible[source]={i['name']:i['experience'] for i in self.skill_candidates(source)}
@@ -375,6 +388,84 @@ class HandoffDB:
         if query is None: return items
         return [i for i in items if i['active'] and i['source_current']
                 and skill_matches(query, i['description']+' '+i['applicability'])][:5]
+
+    def job_skills(self, job):
+        """Skills handed to the job's agents as candidates: the ones added to the project at request time,
+        then the ones matched from the request text. Mode 'none' hands over no skills."""
+        selection=job.get('skill_selection') or {}
+        if selection.get('mode')=='none':
+            return []
+        ids=selection.get('ids') or []
+        added=[dict(i,added_at_request=True) for i in self.released_skills(job['project'])
+               if i['id'] in ids and i['active'] and i['source_current']]
+        matched=[i for i in self.released_skills(job['project'],job.get('goal','')) if i['id'] not in ids]
+        return added+matched
+
+    @staticmethod
+    def reuse_budget(goal, skills, experience_items, reuse_chars):
+        """Context budget (改修③): choose reuse context by value, within a character budget.
+
+        Only reuse context is budgeted (skills, experience). Safety rules, user decisions, current facts and
+        task reports are never trimmed. Skills the user added at request time are always kept in full; other
+        skills that do not fit are reduced to a summary with the path to SKILL.md (read on demand). Experience
+        unrelated to the request is left out; related items go in, human-recorded ones first, while they fit.
+        Nothing is deleted from the database."""
+        size = lambda value: len(json.dumps(value, ensure_ascii=False))
+        kept_skills, used = [], 0
+        for item in sorted(skills, key=lambda i: not i.get('added_at_request')):
+            if item.get('added_at_request') or used + size(item) <= reuse_chars:
+                kept_skills.append(item)
+            else:
+                kept_skills.append({'id': item['id'], 'name': item['name'], 'display_name': item.get('display_name'),
+                                    'description': item.get('description', ''), 'skill_dir': item.get('skill_dir'),
+                                    'summary_only': True, 'note': '予算のため要約のみ。必要な場合だけ skill_dir の SKILL.md を読む。'})
+            used += size(kept_skills[-1])
+        related = [i for i in experience_items if skill_matches(goal or '', i['key'] + ' ' + i['value'])]
+        related.sort(key=lambda i: i.get('verification') != 'human_recorded')
+        kept_experience = []
+        for item in related:
+            if used + size(item) > reuse_chars:
+                continue
+            kept_experience.append(item)
+            used += size(item)
+        return kept_skills, kept_experience, {
+            'reuse_chars': reuse_chars,
+            'chars_before': size(skills) + size(experience_items), 'chars_after': size(kept_skills) + size(kept_experience),
+            'experience_kept': len(kept_experience), 'experience_dropped': len(experience_items) - len(kept_experience),
+            'experience_unrelated': len(experience_items) - len(related),
+            'skills_summarized': sum(bool(i.get('summary_only')) for i in kept_skills)}
+
+    def selectable_skills(self):
+        """One entry per usable skill version, for the request forms."""
+        seen={}
+        for item in self.skill_library():
+            if item['source_current'] and item['id'] not in seen:
+                seen[item['id']]={'id':item['id'],'name':item['name'],'display_name':item['display_name'],
+                                  'description':item.get('description',''),'imported':bool(item.get('imported'))}
+        return sorted(seen.values(),key=lambda i:i['display_name'])
+
+    def rename_skill(self, version_id, title):
+        """Set the display name shown on screens and to agents. The internal name (folder, gates) never changes.
+        An empty title goes back to the default name."""
+        title=re.sub(r'\s+',' ',str(title or '')).strip()
+        if len(title)>60:
+            raise ValueError('表示名は60文字以内にしてください。')
+        if re.search(r'[\x00-\x1f<>`]',title):
+            raise ValueError('表示名に使えない文字が含まれています。')
+        if title:
+            from team_skill_import import has_injection_marker
+            if has_injection_marker(title):
+                raise ValueError('指示文のような表示名は使えません。')
+        with self.lock:
+            row=self.db.execute('SELECT name FROM skill_versions WHERE id=?',(version_id,)).fetchone()
+        if not row:
+            raise ValueError('名前を変えるスキルを選択してください。')
+        with self.lock,self.db:
+            if title:
+                self.db.execute('INSERT OR REPLACE INTO skill_titles VALUES (?,?,?)',(row[0],title,time.time()))
+            else:
+                self.db.execute('DELETE FROM skill_titles WHERE name=?',(row[0],))
+        return {'name':row[0],'display_name':title or None}
 
     def skill_library(self):
         with self.lock:
@@ -426,7 +517,7 @@ class HandoffDB:
             self.db.execute('INSERT OR REPLACE INTO skill_active VALUES (?,?,?,1)',
                 (canonical(target_project),item['name'],version_id))
 
-    def context(self, job, allowed_files=None):
+    def context(self, job, allowed_files=None, refs=None, budget=None):
         job_id=job['id'];project=canonical(job['project'])
         with self.lock:
             facts=[dict(key=r[0],value=r[1],evidence=r[2],authority=r[3]) for r in self.db.execute(
@@ -450,9 +541,35 @@ class HandoffDB:
                 decisions.append(record['payload'])
             elif record['kind'] in ('scope_handoff', 'scope_transfer'):
                 decisions.append(record['payload'])
-        package={'reviewed_project_skills':self.released_skills(job['project'],job.get('goal','')),
-                 'skills_note':'利用者が確認した手順。今回の依頼と安全制約が優先。道具の利用権限を付与するものではない。',
-                 'enterprise_experience':self.experience(job['project'],job.get('goal','')),
+        skills=self.job_skills(job)
+        experience=self.experience(job['project'],job.get('goal',''))
+        evaluation=(job.get('evaluation') or {}).get('mode')
+        if evaluation:
+            # Effect measurement (改修②): only the reuse context is switched off. Records stay in the DB; safety
+            # rules, user decisions, current facts and the required handoff are unchanged.
+            if evaluation not in ('B','D'):
+                experience=dict(experience,items=[])
+            if evaluation not in ('C','D'):
+                skills=[]
+        budget=budget or {}
+        plan=None
+        if budget.get('mode') in ('shadow','on'):
+            kept_skills,kept_items,plan=self.reuse_budget(job.get('goal',''),skills,experience['items'],int(budget.get('reuse_chars',8000)))
+            plan['mode']=budget['mode']
+            if budget['mode']=='on':
+                skills,experience=kept_skills,dict(experience,items=kept_items)
+        if refs is not None:
+            refs['evaluation_mode']=evaluation
+            refs['budget']=plan
+            # Measurement (Phase 1): what reuse context was presented — ids and sizes only, never the text.
+            refs.update(experience=[digest(i['key'])[:16] for i in experience['items']],
+                        experience_chars=len(json.dumps(experience['items'],ensure_ascii=False)),
+                        skills=[{'id':i['id'][:16],'name':i['name'],'added_at_request':bool(i.get('added_at_request'))} for i in skills],
+                        skills_chars=len(json.dumps(skills,ensure_ascii=False)))
+        package={'reviewed_project_skills':skills,
+                 'skills_note':'利用者が確認した手順。今回の依頼と安全制約が優先。道具の利用権限を付与するものではない。'
+                     +('added_at_request=true は利用者が依頼時に候補へ追加したスキル。依頼に合う作業で使う。' if (job.get('skill_selection') or {}).get('ids') else ''),
+                 'enterprise_experience':experience,
                  'current_facts':facts,'earlier_user_decisions_in_same_project':list(project_memory.values()),
                  'earlier_decisions_note':'前の依頼での判断。現在の依頼に当てはまるか確認し、矛盾したら質問する。',
                  'user_decisions_and_approvals':decisions,
@@ -460,6 +577,8 @@ class HandoffDB:
                  'history_note':'古い版も専用DBに保持。ここには各タスクの最新版と判断履歴を提示。',
                  'project_handoff_reference':json.loads(file[0]) if file else None}
         text=json.dumps(package,ensure_ascii=False)
+        if refs is not None:
+            refs['context_chars']=len(text)
         if len(text)>150_000:
             from team_context_pages import write_pages
             project_root = Path(job['project']).resolve()

@@ -77,6 +77,34 @@ class NativeRuntimeTests(unittest.TestCase):
         process.proc.stdin = io.StringIO()
         return process
 
+    def test_read_only_roles_can_read_documents(self):
+        for role in ('planner', 'reviewer'):
+            ctx = self.context('claude', role)
+            self.assertIn('mcp__project_read__read_document', ctx.agent_definition.tools, role)
+            self.engine.active[ctx.task['id']] = ctx
+            try:
+                decision = self.engine.tool_request(ctx.token, {'task_id': ctx.task['id'], 'tool': 'mcp__project_read__read_document',
+                                                                'input': {'path': 'a.pdf'}})
+            finally:
+                self.engine.active.pop(ctx.task['id'], None)
+            self.assertTrue(decision['allow'], role)
+
+    def test_agents_md_is_the_shared_rule_source_for_every_provider(self):
+        from team_harness import CLAUDE_ROUTER
+        (self.root / 'AGENTS.md').write_text('# Rules\n\nPROJECT-RULE-CANARY\n', encoding='utf-8')
+        (self.root / 'CLAUDE.md').write_text(CLAUDE_ROUTER, encoding='utf-8')
+        self.engine.commands = dict(self.engine.commands, copilot=['copilot-fixture'])
+        for provider in ('codex', 'claude', 'copilot'):
+            text = self.engine._instructions(self.context(provider))
+            self.assertIn('PROJECT-RULE-CANARY', text, provider)
+            self.assertNotIn('@AGENTS.md', text, provider)
+        # A CLAUDE.md with Claude-only notes adds them on top of AGENTS.md (without the import line).
+        (self.root / 'CLAUDE.md').write_text('@AGENTS.md\n\nCLAUDE-ONLY-NOTE\n', encoding='utf-8')
+        text = self.engine._instructions(self.context('claude'))
+        self.assertIn('PROJECT-RULE-CANARY', text)
+        self.assertIn('CLAUDE-ONLY-NOTE', text)
+        self.assertNotIn('CLAUDE-ONLY-NOTE', self.engine._instructions(self.context('codex')))
+
     def test_codex_native_instructions_and_read_only_session(self):
         ctx = self.context()
         process = self.mock_process([

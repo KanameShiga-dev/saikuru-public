@@ -6,6 +6,43 @@ import time
 from pathlib import Path
 
 
+USAGE_LIMIT = re.compile(r"hit your [a-z0-9 -]*limit|usage limit|quota exceeded|rate[ _-]?limit", re.I)
+RESET_AT = re.compile(r'resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?', re.I)
+
+
+def usage_limit_retry_at(message, now_ts=None):
+    """2026-10-08: when a provider stops a run because a usage limit was reached, return when to try again
+    (the reported reset time + 5 minutes, or 30 minutes when no time is given), else None.
+    Example: "You've hit your session limit · resets 3pm (Asia/Tokyo)"."""
+    from datetime import datetime, timedelta
+    text = str(message or '')
+    if not USAGE_LIMIT.search(text):
+        return None
+    now_ts = time.time() if now_ts is None else now_ts
+    match = RESET_AT.search(text)
+    if not match:
+        return now_ts + 1800
+    hour, minute, half = int(match.group(1)), int(match.group(2) or 0), (match.group(3) or '').lower()
+    if half == 'pm' and hour < 12:
+        hour += 12
+    elif half == 'am' and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return now_ts + 1800
+    zone = None
+    if match.group(4):
+        try:
+            from zoneinfo import ZoneInfo
+            zone = ZoneInfo(match.group(4).strip())
+        except Exception:
+            zone = None  # no tz database on this PC: the PC's local time (Japan) is used
+    base = datetime.fromtimestamp(now_ts, zone) if zone else datetime.fromtimestamp(now_ts)
+    target = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target.timestamp() <= now_ts:
+        target += timedelta(days=1)
+    return min(target.timestamp() + 300, now_ts + 24 * 3600)
+
+
 def desktop_connection_state():
     """Read only the current session state, without account names or screen data."""
     import os
@@ -122,7 +159,7 @@ def advice(task, project):
                 + (' 現在、統括のWindows画面セッションも接続されていません。背景処理と実画面操作は条件が異なります。' if disconnected else ''),
             next_step='PCでWindowsにサインインし、画面のロックを解除して対象ゲームを表示してください。その後「原因を確認して回答案を作る」を押し、回答案から一度だけ再開してください。' if disconnected else
                 '下の回答案で一度だけ再開してください。再び拒否された場合は担当環境の許可反映が未解消なので、同じ再試行を繰り返さないでください。',
-            draft='対象はC:\\Projects\\bravia-New-Games\\builds\\pc-runtime-smoke\\BraveStrategyPcRuntimeSmoke.exeだけです。利用者はこのゲームの画面取得と検証のための操作を承認しています。'
+            draft='対象はC:\\AI_Work\\bravia-New-Games\\builds\\pc-runtime-smoke\\BraveStrategyPcRuntimeSmoke.exeだけです。利用者はこのゲームの画面取得と検証のための操作を承認しています。'
                 '既存のゲーム・隔離データ・証拠を保持し、再ビルド・再seedはしないでください。'
                 '最初に対象ウィンドウ1件を選択してComputer Useの取得・画面取得を確認し、成功した場合だけ未完了の実操作を続けてください。'
                 '拒否や画面取得失敗の場合は一度で停止し、操作名とエラーを報告してください。承認チェックの迂回や別手段の入力は禁止です。',

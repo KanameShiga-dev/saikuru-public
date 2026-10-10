@@ -97,3 +97,27 @@ def answers_for(questions, answers):
     if len(note) > 4000:
         raise ValueError('回答全体を4000文字以内に短くしてください。')
     return clean, note, native
+
+
+def review_checklist_note(checks, value):
+    """The user's verdict on a reviewer's checks (2026-10-08): which reported checks they approve, and what is
+    still missing. Added to the answer so the resumed reviewer works from the user's decision, not a guess."""
+    if not isinstance(value, dict) or set(value) - {'approved', 'instruction'}:
+        raise ValueError('レビュー確認結果の形式が不正です。')
+    approved, instruction = value.get('approved', []), value.get('instruction', '')
+    if (not isinstance(approved, list) or len(set(approved)) != len(approved)
+            or any(type(i) is not int or not 0 <= i < len(checks) for i in approved)):
+        raise ValueError('承認する確認項目の指定が不正です。')
+    if not isinstance(instruction, str) or len(instruction) > 1000:
+        raise ValueError('足りない確認・指示は1000文字以内で入力してください。')
+    chosen = set(approved)
+    lines = ['【利用者によるレビュー確認結果】']
+    ok = [str(checks[i])[:300] for i in approved]
+    rejected = [str(c)[:300] for i, c in enumerate(checks) if i not in chosen and str(c).startswith('確認')]
+    if ok:
+        lines += ['利用者が承認した確認：'] + ['- ' + c for c in ok]
+    if rejected:
+        lines += ['利用者が承認しなかった確認（根拠・範囲を見直すこと）：'] + ['- ' + c for c in rejected]
+    if instruction.strip():
+        lines += ['足りない確認・利用者の指示：', instruction.strip()]
+    return '\n'.join(lines)
