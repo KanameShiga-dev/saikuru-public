@@ -1,37 +1,19 @@
-"""Remove repeated retry text without inferring whether different orders agree."""
-import re
+"""Suppress an exact retry of the latest supplement; preserve instruction content."""
 
 
 MARKER = '\n利用者の補足: '
 
 
-def _units(text):
-    # Keep paths, code, enumerations and numbers intact. Japanese sentence
-    # boundaries and newlines are the only supported units of comparison.
-    return re.findall(r'[^。\n]+。?|\n+', text.replace('\r\n', '\n'))
-
-
 def compact_instruction(instruction, note=''):
-    blocks = str(instruction).split(MARKER)
-    if str(note).strip():
-        blocks.append(str(note).strip())
-    seen = set()
-    kept = []
-    for block in blocks:
-        pieces = []
-        for unit in _units(block):
-            if not unit.strip():
-                pieces.append(unit)
-                continue
-            key = ' '.join(unit.split())
-            if key in seen:
-                continue
-            seen.add(key)
-            pieces.append(unit)
-        value = ''.join(pieces).strip()
-        if value:
-            kept.append(value)
-    return MARKER.join(kept)
+    text, supplement = str(instruction), str(note)
+    if not supplement.strip():
+        return text
+    # Never normalize whitespace or deduplicate lines/sentences: indentation,
+    # table rows, scoped requirements and later reversals can all be significant.
+    # A nonconsecutive repeat may intentionally restore an earlier decision.
+    if MARKER in text and text.rsplit(MARKER, 1)[1] == supplement:
+        return text
+    return text + MARKER + supplement
 
 
 def instruction_revision(task, instruction, at, reason, note=''):

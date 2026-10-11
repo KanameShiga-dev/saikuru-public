@@ -20,6 +20,7 @@ ATTEMPT_FIELDS = ('job_id', 'task_id', 'role', 'agent', 'attempt', 'provider', '
                   'measurement', *TOKEN_KEYS, 'num_turns', 'duration_ms', 'tool_calls', 'experience_refs',
                   'skills_presented', 'skills_read', 'context_chars', 'saikuru_version', 'optimization_mode',
                   'evaluation_mode', 'budget_mode', 'reuse_chars_before', 'reuse_chars_after', 'experience_dropped',
+                  'quality_fallback', 'candidate_reuse_chars_after',
                   'started_at', 'finished_at')
 
 
@@ -43,6 +44,8 @@ def _attempt(task, run):
             'reuse_chars_before': (refs.get('budget') or {}).get('chars_before'),
             'reuse_chars_after': (refs.get('budget') or {}).get('chars_after'),
             'experience_dropped': (refs.get('budget') or {}).get('experience_dropped'),
+            'quality_fallback': (refs.get('budget') or {}).get('quality_fallback'),
+            'candidate_reuse_chars_after': (refs.get('budget') or {}).get('candidate_chars_after'),
             'started_at': run.get('started_at'), 'finished_at': run.get('finished_at')}
 
 

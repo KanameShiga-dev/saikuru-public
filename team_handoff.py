@@ -557,7 +557,21 @@ class HandoffDB:
             kept_skills,kept_items,plan=self.reuse_budget(job.get('goal',''),skills,experience['items'],int(budget.get('reuse_chars',8000)))
             plan['mode']=budget['mode']
             if budget['mode']=='on':
-                skills,experience=kept_skills,dict(experience,items=kept_items)
+                # Lexical matching/size cannot establish that omitted context is
+                # unnecessary. Until validated, preserve the already-selected
+                # reuse context whenever the candidate selection is lossy.
+                lossy = kept_skills != skills or kept_items != experience['items']
+                plan['quality_fallback'] = lossy
+                plan['candidate_chars_after'] = plan['chars_after']
+                plan['candidate_experience_dropped'] = plan['experience_dropped']
+                plan['candidate_skills_summarized'] = plan['skills_summarized']
+                if lossy:
+                    plan.update(chars_after=plan['chars_before'],
+                                experience_kept=len(experience['items']), experience_dropped=0,
+                                skills_summarized=0,
+                                quality_reason='Lossy reuse selection is not quality-validated; full context retained.')
+                else:
+                    skills,experience=kept_skills,dict(experience,items=kept_items)
         if refs is not None:
             refs['evaluation_mode']=evaluation
             refs['budget']=plan

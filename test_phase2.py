@@ -78,7 +78,7 @@ class EvaluationTests(unittest.TestCase):
         shadow = json.loads(self.engine.handoff.context(job, None, {}, {'mode': 'shadow', 'reuse_chars': 1000}))
         self.assertEqual(off['reviewed_project_skills'], shadow['reviewed_project_skills'])
         on = json.loads(self.engine.handoff.context(job, None, {}, {'mode': 'on', 'reuse_chars': 1000}))
-        self.assertTrue(on['reviewed_project_skills'][0].get('summary_only'))
+        self.assertEqual(off, on)  # Unvalidated lossy selection retains the full skill.
 
     def test_evaluation_rules(self):
         with self.assertRaises(ValueError):
