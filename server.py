@@ -523,6 +523,18 @@ class Handler(BaseHTTPRequestHandler):
                 from team_dlp import require_clean_input
                 found = require_clean_input(str(body.get('title', '')) + '\n' + str(body.get('goal', '')),
                                             body.get('sensitive_confirmed') is True, '依頼名・依頼内容')
+                route = body.get('route', 'full')
+                if route not in ('full', 'light_eval'):
+                    raise ValueError('実行経路の指定が不正です。')
+                if route == 'light_eval':
+                    gate = self.app.config.get('routing_evaluation') or {}
+                    root = Path(str(gate.get('root') or '')).resolve()
+                    if (gate.get('enabled') is not True or not root.is_dir()
+                            or self.app.store.directory.resolve().parent != root
+                            or Path(str(body.get('project') or '')).resolve().parent != root):
+                        raise ValueError('軽い経路は分離した評価環境だけで利用できます。')
+                if route == 'light_eval' and found['confirm']:
+                    raise ValueError('軽い経路の評価に個人情報・機密情報の確認が必要な入力は使えません。')
                 goal, document = str(body.get('goal', '')), {}
                 if body.get('kind') == 'documentation':
                     # 資料作成: the chosen folder is both the read source and the save folder; document tools only.
@@ -559,6 +571,8 @@ class Handler(BaseHTTPRequestHandler):
                                             evaluation_mode=body.get('evaluation_mode') or None,
                                             evaluation_confirmed=body.get('evaluation_confirmed') is True,
                                             role_profiles=role_profiles, token_reduction=side, comparison_id=comparison_id,
+                                            route=route, light_scope_file=body.get('light_scope_file'),
+                                            light_acceptance=body.get('light_acceptance'),
                                             **document)
                     self.app.store.event('new_request_harness', ' '.join(prepared), job_id=job['id'])
                     if found['confirm']:
@@ -578,6 +592,10 @@ class Handler(BaseHTTPRequestHandler):
                 engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'),
                               body.get('review_checklist'))
                 result = {'ok': True}
+            elif path == '/api/completion/evidence':
+                result = engine.record_completion_evidence(
+                    str(body.get('approval_id', '')), body.get('item_index'),
+                    body.get('check_index'), body.get('evidence'), body.get('confirmed'))
             elif path == '/api/jobs/accept-without-fix':
                 if body.get('confirmed') is not True:
                     raise ValueError('修正せずに受け入れへ進めることを確認してください。')

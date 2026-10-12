@@ -517,7 +517,8 @@ class HandoffDB:
             self.db.execute('INSERT OR REPLACE INTO skill_active VALUES (?,?,?,1)',
                 (canonical(target_project),item['name'],version_id))
 
-    def context(self, job, allowed_files=None, refs=None, budget=None, references=None):
+    def context(self, job, allowed_files=None, refs=None, budget=None, references=None,
+                review_task_id=None, review_instruction=None, review_context_mode='off'):
         job_id=job['id'];project=canonical(job['project'])
         with self.lock:
             facts=[dict(key=r[0],value=r[1],evidence=r[2],authority=r[3]) for r in self.db.execute(
@@ -590,6 +591,17 @@ class HandoffDB:
                  'latest_task_instructions':latest_instructions,'latest_task_reports':latest_reports,
                  'history_note':'古い版も専用DBに保持。ここには各タスクの最新版と判断履歴を提示。',
                  'project_handoff_reference':json.loads(file[0]) if file else None}
+        if review_task_id is not None and review_instruction is not None and review_context_mode in ('shadow', 'on'):
+            from team_review_context import without_own_instruction
+            compact, removed = without_own_instruction(package, review_task_id, review_instruction)
+            if refs is not None:
+                refs['review_context'] = {'mode': review_context_mode,
+                    'duplicate_instruction_chars': removed,
+                    'full_package_chars': len(json.dumps(package, ensure_ascii=False)),
+                    'candidate_package_chars': len(json.dumps(compact, ensure_ascii=False)),
+                    'metric': 'characters, not provider tokens'}
+            if review_context_mode == 'on':
+                package = compact
         text=json.dumps(package,ensure_ascii=False)
         if references is not None and file:
             # Reference-only field for the image optimisation measurement (team_context_optimizer); read-only use.

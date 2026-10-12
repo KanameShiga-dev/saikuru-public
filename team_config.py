@@ -86,6 +86,7 @@ def default_config():
                           'min_chars': 2400, 'max_chars': 16000, 'timeout_seconds': 30},
         'max_parallel_projects': 2,
         'security_review': 'always',
+        'review_context_mode': 'off',
         'document_review_relaxed': False,
         'task_timeout_seconds': 1800,
         'approval_timeout_seconds': 900,
@@ -131,10 +132,27 @@ def validate_config(config):
         raise ValueError('判断設定が不正です。現在は安全評価中のためシャドーモードのみ対応します。')
     if config.get('schema_version') != 1:
         raise ValueError('未対応の設定形式です。')
+    route_eval = config.get('routing_evaluation')
+    if route_eval is not None:
+        if (not isinstance(route_eval, dict) or set(route_eval) != {'enabled', 'root'}
+                or type(route_eval['enabled']) is not bool or not isinstance(route_eval['root'], str)):
+            raise ValueError('軽い経路の評価設定が不正です。')
+        if route_eval['enabled'] and (not Path(route_eval['root']).is_absolute()
+                                      or not Path(route_eval['root']).is_dir()):
+            raise ValueError('軽い経路の評価ルートは既存の絶対パスが必要です。')
+        if route_eval['enabled']:
+            root = Path(route_eval['root']).resolve()
+            if ROOT.resolve().is_relative_to(root) or root == (ROOT / 'data').resolve():
+                raise ValueError('軽い経路の評価ルートに通常サービスのフォルダは使えません。')
     if type(config.get('automatic_operations', False)) is not bool:
         raise ValueError('操作自動承認の設定は真偽値で指定してください。')
     if type(config.get('document_review_relaxed', False)) is not bool:
         raise ValueError('document_review_relaxed は真偽値を指定してください。')
+    review_context_mode = config.get('review_context_mode', 'off')
+    if review_context_mode not in ('off', 'shadow', 'on'):
+        raise ValueError('レビュー文脈の評価モードが不正です。')
+    if review_context_mode != 'off' and not (route_eval and route_eval['enabled']):
+        raise ValueError('レビュー文脈の比較は隔離評価ルートでだけ有効にできます。')
     if config.get('security_review', 'always') not in ('always', 'planner'):
         raise ValueError('security_review は always または planner を指定してください。')
     if type(config.get('computer_use_allowed', False)) is not bool:

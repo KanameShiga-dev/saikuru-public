@@ -9,6 +9,7 @@ Quota windows (team_usage.py) are a different measure and are not part of this r
 """
 import csv
 import json
+from collections import Counter
 from contextlib import closing
 import sqlite3
 from pathlib import Path
@@ -108,17 +109,53 @@ def _total(rows):
     return out
 
 
+def _outcomes(ids, jobs, rows):
+    """Count acceptance states separately; cost ratios need complete usage."""
+    ids = set(ids)
+    selected = [r for r in rows if r['job_id'] in ids]
+    total = _total(selected)
+    statuses = Counter(jobs[j].get('status', 'unknown') for j in ids)
+    ordinary = statuses['accepted']
+    conditional = statuses['accepted_with_pending_checks']
+    # A partial value is only a measured lower bound. Historical accepted jobs
+    # without any recorded run cannot support a cost-per-acceptance claim.
+    recorded_jobs = {r['job_id'] for r in selected}
+    complete = bool(selected) and all(r['measurement'] == 'final'
+                                      and isinstance(r.get('input_total'), int)
+                                      and isinstance(r.get('output'), int) for r in selected)
+    complete = complete and all(j in recorded_jobs for j in ids if jobs[j].get('status') == 'accepted')
+    def per_ordinary(key):
+        if not complete or not ordinary or any(not isinstance(r.get(key), int) for r in selected):
+            return None
+        return round(sum(r[key] for r in selected) / ordinary)
+    return dict(total, jobs=len(ids), job_statuses=dict(sorted(statuses.items())),
+                accepted_jobs=ordinary, conditional_accepted_jobs=conditional,
+                acceptance_rate=round(ordinary / len(ids), 3) if ids else None,
+                conditional_acceptance_rate=round(conditional / len(ids), 3) if ids else None,
+                complete_usage=complete,
+                input_total_per_accepted=per_ordinary('input_total'),
+                output_per_accepted=per_ordinary('output'),
+                weighted_per_accepted=per_ordinary('weighted'))
+
+
 def report(database):
     rows, jobs, approvals = attempts(database)
     by = lambda key: {name: _total([r for r in rows if key(r) == name]) for name in sorted({str(key(r)) for r in rows})}
     per_job = {}
-    for job_id in sorted({r['job_id'] for r in rows}):
+    for job_id in sorted(jobs):
         job_rows = [r for r in rows if r['job_id'] == job_id]
         job = jobs.get(job_id, {})
+        completions = [a for a in approvals if a.get('job_id') == job_id and a.get('kind') == 'completion']
+        latest_completion = completions[-1].get('payload') or {} if completions else {}
         waits = [a['decided_at'] - a['created_at'] for a in approvals
                  if a.get('job_id') == job_id and isinstance(a.get('decided_at'), (int, float)) and isinstance(a.get('created_at'), (int, float))]
         per_job[job_id] = dict(_total(job_rows), title=str(job.get('title', ''))[:80], job_status=job.get('status'),
-                               accepted=job.get('status') in ('accepted', 'accepted_with_pending_checks'),
+                               route=job.get('route', 'full'),
+                               accepted=job.get('status') == 'accepted',
+                               conditional_accepted=job.get('status') == 'accepted_with_pending_checks',
+                               pending_checks=sum(len(item.get('checks') or []) for item in latest_completion.get('pending_items') or []),
+                               review_findings=len(latest_completion.get('review_findings') or []),
+                               rework_count=job.get('rework_count', 0),
                                tasks=len({r['task_id'] for r in job_rows}),
                                retry_attempts=len(job_rows) - len({r['task_id'] for r in job_rows}),
                                failed_or_cancelled=_total([r for r in job_rows if r['status'] in ('failed', 'cancelled')]),
@@ -126,15 +163,9 @@ def report(database):
     evaluation = {}
     for mode in ('A', 'B', 'C', 'D'):
         ids = [j for j, job in jobs.items() if (job.get('evaluation') or {}).get('mode') == mode]
-        mode_rows = [r for r in rows if r['job_id'] in ids]
-        accepted = [j for j in ids if jobs[j].get('status') in ('accepted', 'accepted_with_pending_checks')]
-        total = _total(mode_rows)
-        evaluation[mode] = dict(total, jobs=len(ids), accepted_jobs=len(accepted),
-                                acceptance_rate=round(len(accepted) / len(ids), 3) if ids else None,
-                                # Main KPI: cloud usage per accepted deliverable, failures and retries included.
-                                input_total_per_accepted=round(total['input_total'] / len(accepted)) if accepted and total['input_total'] is not None else None,
-                                output_per_accepted=round(total['output'] / len(accepted)) if accepted and total['output'] is not None else None,
-                                weighted_per_accepted=round(total['weighted'] / len(accepted)) if accepted and total['weighted'] is not None else None)
+        evaluation[mode] = _outcomes(ids, jobs, rows)
+    routes = {route: _outcomes([j for j, job in jobs.items() if job.get('route', 'full') == route], jobs, rows)
+              for route in sorted({job.get('route', 'full') for job in jobs.values()})}
     shadow = [r for r in rows if r['budget_mode'] in ('shadow', 'on') and isinstance(r['reuse_chars_before'], int)]
     budget = {'attempts': len(shadow),
               'reuse_chars_before': sum(r['reuse_chars_before'] for r in shadow) if shadow else None,
@@ -143,6 +174,7 @@ def report(database):
               'unit': 'characters of reuse context (not tokens)'}
     return {'overall': _total(rows),
             'evaluation_modes': evaluation,
+            'by_route': routes,
             'context_budget': budget,
             'by_provider_model': by(lambda r: str(r['provider']) + '/' + str(r['model'])),
             'by_status': by(lambda r: r['status']),
@@ -152,10 +184,14 @@ def report(database):
             'limitations': [
                 '集計は測定できた試行（final/partial）だけの合計。unknown の試行は0として数えず件数だけ示す。',
                 'partial は最終集計が届かなかった試行（失敗・中止）で、途中までの呼び出しごとの値の合計。',
+                'accepted_jobs は通常受領のみ。conditional_accepted_jobs は未確認事項を残した条件付き受領で、成功単価の分母へ入れない。',
+                '単価は全試行の input_total/output が final で、通常受領した依頼にも試行記録がある場合だけ算出する。partial/unknown があれば取得済み合計は下限で、単価は None。',
+                'このDBは独立採点の合否を保持しない。per_accepted は通常受領1件あたりであり、独立採点合格1件あたりの主指標ではない。',
+                'by_route は経路別の記述統計。課題・モデル・受入条件が異なる依頼を混ぜた値から経路の因果効果を主張しない。',
                 'Phase 1 より前の試行は、トークン以外（ツール呼び出し・参照した経験/Skill・版）が記録されていない（None）。',
                 'approval_wait_seconds は承認の待ち時間であり、人の実作業時間ではない（実作業時間は未測定）。',
                 '利用枠（%）は別の指標で、このレポートには含めない。',
-                '削減効果は evaluation_modes（同じ課題・同じ受入条件で A〜D を比べた試験）からだけ判断する。普段の依頼の合計からは主張しない。',
+                'プロンプト文脈の削減率は同じ依頼・元の指示・担当・モデル・版・修正回の個別タスク対の first_call_input から判断する。タスク総量と evaluation_modes の総量・受入率は副指標。普段の依頼の合計から削減効果を主張しない。',
                 'context_budget の SHADOW 値は「減らしていたら減った文字数」の見込みで、トークンの実測ではない。',
                 'Copilot のトークンは CLI の利用統計ファイルの値（inputTokens はキャッシュの読み書きを含む）。2026-10-09 より前の Copilot の試行は unknown。',
                 'weighted は料金に近い重みつきの量（キャッシュなし入力1・読み込み0.1・書き込み1.25・出力5）。提供元の数え方そのものではない。',

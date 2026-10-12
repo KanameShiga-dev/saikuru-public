@@ -524,9 +524,24 @@ class Context:
 
         self.check()
 
-        if self.engine.config.get('automatic_operations') is True and not payload.get('force_manual') and payload.get('operation') != 'question' and not payload.get('questions'):
+        job = self.engine.store.get(self.task['job_id'], 'job')
+        route_eval = self.engine.config.get('routing_evaluation') or {}
+        if route_eval.get('enabled') is True and Path(self.project).resolve().is_relative_to(Path(route_eval['root']).resolve()):
+            operation = payload.get('operation')
+            if operation == 'item/commandExecution/requestApproval' and not auto_read_reason(payload, self.project):
+                return {'allow': False, 'note': '経路比較中は変更を伴うコマンドを禁止しています。'}
+            if job.get('route') == 'light_eval' and operation == 'item/fileChange/requestApproval':
+                changes = payload.get('fileChanges')
+                target = (Path(self.project) / job['light_scope_file']).resolve()
+                if (not isinstance(changes, list) or len(changes) != 1
+                        or not isinstance(changes[0], dict)
+                        or not isinstance(changes[0].get('path'), str)
+                        or (changes[0].get('kind') or {}).get('type') != 'update'
+                        or (payload.get('details') or {}).get('grantRoot')
+                        or (Path(self.project) / changes[0]['path']).resolve() != target):
+                    return {'allow': False, 'note': '軽い経路の評価では指定された単一ファイル以外を編集できません。'}
 
-            job = self.engine.store.get(self.task['job_id'], 'job')
+        if self.engine.config.get('automatic_operations') is True and not payload.get('force_manual') and payload.get('operation') != 'question' and not payload.get('questions'):
 
             if job['status'] in ('cancelled', 'interrupted'):
 
@@ -968,7 +983,7 @@ class Engine:
 
     def create_job(self, title, goal, project, auto_execute, planner_profile=None, document_source=None, attachment_ids=None, document_format=None,
                    skill_mode='auto', skill_ids=None, evaluation_mode=None, evaluation_confirmed=False, role_profiles=None,
-                   token_reduction=None, comparison_id=None):
+                   token_reduction=None, comparison_id=None, route='full', light_scope_file=None, light_acceptance=None):
 
         skill_selection = self._skill_selection(skill_mode, skill_ids)
         if token_reduction not in (None, 'on', 'off') or (comparison_id is not None and not token_reduction):
@@ -1000,6 +1015,31 @@ class Engine:
 
             raise ValueError('対象フォルダが見つかりません。')
 
+        if route not in ('full', 'light_eval'):
+            raise ValueError('実行経路の指定が不正です。')
+        if route == 'light_eval':
+            gate = self.config.get('routing_evaluation') or {}
+            root = Path(str(gate.get('root') or '')).resolve()
+            scope = Path(str(light_scope_file or ''))
+            if (gate.get('enabled') is not True or not root.is_dir()
+                    or self.store.directory.resolve().parent != root
+                    or Path(project).resolve().parent != root):
+                raise ValueError('軽い経路は分離した評価環境だけで利用できます。')
+            if (auto_execute is not True or evaluation_mode != 'A' or evaluation_confirmed is not True
+                    or self.config.get('security_review', 'always') != 'always'
+                    or self.config.get('document_review_relaxed') is True or document_source or document_format
+                    or attachment_ids or token_reduction or comparison_id or skill_selection['ids']
+                    or skill_selection['mode'] != 'auto'):
+                raise ValueError('軽い経路は架空の単一開発課題・自動実行・全件セキュリティレビューでのみ利用できます。')
+            if (scope.is_absolute() or not scope.parts or '..' in scope.parts
+                    or scope.suffix != '.py' or len(scope.parts) != 1
+                    or not isinstance(light_acceptance, str) or not 10 <= len(light_acceptance.strip()) <= 2000):
+                raise ValueError('軽い経路では単一のPython対象ファイルと具体的な合格条件を指定してください。')
+            target = Path(project) / scope
+            if (not target.is_file() or target.is_symlink()
+                    or not target.resolve().is_relative_to(Path(project).resolve())):
+                raise ValueError('軽い経路の対象ファイルが見つかりません。')
+
         from team_attachments import Attachments
         attachment_ids = [a['id'] for a in Attachments(self.store).select(attachment_ids)]
         from team_instruction_health import inspect_instructions
@@ -1024,7 +1064,7 @@ class Engine:
                 'instruction_health': instruction_health,
                 'request_origin': 'new',
 
-                'status': 'planning', 'created_at': now()})
+                'route': route, 'status': 'running' if route == 'light_eval' else 'planning', 'created_at': now()})
 
             self.store.update(job['id'], intake_classification=intake, skill_selection=skill_selection, evaluation=evaluation)
             job['evaluation'] = evaluation
@@ -1055,7 +1095,17 @@ class Engine:
 
                 self.store.update(job['id'], role_overrides=job['role_overrides'])
 
-            self.new_task(job, '作業計画を作る', goal, 'planner')
+            if route == 'light_eval':
+                instruction = ('評価用の単一対象ファイル ' + scope.as_posix() + ' だけを変更する。'
+                               '他のファイルの変更、外部送信、削除、権限・認証・設定変更は行わない。'
+                               '合格条件：' + light_acceptance.strip() + '\n元の依頼：' + goal)
+                builder = self.new_task(job, '指定された単一ファイルを修正する', instruction, 'builder')
+                self.store.update(job['id'], light_scope_file=scope.as_posix(),
+                                  light_acceptance=light_acceptance.strip(), security_review_required=True)
+                self._queue_reviews(job, builder['id'])
+                self.store.event('light_route_eval', '分離評価用の軽い経路を明示選択しました。', job_id=job['id'])
+            else:
+                self.new_task(job, '作業計画を作る', goal, 'planner')
 
             self.store.event('job_created', '依頼を受け付けました。', job_id=job['id'])
 
@@ -1131,6 +1181,65 @@ class Engine:
         self.store.event('approval_required', '判断を待っています。', task['id'], task['job_id'])
 
         return approval
+
+    def record_completion_evidence(self, approval_id, item_index, check_index, evidence, confirmed):
+        """Record a user's verification and require a fresh completion decision."""
+        if type(item_index) is not int or type(check_index) is not int:
+            raise ValueError('確認項目の指定が不正です。')
+        if confirmed is not True:
+            raise ValueError('検証を実施して結果を確認した場合だけ記録してください。')
+        if not isinstance(evidence, str) or not 1 <= len(evidence.strip()) <= 2000:
+            raise ValueError('確認した根拠を1〜2000文字で記入してください。')
+        from team_dlp import scan_input
+        if any(scan_input(evidence).values()):
+            raise ValueError('検証根拠には認証情報・個人情報・機密名を記録せず、確認できる場所や結果だけを書いてください。')
+        with self.store.atomic():
+            approval = self.store.get(approval_id, 'approval')
+            if approval['kind'] != 'completion':
+                raise ValueError('成果確認の対象を選んでください。')
+            job = self.store.get(approval['job_id'], 'job')
+            task = self.store.get(approval['task_id'], 'task')
+            completions = [a for a in self.store.all('approval')
+                           if a['job_id'] == job['id'] and a['kind'] == 'completion']
+            if not completions or completions[-1]['id'] != approval_id:
+                raise ValueError('この受領判断は古くなりました。最新の内容を開いてください。')
+            if not ((job['status'] == 'awaiting_acceptance' and approval['status'] == 'pending')
+                    or (job['status'] == 'accepted_with_pending_checks' and approval['status'] == 'approved')):
+                raise ValueError('現在の受領状態では証拠を追加できません。')
+            if any(a['job_id'] == job['id'] and a['status'] == 'pending' and a['id'] != approval_id
+                   for a in self.store.all('approval')):
+                raise ValueError('ほかの判断待ちを先に解消してください。')
+            if any(t['job_id'] == job['id'] and t['status'] in ('queued', 'running', 'awaiting_approval')
+                   for t in self.store.all('task')):
+                raise ValueError('実行中の担当が終わってから証拠を追加してください。')
+            payload = copy.deepcopy(approval['payload'])
+            items = payload.get('pending_items') or []
+            if not 0 <= item_index < len(items):
+                raise ValueError('確認項目が見つかりません。')
+            checks = items[item_index].get('checks') or []
+            if not 0 <= check_index < len(checks):
+                raise ValueError('確認項目が見つかりません。')
+            check = checks.pop(check_index)
+            title = items[item_index].get('title', '')
+            if not checks:
+                items.pop(item_index)
+            payload['pending_items'] = items
+            payload.setdefault('resolved_checks', []).append({
+                'title': title, 'check': check, 'evidence': evidence.strip(),
+                'authority': 'user_confirmed', 'confirmed_at': now(),
+                'source_approval_id': approval_id,
+            })
+            payload['note'] = (payload.get('note', '') + ' 後から提出された検証根拠があります。'
+                               '確認済み項目と残る未確認事項を見て、成果を改めて受領してください。')
+            if approval['status'] == 'pending':
+                self.store.update(approval_id, status='superseded',
+                                  note='検証根拠の追加により受領判断を更新しました。', decided_at=now())
+            self.store.update(job['id'], status='awaiting_acceptance')
+            replacement = self.new_approval(task, 'completion', payload)
+            self.store.event('completion_evidence_recorded',
+                             '利用者が未確認項目の検証根拠を記録しました。成果の再受領を待っています。',
+                             task['id'], job['id'])
+            return {'ok': True, 'approval_id': replacement['id']}
 
 
 
@@ -1268,9 +1377,14 @@ class Engine:
 
                         raise ValueError('引き継ぎ情報の矛盾を先に解消してください。')
 
-                    has_pending = (bool(approval.get('payload', {}).get('review_findings'))
-                                   or bool(approval.get('payload', {}).get('pending_items'))
-                                   or any(t['job_id'] == job['id'] and t['status'] == 'handed_off' for t in self.store.all('task')))
+                    completion_payload = approval.get('payload', {})
+                    # Current approvals carry every handed-off check in pending_items.
+                    # Preserve the legacy fallback only for approvals made before that field existed.
+                    legacy_handoff = ('pending_items' not in completion_payload
+                                      and any(t['job_id'] == job['id'] and t['status'] == 'handed_off'
+                                              for t in self.store.all('task')))
+                    has_pending = (bool(completion_payload.get('review_findings'))
+                                   or bool(completion_payload.get('pending_items')) or legacy_handoff)
 
                     if allow:
                         self.store.update(job['id'], status='accepted_with_pending_checks' if has_pending else 'accepted')
@@ -1564,6 +1678,8 @@ class Engine:
     def _instructions(self, ctx):
 
         job = self.store.get(ctx.task['job_id'], 'job')
+        from team_review_context import evaluation_mode_for_job
+        review_context_mode = evaluation_mode_for_job(self.config, job) if ctx.task['role'] == 'reviewer' else 'off'
 
         intake = job.get('intake_classification')
         if intake and ctx.task['role'] == 'planner':
@@ -1673,7 +1789,10 @@ class Engine:
             + '\n範囲が指定されている場合、その判断を後続担当にも適用する。後回しとされた検証だけが残る場合は質問を繰り返さず、status=handoffで未実施項目をchecksとsummaryに明記する。新しい障害や範囲外の判断はblockedで質問する。handoffは合格や元の依頼全体の完了を意味しない。\n'
 
             + '\n\n引き継ぎDBの最新情報と履歴（出典・検証状態を確認）:\n' + self.handoff.context(job, ctx.context_files, ctx.context_refs, context_budget(self.config),
-                                                                                      ctx.reference_candidates))
+                                                                                      ctx.reference_candidates,
+                                                                                      review_task_id=ctx.task['id'] if ctx.task['role'] == 'reviewer' else None,
+                                                                                      review_instruction=ctx.task['instruction'] if ctx.task['role'] == 'reviewer' else None,
+                                                                                      review_context_mode=review_context_mode))
 
 
 
@@ -2939,6 +3058,14 @@ class Engine:
 
         if tool == 'Bash':
 
+            route_eval = self.config.get('routing_evaluation') or {}
+            if route_eval.get('enabled') is True and Path(ctx.project).resolve().is_relative_to(Path(route_eval['root']).resolve()):
+                # Apply the same command boundary to both evaluation arms. Read commands are considered below.
+                read_reason = auto_read_reason({'source': source, 'operation': tool, 'details': data,
+                                                'cwd': body.get('cwd', '')}, ctx.project)
+                if not read_reason:
+                    return {'allow': False, 'note': '経路比較中はコマンドによる変更を禁止しています。編集ツールを使ってください。'}
+
             # Keep the command for the security review (auto-approval otherwise leaves no trace of it).
             from team_web_guard import operation_summary
             self.store.event('operation_bash', operation_summary(data.get('command', '')), ctx.task['id'], ctx.task['job_id'])
@@ -3059,6 +3186,10 @@ class Engine:
                 candidate = Path(ctx.project) / candidate
 
             target = candidate.resolve()
+
+            job = self.store.get(ctx.task['job_id'])
+            if job.get('route') == 'light_eval' and target != (Path(ctx.project) / job['light_scope_file']).resolve():
+                return {'allow': False, 'note': '軽い経路の評価では指定された単一ファイル以外を編集できません。'}
 
             if str(target) in ctx.context_files:
 

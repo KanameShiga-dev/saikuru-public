@@ -379,7 +379,28 @@ function reportText(result){
   if(result.note)text+='\n\n'+result.note;
   if(result.review_findings?.length)text+='\n\nレビュー指摘（未修正。受け入れるか差し戻すかを決めてください）:\n'+result.review_findings.map(f=>`・${f.reviewer}：${f.summary}`).join('\n');
   if(result.pending_items?.length)text+='\n\n未完了として残す項目（合格・全体完了ではありません）:\n'+result.pending_items.map(item=>`${item.title}\n${item.note}\n${item.checks.join('\n')}`).join('\n\n');
+  if(result.resolved_checks?.length)text+='\n\n利用者が後から確認した検証（AIの再検証ではありません）:\n'+result.resolved_checks.map(item=>`${item.title}\n${item.check}\n根拠: ${item.evidence}\n確認日時: ${date(item.confirmed_at)}`).join('\n\n');
   return text;
+}
+function completionEvidenceForm(approval){
+  const choices=[];
+  (approval.payload.pending_items||[]).forEach((item,itemIndex)=>(item.checks||[]).forEach((check,checkIndex)=>choices.push({itemIndex,checkIndex,label:`${item.title}：${check}`})));
+  if(!choices.length)return null;
+  const form=el('form',undefined,'detail-section'),select=el('select'),evidence=el('textarea'),confirmed=el('input'),message=el('p','','hint');
+  choices.forEach((choice,index)=>{const option=el('option',choice.label);option.value=String(index);select.append(option);});
+  evidence.required=true;evidence.maxLength=2000;evidence.rows=3;
+  evidence.placeholder='実施日時、対象、方法、結果、確認できる場所など。秘密情報は入力しないでください。';
+  confirmed.type='checkbox';confirmed.required=true;
+  const targetLabel=el('label','根拠を追加する未確認項目');targetLabel.append(select);
+  const evidenceLabel=el('label','人が確認した検証根拠');evidenceLabel.append(evidence);
+  const confirmLabel=el('label',undefined,'check');confirmLabel.append(confirmed,document.createTextNode('この検証を実施し、結果と根拠を確認しました。'));
+  const submit=el('button','根拠を記録して受領判断を更新','primary');submit.type='submit';message.setAttribute('role','status');
+  form.append(el('h4','後から確認した検証を記録'),el('p','項目ごとに記録します。記録後も成果は自動で通常受領にならず、更新された内容を改めて受領します。AIの再検証ではありません。','hint'),targetLabel,evidenceLabel,confirmLabel,message,submit);
+  form.addEventListener('submit',async event=>{event.preventDefault();if(submit.disabled)return;submit.disabled=true;
+    const choice=choices[Number(select.value)];
+    try{await api('/api/completion/evidence',{approval_id:approval.id,item_index:choice.itemIndex,check_index:choice.checkIndex,evidence:evidence.value,confirmed:confirmed.checked});await refresh();}
+    catch(error){message.textContent=error.message;}finally{submit.disabled=false;}});
+  return form;
 }
 async function showHandoffHistory(jobId,container,before){
   try{
@@ -800,6 +821,12 @@ function renderDetail(task,version) {
   }
   else if(task.summary)body.append(section('状況',task.summary));
   if(endedJob(task))body.append(el('p','この依頼は終了しています。以下の報告と判断は過去の履歴です。現在の回答は不要です。','hint'));
+  if(job.status==='accepted_with_pending_checks'){
+    const latest=state.approvals.filter(a=>a.job_id===job.id&&a.kind==='completion').at(-1);
+    if(latest?.task_id===task.id&&latest.status==='approved'){
+      const evidenceForm=completionEvidenceForm(latest);if(evidenceForm)body.append(evidenceForm);
+    }
+  }
   if(task.handoff_note)body.append(section('引き継ぎ範囲・未完了項目',task.handoff_note));
   if(task.auto_return){const p=state.config.profiles[state.config.roles[task.role]];
     body.append(section('一時モデル・自動復帰',`通常: ${p.adapter} / ${p.model} / ${p.effort}\n現在: ${task.profile.adapter} / ${task.profile.model}\n利用枠の取得値が新しく、短期・週間・該当する専用枠が各10％以上なら、実行前に通常モデルへ戻します。不明な間は復帰しません。実行中の担当は継続します。`));}
@@ -820,7 +847,10 @@ function renderDetail(task,version) {
     const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='plan'?'作業計画を承認':a.kind==='completion'?'成果を確認して受け入れる':'操作の承認'));
     if(a.kind==='tool'&&a.payload?.guard)box.append(el('p','送信の防御：'+a.payload.guard.label+'。'+a.payload.guard.note+' 送信先・送る内容・依頼に必要かを確認してから許可してください。','notice'));
     box.append(el('div',a.kind==='tool'?JSON.stringify(a.payload,null,2):reportText(a.payload),'text-block'));
-    if(a.kind==='completion')box.append(previewPanel(job));
+    if(a.kind==='completion'){
+      box.append(previewPanel(job));
+      const evidenceForm=completionEvidenceForm(a);if(evidenceForm)box.append(evidenceForm);
+    }
     const input=el('textarea');input.id='note-'+a.id;input.rows=3;input.placeholder='回答・判断の理由（任意）';input.setAttribute('aria-label','承認または拒否の補足');input.value=drafts[input.id]||'';
     box.append(el('p',a.kind==='tool'?'この操作1回だけに適用されます。期限: '+date(a.expires_at):a.kind==='completion'?'内容を確認して受け入れるか拒否してください。拒否する場合は理由・指摘を入力すると、その指摘で修正担当とレビューが自動で再開します（理由なしの拒否は停止）。':'内容を確認して承認または拒否してください。','hint'),input);
     const actions=el('div',undefined,'actions');
@@ -864,7 +894,7 @@ function renderDetail(task,version) {
 }
 // 2026-10-08 カードを開くたびに折りたたみを初期状態（停止理由を開く）から始める。以前の開閉を引き継ぐと、停止後も閉じたままになっていた。
 function openTask(id){selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
-async function refresh(){try{state=await api('/api/state');render();notifyDecisions();}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
+async function refresh(){try{state=await api('/api/state');render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
 const decisionNotificationObjects=new Map(),decisionPopupObjects=new Map();
 let seenDecisions=new Set();
 try{seenDecisions=new Set(JSON.parse(localStorage.getItem('agent-team-decision-seen')||'[]'));}catch(error){}
@@ -1084,6 +1114,9 @@ $('job-template')?.addEventListener('click',()=>{const goal=$('job-goal');if(goa
 const DOCUMENT_REQUEST=/PowerPoint|PPTX|パワポ|スライド|プレゼン|説明資料|報告書|Word|DOCX|Excel|XLSX|PDF|動画|MP4|チラシ|ポスター/i;
 const syncJobKind=()=>{const docs=$('job-kind').value==='documentation';$('job-document').hidden=!docs;$('job-document-format').required=docs;};
 $('job-kind').addEventListener('change',syncJobKind);
+const routingBox=document.createElement('details');routingBox.id='job-routing-eval';routingBox.hidden=true;
+routingBox.innerHTML='<summary>分離環境で経路を比較する</summary><p class="hint">架空の単一Pythonファイルだけが対象です。通常サービスでは使えません。</p><label>実行経路<select name="route" id="job-route"><option value="full">通常経路</option><option value="light_eval">軽い経路（計画AIのみ省略）</option></select></label><label>変更してよいPythonファイル<input name="light_scope_file" id="job-light-scope" placeholder="例：calculator.py"></label><label>独立した合格条件<textarea name="light_acceptance" id="job-light-acceptance" rows="3" placeholder="例：既存の単体テストをすべて通し、負数の合計も正しく返す"></textarea></label><p class="hint">軽い経路には自動実行、検証モードA、検証用データの確認が必要です。添付・資料作成は使えません。</p>';
+$('job-attachments').before(routingBox);
 // 2026-10-08 依頼フォームの点検：「計画を開始する」で問題があれば、どの項目に不備があるかと解消方法をボタンの上に示す。
 // ブラウザ標準の必須チェックは、閉じた欄の項目だと何も表示されないことがあるため使わず、ここでまとめて点検する。
 const jobFields={
@@ -1094,6 +1127,7 @@ const jobFields={
   skills:{label:'スキルをプロジェクトに追加して候補にする',el:()=>$('job-skills')},
   evaluation:{label:'効果検証（検証モード）',el:()=>$('job-evaluation-mode'),open:()=>{$('job-evaluation').open=true;}},
   attachments:{label:'参考ファイルを添付',el:()=>$('job-attachments')},
+  route:{label:'軽い経路の評価',el:()=>$('job-route'),open:()=>{routingBox.open=true;}},
   consent:{label:'AIへの送信の確認',el:()=>$('job-form').elements.consent},
   other:{label:'送信・接続'}};
 $('job-form').noValidate=true;
@@ -1109,6 +1143,10 @@ function checkJobForm(form,f,docs){
   if(f.get('evaluation_mode')){
     if(!f.has('evaluation_confirmed'))add('evaluation','「検証用の課題で、実業務のデータを含みません。」にチェックがありません。','検証をする場合はチェックを入れてください。普段の依頼なら、検証モードを「使わない（普段の依頼）」に戻してください。');
     if(skills&&(skills.skill_mode==='none'||skills.skill_ids.length))add('evaluation','検証モードと、スキルの追加（または「この依頼ではスキルを使わない」）は同時に使えません。','普段の依頼なら、検証モードを「使わない（普段の依頼）」に戻してください。検証をする場合は、スキルの欄のチェックをすべて外してください（スキルの有無は検証モードA〜Dで切り替わります）。');
+  }
+  if(f.get('route')==='light_eval'){
+    if(docs||!f.has('auto_execute')||f.get('evaluation_mode')!=='A'||!f.has('evaluation_confirmed'))add('route','軽い経路の開始条件を満たしていません。','開発・作業、自動実行、検証モードA、検証用データの確認を選んでください。');
+    if(!/^[^\\/]+\.py$/i.test(String(f.get('light_scope_file')||''))||!String(f.get('light_acceptance')||'').trim())add('route','対象ファイルか合格条件が不足しています。','単一のPythonファイル名と具体的な合格条件を入力してください。');
   }
   if(!f.has('consent'))add('consent','チェックが入っていません。','内容を確認のうえ、「依頼内容・添付ファイルと必要な作業情報をAIに送信し、CLIの利用枠を使うことを確認しました。」にチェックを入れてください。');
   return issues;
@@ -1158,7 +1196,7 @@ $('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormD
 clearJobIssues();const issues=checkJobForm(e.target,f,docs);if(issues.length){showJobIssues(issues);return;}
 if(!docs&&DOCUMENT_REQUEST.test(String(f.get('title'))+' '+String(f.get('goal')))&&!confirm('資料（PowerPoint・Word・PDFなど）を作る依頼のようです。\n\n「依頼の種類」を「資料作成」にすると、図・表付きの資料を作る道具で進められます。開発・作業の依頼では、資料用の道具は使えません。\n\nこのまま開発・作業の依頼として出しますか？（キャンセルで入力に戻ります）'))return;
 action(async()=>{try{await submitJob(f,docs,e.target);}catch(error){showJobIssues([jobServerIssue(error)]);throw error;}});});
-async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、同じ依頼を OFF・ON の2件受け付けました。':'依頼を受け付けました。')+'計画の作成を始めます。'+(created.prepared?.length?' '+created.prepared.join(' '):''));}
+async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const route=f.get('route')||'full';const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{}) ,...(route==='light_eval'?{route,light_scope_file:f.get('light_scope_file'),light_acceptance:f.get('light_acceptance')}: {})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、同じ依頼を OFF・ON の2件受け付けました。':'依頼を受け付けました。')+(route==='light_eval'?'制作から開始します。':'計画の作成を始めます。')+(created.prepared?.length?' '+created.prepared.join(' '):''));}
 $('pause').addEventListener('click',()=>action(()=>api('/api/pause',{paused:!state.paused})));
 $('stop').addEventListener('click',()=>action(async()=>{if(confirm('全ての実行中の依頼を中止し、新規着手を停止しますか？'))await api('/api/stop',{});}));
 $('backup').addEventListener('click',()=>action(async()=>{const r=await api('/api/backup',{});notice('DBのバックアップを保存しました: data/'+r.file+'、data/'+r.handoff_file);}));

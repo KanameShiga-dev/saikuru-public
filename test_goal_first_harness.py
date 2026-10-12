@@ -72,6 +72,38 @@ class GoalFirstHarnessTest(unittest.TestCase):
         self.engine.decide(approval['id'], True, '')
         self.assertEqual(self.store.get(job['id'])['status'], 'accepted_with_pending_checks')
 
+    def test_later_human_evidence_requires_fresh_acceptance(self):
+        job = self.engine.create_job('架空検証', '二つの検証を確認する。', self.temp.name, True)
+        for task in self.store.all('task'):
+            if task['job_id'] == job['id']:
+                self.store.update(task['id'], status='cancelled')
+        review = self.engine.new_task(job, '確認', '架空の結果を確認', 'reviewer')
+        self.store.update(review['id'], status='succeeded', result={'status': 'done', 'summary': '確認待ち', 'checks': []})
+        self.store.update(job['id'], status='awaiting_acceptance')
+        initial = self.engine.new_approval(review, 'completion', {
+            'summary': '確認待ち', 'review_findings': [],
+            'pending_items': [{'title': '境界確認', 'note': '人の確認待ち', 'checks': ['空入力', '負数入力']}],
+        })
+        with self.assertRaises(ValueError):
+            self.engine.record_completion_evidence(initial['id'], 0, 0, '確認した', False)
+        with self.assertRaises(ValueError):
+            self.engine.record_completion_evidence(initial['id'], 0, 0, 'password=secret', True)
+        first = self.engine.record_completion_evidence(initial['id'], 0, 0, '架空入力で空入力の結果を確認', True)
+        self.assertEqual(self.store.get(initial['id'])['status'], 'superseded')
+        self.assertEqual(self.store.get(job['id'])['status'], 'awaiting_acceptance')
+        current = self.store.get(first['approval_id'])
+        self.assertEqual(current['payload']['pending_items'][0]['checks'], ['負数入力'])
+        self.assertEqual(current['payload']['resolved_checks'][0]['authority'], 'user_confirmed')
+        with self.assertRaises(ValueError):
+            self.engine.record_completion_evidence(initial['id'], 0, 0, '古い判断', True)
+        self.engine.decide(current['id'], True, '')
+        self.assertEqual(self.store.get(job['id'])['status'], 'accepted_with_pending_checks')
+        second = self.engine.record_completion_evidence(current['id'], 0, 0, '架空入力で負数の結果を確認', True)
+        self.assertEqual(self.store.get(job['id'])['status'], 'awaiting_acceptance')
+        self.assertEqual(self.store.get(second['approval_id'])['payload']['pending_items'], [])
+        self.engine.decide(second['approval_id'], True, '')
+        self.assertEqual(self.store.get(job['id'])['status'], 'accepted')
+
     def test_required_checks_are_not_deferred_by_an_ai_plan_alone(self):
         self.assertIn('AIが作った計画だけで利用者の必須条件を省略・後回しにしない', STAGE_COMPLETION_RULE)
         self.assertIn('利用者が後続や独立計測側へ明示的に割り当てた検証', STAGE_COMPLETION_RULE)
