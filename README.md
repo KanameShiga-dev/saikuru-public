@@ -74,3 +74,14 @@ Codexタスクは `%USERPROFILE%\.codex\agents\<name>.toml` を解析し、`thre
 - [参考情報の画像化（テキスト／画像の自動切替）](docs/CONTEXT_IMAGE_OPTIMIZATION.md)
 - [Claude Code のログインが切れる問題の修正（長期の鍵と、切れたときの待機・通知）](docs/CLAUDE_LOGIN_TOKEN.md)
 - [使用量の計測の拡張（Copilot のトークン・クレジット、重みつきの量、1回目の呼び出し）](docs/USAGE_METRICS_COPILOT.md)
+
+## 実行経路の評価・レビュー文脈・受領の根拠（2026-10-12）
+
+計画AIを省く「軽い経路」を評価専用に追加しました。分離した評価ルートを設定した場合だけ選べ、通常の依頼は従来どおり計画付きの経路です。通常・セキュリティレビューと承認は両経路で共通です。架空の小課題では軽い経路のトークンが少なかった一方、受領・安全性・復旧の根拠が足りないため、通常サービスへは導入しません。
+
+- 未確認項目ごとに利用者が根拠を記録し、更新された受領判断から再受領できます。根拠の追加だけで通常受領へ自動昇格しません。
+- 集計は通常受領と条件付き受領（`accepted_with_pending_checks`）を分け、経路別にも示します。利用量が欠けた場合は単価を出しません。
+- レビュー担当自身の指示と完全一致する引き継ぎ本文を省く設定（`review_context_mode`：off／shadow／on）を追加。評価ルート内だけで有効で、既定はoffです。
+- 評価用の採点器・ランナーは `eval/routing_comparison/` にあります。
+
+資料：[振り分け基準](docs/ROUTING_VALUE_REVIEW_20261012.md)、[比較計画](docs/ROUTING_COMPARISON_PLAN_20261012.md)、[初回比較](docs/ROUTING_COMPARISON_RESULTS_20261012.md)、[追加評価](docs/ROUTING_ADDITIONAL_EVALUATION_20261012.md)、[本番改修方針](docs/ROUTING_PRODUCTION_DECISION_20261012.md)、[限定導入の再判断](docs/ROUTING_LIMITED_ROLLOUT_REDECISION_20261012.md)、[レビュー文脈の重複削減](docs/REVIEW_CONTEXT_OPTIMIZATION_20261012.md)、[4件サンプル比較](docs/REVIEW_CONTEXT_FOUR_SAMPLES_20261012.md)、[個別タスクのトークン比較](docs/TASK_TOKEN_COMPARISON_20261012.md)。実利用者による再受領、資料作成での最終受領、長期運用は未確認です。
