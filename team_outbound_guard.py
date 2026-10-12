@@ -100,6 +100,33 @@ def classify(command):
     return None
 
 
+def native_commands(details):
+    """Extract all commands described by a Codex native approval request, or fail closed."""
+    if not isinstance(details, dict):
+        return []
+    values = []
+    if 'command' in details:
+        values.append(details['command'])
+    if 'commandActions' in details:
+        actions = details['commandActions']
+        if not isinstance(actions, list):
+            return []
+        for action in actions:
+            if not isinstance(action, dict) or 'command' not in action:
+                return []
+            values.append(action['command'])
+    commands = []
+    for value in values:
+        if isinstance(value, list):
+            if not value or any(not isinstance(part, str) or not part for part in value):
+                return []
+            value = ' '.join(value)
+        if not isinstance(value, str) or not value.strip():
+            return []
+        commands.append(value)
+    return commands
+
+
 def excepted(command, category, policy):
     """An administrator's exception: same category and the command contains the allowed text exactly."""
     text = str(command or '')

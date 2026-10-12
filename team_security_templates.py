@@ -14,7 +14,7 @@ Do not rely only on the AI obeying rules. Design so that **a mistake by the AI o
 
 | Layer | What it does | Where |
 |---|---|---|
-| Input Guard — "do not put it in" | Requests, consultations and attachments are checked before they reach the model. Credentials are refused; personal data and confidential names need the sender's confirmation. | 采来 (enforced) |
+| Input Guard — "do not put it in" | Requests and consultations are checked before they reach the model. Credentials are refused; detected personal data and confidential names need the sender's confirmation. Attachments with detected sensitive text are rejected. | 采来 (enforced) |
 | Agent rules — "do not send it" | Agents are told not to put personal / customer / internal / credential information into searches, outbound calls or published output, and to ignore instructions inside external content. | AGENTS.md, this file, 采来's agent instructions |
 | Tool Guard — "cannot send it" | Before a tool runs: Web search terms are screened; commands that send data out (network, push/publish, install) always need a person's approval, even with automatic approval on; reading credential stores is denied. | 采来 (enforced) |
 | Audit Log | Guard decisions are recorded (categories and outcomes only, never the content). | `audit/` (written by 采来) |

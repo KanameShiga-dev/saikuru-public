@@ -541,6 +541,61 @@ class Context:
                         or (Path(self.project) / changes[0]['path']).resolve() != target):
                     return {'allow': False, 'note': '軽い経路の評価では指定された単一ファイル以外を編集できません。'}
 
+        if payload.get('source') == 'codex' and payload.get('operation') == 'item/commandExecution/requestApproval':
+            # Native Codex approval requests do not pass through tool_request(). Inspect every
+            # reported command before the automatic_operations shortcut below. A command that
+            # needs sandbox escalation is never approved merely because auto approval is on.
+            from team_outbound_guard import classify, native_commands
+            commands = native_commands(payload.get('details'))
+            if not commands:
+                return {'allow': False, 'note': '実行するコマンドを確認できないため拒否しました。'}
+            category = 'native_command'
+            for command in commands:
+                guard = classify(command)
+                if guard is not None:
+                    category = guard[0]
+                if guard is not None and guard[2] == 'deny':
+                    self.engine.store.event('outbound_guard', 'Codexの認証情報・内部データ操作を拒否',
+                                            self.task['id'], self.task['job_id'])
+                    from team_audit import record as audit
+                    audit(self.project, {'kind': 'outbound_guard', 'job_id': self.task['job_id'],
+                                         'task_id': self.task['id'], 'tool': 'Codex native command',
+                                         'category': category, 'outcome': 'deny'})
+                    return {'allow': False, 'note': '認証情報・采来の内部データを扱うコマンドは実行できません。'}
+            payload = dict(payload, force_manual=True,
+                           guard={'category': 'native_command', 'label': 'Codexのコマンド実行',
+                                  'note': '実行内容と送信先を確認してください。自動承認は適用されません。'})
+            self.engine.store.event('outbound_guard', 'Codexのコマンド実行: 利用者の承認待ち',
+                                    self.task['id'], self.task['job_id'])
+            from team_audit import record as audit
+            audit(self.project, {'kind': 'outbound_guard', 'job_id': self.task['job_id'],
+                                 'task_id': self.task['id'], 'tool': 'Codex native command',
+                                 'category': category, 'outcome': 'human_approval'})
+        elif payload.get('source') == 'codex' and payload.get('operation') == 'item/fileChange/requestApproval':
+            # A native file-change approval can request access beyond the Codex sandbox.
+            # Keep that decision with the person even when ordinary edits are automatic.
+            details = payload.get('details') or {}
+            changes = payload.get('fileChanges')
+            if not isinstance(details, dict) or details.get('grantRoot') or not isinstance(changes, list) or not changes:
+                return {'allow': False, 'note': '変更対象または追加権限を確認できないため拒否しました。'}
+            root = Path(self.project).resolve()
+            protected = {'.git', '.codex', '.claude', '.ssh', 'agents.md', 'claude.md',
+                         'security_policy.md', 'data_classification.md', 'tool_policy.yaml',
+                         'audit', 'auth.json', '.credentials.json'}
+            for change in changes:
+                raw = change.get('path') if isinstance(change, dict) else None
+                if not isinstance(raw, str) or not raw or raw.startswith(('\\\\', '//')):
+                    return {'allow': False, 'note': '変更対象を確認できないため拒否しました。'}
+                try:
+                    target = (root / raw).resolve()
+                    relative = target.relative_to(root)
+                except (OSError, ValueError):
+                    return {'allow': False, 'note': '対象プロジェクト外または不正な変更先です。'}
+                if target == root or any(part.casefold() in protected or part.casefold().startswith('.env')
+                                         for part in relative.parts):
+                    return {'allow': False, 'note': '対象プロジェクト外または保護ファイルの変更です。'}
+            payload = dict(payload, force_manual=True)
+
         if self.engine.config.get('automatic_operations') is True and not payload.get('force_manual') and payload.get('operation') != 'question' and not payload.get('questions'):
 
             if job['status'] in ('cancelled', 'interrupted'):
@@ -2261,6 +2316,12 @@ class Engine:
                                         'モデルへは送っていません。HANDOFF.md から該当の文字列を削除してください。', 'reference_secret')
                 prompt = stripped
             ctx.reference_candidates = [(f, t) for f, t in ctx.reference_candidates if all(t != w for _, w in withheld)]
+            # The HANDOFF guard only sees identified snapshots. Screen the complete text
+            # that will reach the provider, including task context and local instructions.
+            from team_dlp import SECRET
+            if SECRET.search(prompt) or SECRET.search(ctx.agent_system_instructions):
+                raise ProviderError('モデルへ送る文脈に認証情報・秘密情報の疑いがあるため停止しました。'
+                                    '依頼文や参照資料から該当箇所を削除してください。', 'prompt_secret')
             # Reference-context image optimisation (team_context_optimizer). SHADOW records the choice only; AUTO
             # replaces the reference-only text by images when every check passed. The record keeps hashes, sizes
             # and reasons only — never the text or an image. Anything unexpected keeps the text input.

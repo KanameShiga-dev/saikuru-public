@@ -340,6 +340,10 @@ class Consultations:
             if mode == 'plan':
                 from team_plan_check import COMPACT_PLAN_GUIDE
                 ctx.agent_system_instructions += COMPACT_PLAN_GUIDE
+            from team_dlp import SECRET
+            if SECRET.search(payload) or SECRET.search(ctx.agent_system_instructions):
+                raise ProviderError('モデルへ送る相談文脈に認証情報・秘密情報の疑いがあるため停止しました。'
+                                    '相談履歴や参照資料から該当箇所を削除してください。', 'prompt_secret')
             output = ADAPTERS[item['profile']['adapter']]().run(ctx, payload, SCHEMA)
             ctx.check()
             if (not isinstance(output, dict) or set(output) != {'reply', 'questions', 'plan_prompt', 'evidence_ids'}

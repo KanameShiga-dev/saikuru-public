@@ -9,6 +9,23 @@ import sys
 import time
 import uuid
 
+
+def screen_model_read(value):
+    """Keep detected restricted content out of project-read results sent to a model."""
+    from team_dlp import scan_input
+    def content_only(item):
+        if isinstance(item, dict):
+            return {key: content_only(part) for key, part in item.items()
+                    if key not in ('sha256', 'id', 'evidence_id', 'mtime_ns', 'checked_at', 'size', 'bytes')}
+        if isinstance(item, list):
+            return [content_only(part) for part in item]
+        return item
+
+    found = scan_input(json.dumps(content_only(value), ensure_ascii=False))
+    if found['block'] or found['confirm']:
+        raise ValueError('読み取り結果に保護対象の情報が含まれるためモデルへ渡せません。')
+    return value
+
 def receipt(root, path, start, count, reused=False):
     stat = path.stat()
     return {'id':uuid.uuid4().hex[:12], 'path':str(path.relative_to(root)),
@@ -47,6 +64,7 @@ def bootstrap(root, text, previous=None):
                              and v['evidence']['start_line']==start),None)
                 reuse=bool(cached and cached['evidence']['sha256']==hashlib.sha256(path.read_bytes()).hexdigest())
                 value=cached['content'] if reuse else execute(root,'read_file',{'path':str(path.relative_to(root)),'start_line':start,'line_count':100})['content']
+                screen_model_read(value)
                 if budget<=0:break
                 value=value[:budget];budget-=len(value)
                 evidence=receipt(root,path,start,100,reuse)
@@ -58,6 +76,10 @@ def bootstrap(root, text, previous=None):
         if not report['evidence']:report['errors'].append('対象範囲に読み取れる資料・コードがありません。')
     except (OSError,ValueError):
         report['errors'].append('対象フォルダを読み取れません。移動・削除・アクセス権を確認してください。')
+    try:
+        screen_model_read(report)
+    except ValueError:
+        report = {'status':'unavailable', 'files':[], 'evidence':[], 'errors':['保護対象の情報を含むため調査結果を渡せません。'], 'snippets':[]}
     return report
 
 BLOCKED = {'.git', '.env', '.ssh', '.aws', '.azure', '.codex', '.claude', 'node_modules', '__pycache__',
@@ -203,7 +225,7 @@ def main():
             elif method=='tools/call':
                 calls+=1
                 if calls>60:raise ValueError('読み取り呼出上限に達しました。')
-                value=execute(root,params.get('name'),params.get('arguments',{}))
+                value=screen_model_read(execute(root,params.get('name'),params.get('arguments',{})))
                 if len(sys.argv)>2 and params.get('name')=='read_file':
                     args=params.get('arguments',{})
                     entry=receipt(root,safe_path(root,args['path']),max(1,min(100000,int(args.get('start_line',1)))),max(1,min(150,int(args.get('line_count',100)))))
