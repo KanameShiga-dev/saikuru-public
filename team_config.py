@@ -82,6 +82,8 @@ def default_config():
         'automatic_operations': False,
         'computer_use_allowed': False,
         'decision': {'provider': 'ollama', 'model': 'tev1:0.8b', 'shadow': True},
+        'local_summary': {'mode': 'shadow', 'model': 'gemma4:latest',
+                          'min_chars': 2400, 'max_chars': 16000, 'timeout_seconds': 30},
         'max_parallel_projects': 2,
         'security_review': 'always',
         'document_review_relaxed': False,
@@ -109,11 +111,14 @@ def load_config(data):
     config.setdefault('business_hours', default_config()['business_hours'])
     config.setdefault('notifications', default_config()['notifications'])
     config.setdefault('provider_settings', default_provider_settings())
+    config.setdefault('local_summary', default_config()['local_summary'])
     validate_config(config)
     return config
 
 
 def validate_config(config):
+    from team_local_summary import settings
+    settings(config)
     from team_worktime import validate, DEFAULT
     validate(config.get('business_hours', DEFAULT))
     notifications = config.get('notifications', {'windows_enabled':False,'business_hours_only':True})

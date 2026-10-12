@@ -2020,7 +2020,8 @@ class Engine:
                 prompt += command_evidence(self.store, self.store.get(task['job_id'], 'job'))
 
             if task['role'] == 'planner':
-                from team_plan_check import role_guide
+                from team_plan_check import role_guide, COMPACT_PLAN_GUIDE
+                prompt += COMPACT_PLAN_GUIDE
                 prompt += role_guide(bool(self.store.get(task['job_id'], 'job').get('document_source')))
                 selection = self.store.get(task['job_id'], 'job').get('skill_selection') or {}
                 if selection.get('ids'):
@@ -2051,6 +2052,16 @@ class Engine:
             ctx.check()
 
             self._validate(task, result)
+
+            if task['role'] == 'planner' and result.get('tasks'):
+                from team_local_summary import review_plan
+                job = self.store.get(task['job_id'], 'job')
+                candidate = '\n\n'.join(t['instruction'] for t in result['tasks'])
+                ctx.event('ローカルLLMで元の依頼と計画の要件を照合しています（比較モード）。')
+                source = job['goal'] + '\n\n今回の計画指示:\n' + task['instruction']
+                ctx.agent_run['local_summary'] = review_plan(source, candidate, self.config, check=ctx.check)
+                ctx.check()
+                self.store.update(task['id'], agent_run=ctx.agent_run)
 
             agent_outcome = 'completed'
 

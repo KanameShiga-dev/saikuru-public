@@ -337,6 +337,9 @@ class Consultations:
                                   'skills_note':'確認された手順。今回の依頼と安全制約が優先し、実行権限は付与しない。',
                                   'enterprise_experience':self.app.engine.handoff.experience(ctx.read_root,text),
                                   'investigation':ctx.investigation}, ensure_ascii=False)
+            if mode == 'plan':
+                from team_plan_check import COMPACT_PLAN_GUIDE
+                ctx.agent_system_instructions += COMPACT_PLAN_GUIDE
             output = ADAPTERS[item['profile']['adapter']]().run(ctx, payload, SCHEMA)
             ctx.check()
             if (not isinstance(output, dict) or set(output) != {'reply', 'questions', 'plan_prompt', 'evidence_ids'}
@@ -354,6 +357,13 @@ class Consultations:
                 raise ProviderError('調査した根拠を回答に関連付けられませんでした。', 'consultation_evidence')
             if mode == 'plan' and not output['plan_prompt'].strip():
                 raise ProviderError('計画プロンプトが返されませんでした。')
+            if mode == 'plan':
+                from team_local_summary import review_plan
+                ctx.progress = 'ローカルLLMで元の依頼と計画の要件を照合しています（比較モード）。'
+                original = '\n'.join(m['text'] for m in item['messages'] if m['role'] == 'user')
+                ctx.agent_run['local_summary'] = review_plan(original, output['plan_prompt'],
+                    self.app.engine.config, check=ctx.check)
+                ctx.check()
         except Cancelled:
             status, error = 'cancelled', '相談を中止しました。履歴は保存されています。'
         except ProviderError as exc:
@@ -383,8 +393,11 @@ class Consultations:
                     current['messages'].append({'role': 'assistant', 'text': reply})
                     current['plan_prompt'] = output['plan_prompt'].strip() if mode == 'plan' else ''
                 current['investigation'] = ctx.investigation
+                if 'local_summary' in ctx.agent_run:
+                    current['local_summary'] = ctx.agent_run['local_summary']
                 current['evidence'] = ctx.evidence()
                 current['calls'].append({'status': status, 'usage': ctx.usage, 'profile': item['profile'],
+                                         'local_summary': ctx.agent_run.get('local_summary'),
                                          'evidence': ctx.evidence(),
                                          'seconds': round(time.monotonic() - ctx.started, 2)})
                 current.update(status=status, error=error, busy=False, revision=current['revision'] + 1)

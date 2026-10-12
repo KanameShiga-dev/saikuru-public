@@ -21,6 +21,8 @@ ATTEMPT_FIELDS = ('job_id', 'task_id', 'role', 'agent', 'attempt', 'provider', '
                   'skills_presented', 'skills_read', 'context_chars', 'saikuru_version', 'optimization_mode',
                   'evaluation_mode', 'budget_mode', 'reuse_chars_before', 'reuse_chars_after', 'experience_dropped',
                   'quality_fallback', 'candidate_reuse_chars_after',
+                  'local_summary_mode', 'local_summary_check', 'local_summary_seconds',
+                  'local_summary_input_tokens', 'local_summary_output_tokens', 'local_summary_calls',
                   'started_at', 'finished_at')
 
 
@@ -46,6 +48,12 @@ def _attempt(task, run):
             'experience_dropped': (refs.get('budget') or {}).get('experience_dropped'),
             'quality_fallback': (refs.get('budget') or {}).get('quality_fallback'),
             'candidate_reuse_chars_after': (refs.get('budget') or {}).get('candidate_chars_after'),
+            'local_summary_mode': (run.get('local_summary') or {}).get('mode'),
+            'local_summary_check': (run.get('local_summary') or {}).get('semantic_check'),
+            'local_summary_seconds': (run.get('local_summary') or {}).get('seconds'),
+            'local_summary_input_tokens': (run.get('local_summary') or {}).get('local_input_tokens'),
+            'local_summary_output_tokens': (run.get('local_summary') or {}).get('local_output_tokens'),
+            'local_summary_calls': (run.get('local_summary') or {}).get('local_calls'),
             'started_at': run.get('started_at'), 'finished_at': run.get('finished_at')}
 
 
