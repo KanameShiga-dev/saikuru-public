@@ -1,4 +1,4 @@
-﻿# Run elevated only after the user approves the narrow home Wi-Fi inbound rule.
+# Run elevated only after the user approves the narrow home Wi-Fi inbound rule.
 $ErrorActionPreference = 'Stop'
 $ruleName = 'Agent Team Home Wi-Fi'
 $adapter = Get-NetAdapter -Name 'Wi-Fi' -ErrorAction Stop

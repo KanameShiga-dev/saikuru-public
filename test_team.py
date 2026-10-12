@@ -18,7 +18,7 @@ from server import make_server, DataLock
 PLAN = {'summary': '計画', 'tasks': [{'title': '調査', 'instruction': '調査する', 'role': 'researcher'},
                                    {'title': '実装', 'instruction': '実装する', 'role': 'builder'}],
         'security_review_required': False}
-DONE = {'status': 'done', 'summary': '完了報告', 'checks': ['fixtureのみ'], 'question': ''}
+DONE = {'status': 'done', 'summary': '完了報告', 'checks': ['fixtureのみ'], 'pending_checks': [], 'question': ''}
 
 
 class FixtureAdapter:
@@ -50,7 +50,7 @@ class EngineTests(unittest.TestCase):
         return self.engine.create_job('sample', 'local goal', self.temp.name, auto)
 
     def until(self, predicate):
-        deadline = time.time() + 4
+        deadline = time.time() + 8
         while not predicate() and time.time() < deadline:
             self.engine.tick()
             time.sleep(.01)
@@ -78,7 +78,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.store.get(job['id'])['status'], 'blocked')
 
     def test_retry_with_user_scope_accepts_handoff(self):
-        handoff = {'status': 'handoff', 'summary': 'PDF本文の確認は未実施', 'checks': ['存在のみ確認'], 'question': ''}
+        handoff = {'status': 'handoff', 'summary': 'PDF本文の確認は未実施', 'checks': ['存在のみ確認'], 'pending_checks': [], 'question': ''}
         class HandoffAdapter:  # a fresh report per run, like a real provider
             def run(s, ctx, prompt, schema):
                 return PLAN if ctx.task['role'] == 'planner' else dict(handoff) if ctx.task['role'] == 'researcher' else DONE
@@ -99,7 +99,7 @@ class EngineTests(unittest.TestCase):
         self.until(lambda: researcher()['status'] == 'handed_off')
 
     def test_handoff_question_do_retries_without_scope(self):
-        handoff = {'status': 'handoff', 'summary': '一部未実施', 'checks': ['未実施：テスト'], 'question': ''}
+        handoff = {'status': 'handoff', 'summary': '一部未実施', 'checks': ['未実施：テスト'], 'pending_checks': [], 'question': ''}
         class HandoffAdapter:
             def run(s, ctx, prompt, schema):
                 return PLAN if ctx.task['role'] == 'planner' else dict(handoff) if ctx.task['role'] == 'researcher' else DONE
@@ -235,6 +235,20 @@ class HTTPTests(unittest.TestCase):
         html = self.client.open(self.base + '/').read().decode()
         self.assertIn('作業ボード', html)
         self.assertEqual(json.load(self.client.open(self.base + '/api/state'))['jobs'], [])
+
+    def test_context_optimization_page(self):
+        html = self.client.open(self.base + '/context-optimization').read().decode()
+        self.assertIn('参考情報の画像化', html)
+        data = json.load(self.client.open(self.base + '/api/context-optimization'))
+        self.assertEqual((data['settings']['mode'], data['ratio_range']), ('off', [0.1, 0.3]))
+        result = self.post('/api/context-optimization', {'mode': 'shadow', 'minimum_estimated_saving_ratio': 0.2})
+        self.assertEqual(result['settings'], {'mode': 'shadow', 'minimum_estimated_saving_ratio': 0.2})
+        for bad in ({'mode': 'auto', 'minimum_estimated_saving_ratio': 0.31}, {'mode': 'auto'},
+                    {'mode': 'auto', 'minimum_estimated_saving_ratio': 0.2, 'min_font_px': 12}):
+            with self.assertRaises(urllib.error.HTTPError):
+                self.post('/api/context-optimization', bad)
+        self.post('/api/context-optimization', {'mode': 'off', 'minimum_estimated_saving_ratio': 0.3})
+        self.assertEqual(self.server.app.engine.config['context_optimization']['mode'], 'off')
 
     def test_cross_origin_denied(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:

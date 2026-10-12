@@ -291,7 +291,7 @@ function render() {
       if(reason)card.append(el('p',reason.title,'summary'));
       else if(task.summary)card.append(el('p',task.summary,'summary'));
       const meta=el('div',undefined,'meta');meta.append(el('span',`${roles[task.role]} · ${task.profile.adapter}`),el('span',job?.title||''));card.append(meta);
-      if(task.common_agents?.length){const run=task.agent_run,labels={starting:'起動中',running:'実行中',completed:'実行完了',failed:'失敗',cancelled:'中止'};
+      if(task.common_agents?.length){const run=task.agent_run,labels={starting:'起動中',running:'実行中',completed:'実行完了',failed:'失敗',cancelled:'中止',held:'送る前に保留（秘密情報の確認）'};
         card.append(el('p','共通Agent: '+task.common_agents.join('、')+' · '+(run?labels[run.status]||run.status:task.agent_name?'起動待ち':'旧方式の役割指示'),'hint'));}
       if(index===2&&!pending(task.id).some(a=>a.payload.questions?.length)){
         const entry=el('div',undefined,'task-entry'),help=el('button','回答方法のヘルプ','decision-help-button');help.type='button';
@@ -370,9 +370,11 @@ function foldDetailSections(body,task){
 }
 function reportText(result){
   let text=result.summary||'';
+  if(result.stage_checks?.length)text+='\n\n各担当の検証報告（未実施の項目を含みます。合格の保証ではありません）:\n'+result.stage_checks.map(item=>`${item.title}（担当報告: ${item.reported_status||'不明'}）\n${(item.checks||[]).join('\n')}${item.pending_checks?.length?'\n担当時点で未確認と報告された項目:\n'+item.pending_checks.map(c=>'・'+c).join('\n'):''}`).join('\n\n');
   if(result.tasks)text+='\n\n'+result.tasks.map((t,i)=>`${i+1}. ${t.title}（${roles[t.role]||t.role}）\n${t.instruction}`).join('\n\n');
   if(result.security_review_required===true)text+='\n\n通常レビューの後、common-security-reviewerを独立セッションで起動します。';
   if(result.checks?.length)text+='\n\n報告された検証:\n'+result.checks.map(c=>'・'+c).join('\n');
+  if(result.pending_checks?.length)text+='\n\n未確認の必須検証（依頼全体の達成は未確認）:\n'+result.pending_checks.map(c=>'・'+c).join('\n');
   if(result.question)text+='\n\n確認したいこと:\n'+result.question;
   if(result.note)text+='\n\n'+result.note;
   if(result.review_findings?.length)text+='\n\nレビュー指摘（未修正。受け入れるか差し戻すかを決めてください）:\n'+result.review_findings.map(f=>`・${f.reviewer}：${f.summary}`).join('\n');
@@ -763,10 +765,13 @@ function renderDetail(task,version) {
   const intake=state.jobs.find(j=>j.id===task.job_id)?.intake_classification;
   if(intake)body.append(section('依頼の一次分類',`${intake.label} / ${intake.provider}\n理由: ${intake.reason}\n分類は作業範囲や権限の承認ではありません。`));
   if(task.decision_record){const d=task.decision_record;body.append(section('判断レイヤーの記録',`動作: ${d.shadow?'シャドー（既存判断を維持）':'適用'}\nProvider: ${d.provider}\n状態: ${d.status}\n理由コード: ${d.reason_code}\n既存判断: ${d.baseline}\n候補: ${d.decision}\n採用: ${d.effective}\n差異: ${d.differs?'あり':'なし'}\n時間: ${d.latency_ms} ms`+(d.usage?'\n'+(d.provider==='ollama'?'ローカル':'API')+'トークン: '+JSON.stringify(d.usage):'\nトークン: 未取得')+(d.confidence!==undefined?'\n集中度（正解確率ではありません）: '+d.confidence:'')+(d.probabilities?'\n候補確率: '+JSON.stringify(d.probabilities):'')));}
-  if(task.agent_run){const run=task.agent_run,labels={starting:'起動中',running:'実行中',completed:'実行完了',failed:'失敗',cancelled:'中止'};
+  if(task.agent_run){const run=task.agent_run,labels={starting:'起動中',running:'実行中',completed:'実行完了',failed:'失敗',cancelled:'中止',held:'送る前に保留（秘密情報の確認）'};
     body.append(section('Agentの実行情報',`Agent: ${run.name}\n実行方式: ${run.launch_method||'起動確認待ち'}\n状態: ${labels[run.status]||run.status}\nセッションID: ${run.session_id||'未取得'}\n試行: ${run.attempt}\n権限: ${run.sandbox}\n定義SHA256: ${run.definition_hash}`));
     if(run.usage&&Object.keys(run.usage).length)body.append(section('今回のCLIトークン記録',Object.entries(run.usage).map(([key,value])=>`${key}: ${value}`).join('\n')+'\nCLIが返した値です。アカウント利用枠の残量とは異なります。'));
     if(run.context_size)body.append(section('入力サイズの記録',`依頼本文: ${run.context_size.user_prompt_chars}文字\nセッション指示: ${run.context_size.native_instructions_chars}文字\nSkill案内: ${run.context_size.skill_catalog_chars}文字\n文字数はトークン数の代用指標です。`));
+    if(run.context_optimization){const o=run.context_optimization,modes={shadow:'記録のみ（入力は変えない）',auto:'自動'},
+      reasons={image_candidate:'画像が有利',below_threshold:'文字数が閾値未満',contains_execution_details:'コード・コマンド・パスを含む',policy_blocked:'秘密情報らしき文字列を含む',large_reference_needs_selection:'長すぎる（抽出が先）',no_extractable_part:'画像にできる文章の部分が無い',reference_too_large:'大きすぎる（6万字超）',unsupported_or_unknown:'画像を送れない担当',render_or_readability_fail:'規定の枚数に収まらない',uncertain_cost:'実測の見積もりが無い',insufficient_savings:'削減が基準未満',retry_uses_text:'再試行はテキスト',reference_not_located:'置き換え位置を特定できない',optimizer_error:'判定の失敗'};
+      body.append(section('参考情報の画像化',`動作: ${modes[o.optimization_mode]||o.optimization_mode}\n送信方式: ${o.selected_transport==='image'?`画像 ${o.image_pages}枚`:'テキスト'}\n`+(o.references||[]).map(r=>`${r.field||'参考情報'}: ${r.reference_chars??'-'}文字`+(r.partial?`（うち${r.extracted_chars}文字を抜き出し）`:'')+` · ${reasons[r.decision_reason]||r.decision_reason}`+(r.estimated_saving_ratio!=null?` · 推定削減 ${Math.round(r.estimated_saving_ratio*100)}%（実測にもとづく推定）`:'')).join('\n')+'\n本文・画像は記録しません。'));}
     if(run.shared_reads?.length)body.append(section('共通Skillの読み取り要求',run.shared_reads.map(item=>`${item.skill} / ${item.kind}: ${item.file}`).join('\n')+'\nClaude Readの許可記録です。Codexの読込数や未取得の値をゼロとは判定しません。'));
     if(run.failure_code==='claude_auth')body.append(el('p','復旧対象：Claude Code CLIへのログイン。モデル実行前の認証確認で停止しています。','notice'));
     if(run.failure_code==='codex_sandbox')body.append(el('p','復旧対象：CodexのWindowsサンドボックス。権限を広げて迂回せず、実行環境を復旧して再試行してください。モデル実行前に停止しています。','notice'));
@@ -819,7 +824,8 @@ function renderDetail(task,version) {
     const input=el('textarea');input.id='note-'+a.id;input.rows=3;input.placeholder='回答・判断の理由（任意）';input.setAttribute('aria-label','承認または拒否の補足');input.value=drafts[input.id]||'';
     box.append(el('p',a.kind==='tool'?'この操作1回だけに適用されます。期限: '+date(a.expires_at):a.kind==='completion'?'内容を確認して受け入れるか拒否してください。拒否する場合は理由・指摘を入力すると、その指摘で修正担当とレビューが自動で再開します（理由なしの拒否は停止）。':'内容を確認して承認または拒否してください。','hint'),input);
     const actions=el('div',undefined,'actions');
-    actions.append(button('拒否する',()=>api('/api/decide',{id:a.id,allow:false,note:input.value}),'danger'),button(a.kind==='completion'?(a.payload.pending_items?.length?'未完了項目を残して成果を受領':'確認済みとして受け入れる'):'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value}),'primary'));box.append(actions);body.append(box);
+    const hasPending=a.payload.pending_items?.length||a.payload.review_findings?.length;
+    actions.append(button('拒否する',()=>api('/api/decide',{id:a.id,allow:false,note:input.value}),'danger'),button(a.kind==='completion'?(hasPending?'未完了項目を残して成果を受領':'確認済みとして受け入れる'):'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value}),'primary'));box.append(actions);body.append(box);
   }
   const history=state.approvals.filter(a=>a.task_id===task.id&&a.status!=='pending');
   if(history.length){const historySection=section('判断の履歴',history.map(a=>`${date(a.created_at)} ${a.kind} / ${a.status}\n${a.note||''}`).join('\n\n'));historySection.id='decision-history';body.append(historySection);}
@@ -1001,6 +1007,7 @@ $('service-notification-test').addEventListener('click',()=>action(async()=>{
 }));
 $('filter').addEventListener('change',render);
 $('menu-models').addEventListener('click',openModelPanel);
+$('menu-context-optimization').addEventListener('click',()=>{location.href='/context-optimization';});
 $('menu-mobile').addEventListener('click',()=>{const m=$('mobile-access');if(m.hidden){notice('スマホ接続の情報はまだ読み込まれていません。少し待ってから再度開いてください。');return;}m.open=true;m.scrollIntoView({behavior:'smooth',block:'start'});});
 document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.close).close()));
 let jobInstructionSequence=0;
@@ -1151,7 +1158,7 @@ $('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormD
 clearJobIssues();const issues=checkJobForm(e.target,f,docs);if(issues.length){showJobIssues(issues);return;}
 if(!docs&&DOCUMENT_REQUEST.test(String(f.get('title'))+' '+String(f.get('goal')))&&!confirm('資料（PowerPoint・Word・PDFなど）を作る依頼のようです。\n\n「依頼の種類」を「資料作成」にすると、図・表付きの資料を作る道具で進められます。開発・作業の依頼では、資料用の道具は使えません。\n\nこのまま開発・作業の依頼として出しますか？（キャンセルで入力に戻ります）'))return;
 action(async()=>{try{await submitJob(f,docs,e.target);}catch(error){showJobIssues([jobServerIssue(error)]);throw error;}});});
-async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice('依頼を受け付けました。計画の作成を始めます。'+(created.prepared?.length?' '+created.prepared.join(' '):''));}
+async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、同じ依頼を OFF・ON の2件受け付けました。':'依頼を受け付けました。')+'計画の作成を始めます。'+(created.prepared?.length?' '+created.prepared.join(' '):''));}
 $('pause').addEventListener('click',()=>action(()=>api('/api/pause',{paused:!state.paused})));
 $('stop').addEventListener('click',()=>action(async()=>{if(confirm('全ての実行中の依頼を中止し、新規着手を停止しますか？'))await api('/api/stop',{});}));
 $('backup').addEventListener('click',()=>action(async()=>{const r=await api('/api/backup',{});notice('DBのバックアップを保存しました: data/'+r.file+'、data/'+r.handoff_file);}));
@@ -1406,3 +1413,5 @@ function openModelSwitch(taskId,source){
   }catch(error){message.textContent=error.message;}finally{sending=false;enabled();}};
   if(candidates.length)targetChanged();else{message.textContent='切替可能な停止・待機タスクはありません。新規タスクのモデルは「チーム設定」で変更できます。';enabled();}
 }
+
+$('job-token-reduction').addEventListener('change',function(){if(this.value==='compare'){const auto=$('job-form').elements.namedItem('auto_execute');if(auto)auto.checked=false;}});

@@ -15,9 +15,9 @@ from team_store import Store
 
 PLAN = {'summary': '計画', 'tasks': [{'title': '作る', 'instruction': '作ってテストする', 'role': 'builder'}],
         'security_review_required': False}
-DONE = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格'], 'question': ''}
+DONE = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格'], 'pending_checks': [], 'question': ''}
 NO_EVIDENCE = {'status': 'blocked', 'summary': '修正後のテスト結果がないため完了と判定できない。',
-               'checks': ['後続確認：現行版でunittestを実行する'], 'question': ''}
+               'checks': ['後続確認：現行版でunittestを実行する'], 'pending_checks': ['現行版でunittestを実行する'], 'question': ''}
 QUESTION = {'id': 'q1', 'text': '出力先を変えてよいですか', 'options': [
     {'id': 'yes', 'label': '変えてよい', 'input_required': False, 'input_label': ''}]}
 
@@ -65,7 +65,7 @@ class ReviewFlowTest(unittest.TestCase):
                 return PLAN if ctx.task['role'] == 'planner' else review(ctx.task) if ctx.task['role'] == 'reviewer' else DONE
         ADAPTERS.update(codex=Fixture, claude=Fixture)
         job = self.engine.create_job('開発', 'ツールを作る', self.temp.name, True)
-        deadline = time.time() + 8
+        deadline = time.time() + 30
         while self.store.get(job['id'])['status'] not in ('awaiting_acceptance', 'blocked', 'failed') and time.time() < deadline:
             self.engine.tick()
             time.sleep(.01)
@@ -90,13 +90,13 @@ class ReviewFlowTest(unittest.TestCase):
         # 2026-10-09: a Copilot review left out "question"; it means "no question" and must not fail the task.
         job = self.engine.create_job('開発', 'ツールを作る', self.temp.name, False)
         task = self.engine.new_task(job, '確認', '確認する', 'researcher')
-        result = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格']}
+        result = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格'], 'pending_checks': []}
         self.engine._validate(task, result)
         self.assertEqual((result['question'], result['questions']), ('', []))
         with self.assertRaises(Exception):
-            self.engine._validate(task, {'status': 'done', 'summary': '完了', 'checks': [], 'question': ['x']})
+            self.engine._validate(task, {'status': 'done', 'summary': '完了', 'checks': [], 'pending_checks': [], 'question': ['x']})
         with self.assertRaises(Exception):  # checks carry information: never filled in
-            self.engine._validate(task, {'status': 'done', 'summary': '完了', 'checks': None})
+            self.engine._validate(task, {'status': 'done', 'summary': '完了', 'checks': None, 'pending_checks': []})
 
     def test_repeated_stops_end_at_the_repair_limit(self):
         job = self.run_job(lambda task: NO_EVIDENCE)

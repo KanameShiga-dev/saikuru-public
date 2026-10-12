@@ -517,7 +517,7 @@ class HandoffDB:
             self.db.execute('INSERT OR REPLACE INTO skill_active VALUES (?,?,?,1)',
                 (canonical(target_project),item['name'],version_id))
 
-    def context(self, job, allowed_files=None, refs=None, budget=None):
+    def context(self, job, allowed_files=None, refs=None, budget=None, references=None):
         job_id=job['id'];project=canonical(job['project'])
         with self.lock:
             facts=[dict(key=r[0],value=r[1],evidence=r[2],authority=r[3]) for r in self.db.execute(
@@ -591,6 +591,9 @@ class HandoffDB:
                  'history_note':'古い版も専用DBに保持。ここには各タスクの最新版と判断履歴を提示。',
                  'project_handoff_reference':json.loads(file[0]) if file else None}
         text=json.dumps(package,ensure_ascii=False)
+        if references is not None and file:
+            # Reference-only field for the image optimisation measurement (team_context_optimizer); read-only use.
+            references.append(('project_handoff_reference',package['project_handoff_reference'].get('content')))
         if refs is not None:
             refs['context_chars']=len(text)
         if len(text)>150_000:

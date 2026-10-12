@@ -33,6 +33,14 @@ def windows_summary(counts, preview=False):
     message = '判断待ち {decision}件、成果確認 {completion}件、成果受領 {accepted}件。作業ボードで確認してください。'.format(**counts)
     if preview:
         message = '常駐PC通知の表示テストです。依頼の開始や承認は行っていません。'
+    windows_message(message)
+
+
+def windows_message(message):
+    """One Windows balloon with a fixed message written by 采来 (no request text, paths or secrets)."""
+    if os.name != 'nt':
+        raise OSError('Windows以外では常駐PC通知に対応していません。')
+    message = str(message).replace("'", "''")
     script = ("Add-Type -AssemblyName System.Windows.Forms; "
               "$sairaiIcon=New-Object System.Windows.Forms.NotifyIcon; "
               "$sairaiIcon.Icon=[System.Drawing.SystemIcons]::Information; "

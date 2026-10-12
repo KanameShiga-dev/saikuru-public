@@ -149,6 +149,9 @@ def validate_config(config):
     credits = settings['copilot_monthly_credits']
     if credits is not None and (type(credits) not in (int, float) or not 0 < credits <= 10_000_000):
         raise ValueError('GitHub Copilotの月間クレジット上限は正の数で入力してください。')
+    if 'context_optimization' in config:
+        from team_context_optimizer import validate as validate_context_optimization
+        validate_context_optimization(config['context_optimization'])
     for role in ('planner', 'builder', 'researcher', 'reviewer'):
         if config['roles'].get(role) not in config['profiles']:
             raise ValueError('役割のプロファイルが見つかりません。')
@@ -168,7 +171,7 @@ def validate_config(config):
             raise ValueError('現行の個人方針でAstraをワーカーに使うことは禁止されています。')
 
 
-def environment_status(commands):
+def environment_status(commands, check_auth=True):
     result = {}
     for name, command in commands.items():
         if not command:
@@ -180,7 +183,7 @@ def environment_status(commands):
                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             result[name] = {'available': run.returncode == 0, 'version': run.stdout.strip()[:200],
                             'note': 'CLI起動を確認。認証・モデル接続はタスク実行時に確認。', 'command': command}
-            if name == 'claude' and run.returncode == 0:
+            if name == 'claude' and run.returncode == 0 and check_auth:
                 try:
                     auth = subprocess.run(command + ['auth', 'status', '--json'], capture_output=True,
                         text=True, encoding='utf-8', errors='replace', timeout=15,

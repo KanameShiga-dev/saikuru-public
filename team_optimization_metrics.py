@@ -13,11 +13,14 @@ from contextlib import closing
 import sqlite3
 from pathlib import Path
 
-from team_usage_metrics import normalize
+from team_usage_metrics import copilot_normalized, normalize, weighted
 
 TOKEN_KEYS = ('input_uncached', 'cache_read', 'cache_creation', 'output', 'input_total')
+SUM_KEYS = TOKEN_KEYS + ('reasoning', 'weighted')
 ATTEMPT_FIELDS = ('job_id', 'task_id', 'role', 'agent', 'attempt', 'provider', 'model', 'status', 'failure_code',
-                  'measurement', *TOKEN_KEYS, 'num_turns', 'duration_ms', 'tool_calls', 'experience_refs',
+                  'measurement', *TOKEN_KEYS, 'reasoning', 'weighted', 'copilot_credits', 'copilot_premium_requests',
+                  'first_call_input', 'reference_transport', 'token_reduction',
+                  'num_turns', 'duration_ms', 'tool_calls', 'experience_refs',
                   'skills_presented', 'skills_read', 'context_chars', 'saikuru_version', 'optimization_mode',
                   'evaluation_mode', 'budget_mode', 'reuse_chars_before', 'reuse_chars_after', 'experience_dropped',
                   'quality_fallback', 'candidate_reuse_chars_after',
@@ -26,15 +29,32 @@ ATTEMPT_FIELDS = ('job_id', 'task_id', 'role', 'agent', 'attempt', 'provider', '
                   'started_at', 'finished_at')
 
 
+def _first_call_input(usage):
+    """Input tokens (uncached + cache read + cache write) of a run's first API call (Claude stream), or None."""
+    keys = ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')
+    if not isinstance(usage, dict) or not all(isinstance(usage.get(k), int) for k in keys):
+        return None
+    return sum(usage[k] for k in keys)
+
+
 def _attempt(task, run):
-    usage = run.get('usage_normalized') or normalize(run.get('provider'), run.get('usage'),
-                                                     'recorded_before_phase1' if run.get('usage') else None, {})
+    if run.get('provider') == 'copilot' and not run.get('usage'):
+        # Copilot's counts come from its usage file, recorded per run since 2026-10-09 (team_adapters.copilot_tokens).
+        usage = copilot_normalized(run.get('copilot_tokens'))
+    else:
+        usage = run.get('usage_normalized') or normalize(run.get('provider'), run.get('usage'),
+                                                         'recorded_before_phase1' if run.get('usage') else None, {})
     refs = run.get('context_refs') or {}
     raw = run.get('usage_raw') or {}
     return {'job_id': task['job_id'], 'task_id': task['id'], 'role': task.get('role'), 'agent': run.get('name'),
             'attempt': run.get('attempt'), 'provider': run.get('provider'), 'model': run.get('model') or (task.get('profile') or {}).get('model'),
             'status': run.get('status'), 'failure_code': run.get('failure_code'), 'measurement': usage['measurement'],
             **{k: usage.get(k) for k in TOKEN_KEYS},
+            'reasoning': usage.get('reasoning'), 'weighted': weighted(usage) if usage['measurement'] != 'unknown' else None,
+            'copilot_credits': run.get('copilot_credits'), 'copilot_premium_requests': run.get('copilot_premium_requests'),
+            'first_call_input': _first_call_input(run.get('first_call_usage')),
+            'reference_transport': (run.get('context_optimization') or {}).get('selected_transport'),
+            'token_reduction': (run.get('context_optimization') or {}).get('optimization_mode'),
             'num_turns': raw.get('num_turns'), 'duration_ms': raw.get('duration_ms'),
             'tool_calls': sum((run.get('tool_calls') or {}).values()) if 'tool_calls' in run else None,
             'experience_refs': len(refs['experience']) if 'experience' in refs else None,
@@ -79,9 +99,12 @@ def _total(rows):
     out = {'attempts': len(rows), 'measured_attempts': len(measured),
            'partial_attempts': sum(r['measurement'] == 'partial' for r in rows),
            'unknown_attempts': sum(r['measurement'] == 'unknown' for r in rows)}
-    for key in TOKEN_KEYS:
-        values = [r[key] for r in measured if isinstance(r[key], int)]
+    for key in SUM_KEYS:
+        values = [r.get(key) for r in measured if isinstance(r.get(key), int)]
         out[key] = sum(values) if values else None
+    # Credits are counted for every attempt that reported them (failed and cancelled runs also spent credits).
+    credits = [r['copilot_credits'] for r in rows if isinstance(r.get('copilot_credits'), (int, float))]
+    out['copilot_credits'] = round(sum(credits), 4) if credits else None
     return out
 
 
@@ -110,7 +133,8 @@ def report(database):
                                 acceptance_rate=round(len(accepted) / len(ids), 3) if ids else None,
                                 # Main KPI: cloud usage per accepted deliverable, failures and retries included.
                                 input_total_per_accepted=round(total['input_total'] / len(accepted)) if accepted and total['input_total'] is not None else None,
-                                output_per_accepted=round(total['output'] / len(accepted)) if accepted and total['output'] is not None else None)
+                                output_per_accepted=round(total['output'] / len(accepted)) if accepted and total['output'] is not None else None,
+                                weighted_per_accepted=round(total['weighted'] / len(accepted)) if accepted and total['weighted'] is not None else None)
     shadow = [r for r in rows if r['budget_mode'] in ('shadow', 'on') and isinstance(r['reuse_chars_before'], int)]
     budget = {'attempts': len(shadow),
               'reuse_chars_before': sum(r['reuse_chars_before'] for r in shadow) if shadow else None,
@@ -132,7 +156,10 @@ def report(database):
                 'approval_wait_seconds は承認の待ち時間であり、人の実作業時間ではない（実作業時間は未測定）。',
                 '利用枠（%）は別の指標で、このレポートには含めない。',
                 '削減効果は evaluation_modes（同じ課題・同じ受入条件で A〜D を比べた試験）からだけ判断する。普段の依頼の合計からは主張しない。',
-                'context_budget の SHADOW 値は「減らしていたら減った文字数」の見込みで、トークンの実測ではない。']}
+                'context_budget の SHADOW 値は「減らしていたら減った文字数」の見込みで、トークンの実測ではない。',
+                'Copilot のトークンは CLI の利用統計ファイルの値（inputTokens はキャッシュの読み書きを含む）。2026-10-09 より前の Copilot の試行は unknown。',
+                'weighted は料金に近い重みつきの量（キャッシュなし入力1・読み込み0.1・書き込み1.25・出力5）。提供元の数え方そのものではない。',
+                'copilot_credits は記録された全試行（失敗・中止を含む）の合計。']}
 
 
 if __name__ == '__main__':

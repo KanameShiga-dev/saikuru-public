@@ -62,6 +62,7 @@ QUESTIONS = {'type': 'array', 'maxItems': 8, 'items': object_schema({
     'items': object_schema({'id': STR, 'label': STR, 'input_required': {'type': 'boolean'}, 'input_label': STR})}})}
 
 RESULT_SCHEMA = object_schema({'status': {'type': 'string', 'enum': ['done', 'blocked', 'needs_changes', 'handoff']},
+    'pending_checks': {'type': 'array', 'items': STR},
 
     'summary': STR, 'checks': {'type': 'array', 'items': STR}, 'question': STR,
 
@@ -80,6 +81,17 @@ PLAN_SCHEMA = object_schema({'summary': STR, 'tasks': {'type': 'array', 'items':
 # lacked re-run test results stopped the job waiting for the user with nothing to answer).
 BLOCKED_RULE = ('blockedは利用者の判断が必要なときだけ使い、その判断をquestionsで質問する。'
                 '作業担当の作業で解消できる不足（未実行のテスト・実行確認、足りない修正など）はblockedにしない。')
+STAGE_COMPLETION_RULE = (
+    '\n【工程の完了と依頼全体の達成を区別】元の依頼と利用者の回答から、今回の担当範囲・必須成果物・'
+    'この担当が実施する検証・後続担当または利用者が実施する検証を区別する。'
+    'AIが作った計画だけで利用者の必須条件を省略・後回しにしない。'
+    '利用者が後続や独立計測側へ明示的に割り当てた検証は、その出典・担当・未実施をchecksに記録する。'
+    '計画以外の報告では、依頼全体の必須条件で未確認のものをpending_checksにも列挙し、確認済みだけなら空配列にする。'
+    'それだけを理由に今回の完了した工程をblocked/needs_changesにしたり、権限のない担当へ再実行を要求したりしない。'
+    '今回の担当範囲が完了した場合のdoneは工程の完了であり、未検証の合格や依頼全体の完了ではない。'
+    '担当範囲に不足があれば具体的な修正を示す。必須検証の担当や許可が不明なら、根拠と必要な判断をquestionsで確認する。'
+    '指摘ごとに「対象箇所・利用者条件の出典・現象/不足・修正可能な担当と道具・確認方法」を示し、'
+    '同じ権限制約で実施できない修正や検証を繰り返さない。\n')
 REVIEW_STATUS_RULE = ('修正が必要なとき、または作業担当が実行すれば得られる検証の証拠（テスト・実行結果など）が足りないときはneeds_changesとし、'
                       '直す内容と実行すべき検証をsummaryとchecksに具体的に書く。' + BLOCKED_RULE +
                       '質問のないblockedは、統括がneeds_changesとして修正担当へ回す。未検証を合格としない。'
@@ -88,7 +100,8 @@ REVIEW_STATUS_RULE = ('修正が必要なとき、または作業担当が実行
                       '修正が必要とするのは、(1) 元の依頼・計画の要件や完了条件を満たしていない、(2) 依頼された動作に具体的な不具合がある、'
                       '(3) 依頼された使い方で実害が起きる具体的なセキュリティの問題がある（認証情報の露出、外部への送信、データの破壊、権限の扱い）、のどれかのときだけ。'
                       '依頼にない機能・制限・堅牢化の提案（入力の上限、パスの制限、想定外の入力への備えなど）は checks に「参考：」として書き、それだけではneeds_changesにしない。'
-                      '采来が記録した実行結果で確かめられる検証を、別の形で再実行させない。この環境で実行できない検証を求めない。')
+                      '采来が記録した実行結果で確かめられる検証を、別の形で再実行させない。この環境で実行できない検証を求めない。'
+                      '各担当のpending_checksを最新成果物の証拠と照合する。解消した項目は、根拠をchecksに記録し、根拠がない必須項目は自分のpending_checksへ引き継ぐ。')
 # Facts about this PC that every assignee needs, so nobody plans, demands or asks for what cannot run here.
 ENVIRONMENT_RULE = ('\n実行環境：Windows・PowerShell、管理者権限なし。シンボリックリンクの作成はできない。'
                     'Developer Mode・レジストリ・実行ポリシー・ファイアウォール・サービスなど、OSやセキュリティの設定は変更しない（変更のコマンドは利用者の承認が必要）。'
@@ -99,7 +112,9 @@ REPAIR_RULE = ('\n\n【統括からの指示】指摘を修正したあと、元
                '実行した内容と結果をchecksに記録する。修正前の検証結果を現行版の証拠として流用しない。'
                '完了条件に書かれたコマンドは書かれた形のまま実行する。既存のファイルと衝突する場合は、既存ファイルを上書き・削除せず、'
                '必要なファイルを一時フォルダに写してそこで実行し、その旨を記録する。'
-               '検証を実行できない場合は、理由と必要な判断をquestionsで示してblockedで返す。')
+               '今回の担当範囲の必須検証を実行できない場合は、理由と必要な判断をquestionsで示してblockedで返す。'
+               '検証指示は利用者・プロジェクトの禁止事項や担当の道具制限を上書きしない。'
+               '利用者が別担当へ明示的に割り当てた検証は、担当と未実施を記録し、その検証だけを理由に今回の工程を停止しない。')
 
 
 # 2026-10-09 (user decision): every new development request stopped on the same question, because the generated
@@ -179,6 +194,10 @@ class Context:
         self._partial_usage = {}
 
         self.context_refs = {}
+        # (field, text) of reference-only context, the only candidates of the image optimisation.
+        self.reference_candidates = []
+        # Base64 PNG pages that replace one reference-only text in AUTO mode (separate from user attachments).
+        self.reference_images = []
 
         # Folders of imported skills enabled for this project. The CLI's file tools are confined to the working
         # directory (--restricted), so these are added with --add-dir; 采来's tool check still allows only reads
@@ -402,7 +421,12 @@ class Context:
             return
         usage = message.get('usage')
         if isinstance(usage, dict) and message.get('id'):
-            self._partial_usage[str(message['id'])[:100]] = {k: v for k, v in usage.items() if isinstance(v, int) and v >= 0}
+            call = str(message['id'])[:100]
+            self._partial_usage[call] = {k: v for k, v in usage.items() if isinstance(v, int) and v >= 0}
+            # The first API call of a run (token measurement, 2026-10-10): its input differs between token reduction
+            # ON and OFF only by the reference, so it measures the saving per call. Numbers only.
+            if next(iter(self._partial_usage)) == call:
+                self.agent_run['first_call_usage'] = dict(self._partial_usage[call])
         for block in message.get('content') or []:
             if isinstance(block, dict) and block.get('type') == 'tool_use':
                 name = str(block.get('name') or 'tool')[:80]
@@ -577,6 +601,9 @@ class Engine:
         self.shutdown = threading.Event()
 
         self.paused = False
+        # Claude sign-in (team_claude_auth): set by server.py. Without it Claude tasks start as before.
+        self.claude_auth = None
+        self.claude_logged_in = lambda: True
 
         self.project_blocked = lambda path: False
 
@@ -940,9 +967,12 @@ class Engine:
 
 
     def create_job(self, title, goal, project, auto_execute, planner_profile=None, document_source=None, attachment_ids=None, document_format=None,
-                   skill_mode='auto', skill_ids=None, evaluation_mode=None, evaluation_confirmed=False, role_profiles=None):
+                   skill_mode='auto', skill_ids=None, evaluation_mode=None, evaluation_confirmed=False, role_profiles=None,
+                   token_reduction=None, comparison_id=None):
 
         skill_selection = self._skill_selection(skill_mode, skill_ids)
+        if token_reduction not in (None, 'on', 'off') or (comparison_id is not None and not token_reduction):
+            raise ValueError('トークン削減の指定は ON・OFF・設定に従う のいずれかです。')
         evaluation = None
         if evaluation_mode:
             # Effect measurement only (改修②). Not for real work: the sender confirms the task uses test data.
@@ -998,6 +1028,12 @@ class Engine:
 
             self.store.update(job['id'], intake_classification=intake, skill_selection=skill_selection, evaluation=evaluation)
             job['evaluation'] = evaluation
+            if token_reduction:
+                # Token reduction ON/OFF for this request only (2026-10-10, measurement of the same request ON vs OFF).
+                job['token_reduction'] = {'side': token_reduction, 'comparison_id': comparison_id}
+                self.store.update(job['id'], token_reduction=job['token_reduction'])
+                self.store.event('token_reduction', 'この依頼のトークン削減：' + ('ON' if token_reduction == 'on' else 'OFF（記録だけ）')
+                                 + ('（ON/OFF の比較）' if comparison_id else ''), job_id=job['id'])
             if evaluation:
                 self.store.event('evaluation_job', '効果検証用の依頼（モード' + evaluation['mode'] + '）', job_id=job['id'])
             job['intake_classification'] = intake
@@ -1191,6 +1227,13 @@ class Engine:
                 elif approval['kind'] == 'question':
 
                     self._register_scope_transfer(self.store.get(approval_id, 'approval'))
+                    if allow and approval['payload'].get('reference_guard'):
+                        # Secret guard (team_reference_guard): "withhold" leaves out only the snapshot that was shown
+                        # (by hash); a changed HANDOFF.md is checked again. "removed" simply checks again on retry.
+                        from team_reference_guard import QUESTION_ID
+                        if (clean or {}).get(QUESTION_ID, {}).get('option_id') == 'withhold':
+                            hashes = list(dict.fromkeys(job.get('withheld_references', []) + approval['payload']['withhold_hashes']))
+                            self.store.update(job['id'], withheld_references=hashes)
 
                     if allow and not any(a['task_id']==task['id'] and a['status']=='pending' and a['kind']=='context_conflict' for a in self.store.all('approval')):
 
@@ -1225,7 +1268,9 @@ class Engine:
 
                         raise ValueError('引き継ぎ情報の矛盾を先に解消してください。')
 
-                    has_pending = bool(approval.get('payload', {}).get('review_findings')) or any(t['job_id'] == job['id'] and t['status'] == 'handed_off' for t in self.store.all('task'))
+                    has_pending = (bool(approval.get('payload', {}).get('review_findings'))
+                                   or bool(approval.get('payload', {}).get('pending_items'))
+                                   or any(t['job_id'] == job['id'] and t['status'] == 'handed_off' for t in self.store.all('task')))
 
                     if allow:
                         self.store.update(job['id'], status='accepted_with_pending_checks' if has_pending else 'accepted')
@@ -1591,6 +1636,8 @@ class Engine:
             '確認担当は指摘ごとに根拠、該当する利用者条件、修正箇所を示す。目安との差だけならdoneとしchecksに記録する。'
             + 'statusは担当工程で判定する。必須作業完了ならdone、修正必要ならneeds_changes。'
 
+            + STAGE_COMPLETION_RULE +
+
             '依頼全体に後続作業があるだけでblockedにしない。handoffは承認済みの未完了範囲を移管する場合のみ。'
 
             '再試行前に現在の変更と証拠を確認し、完了済み処理を二重実行しない。実行・未実行の検証を分けてchecksに記録する。\n'
@@ -1625,7 +1672,8 @@ class Engine:
 
             + '\n範囲が指定されている場合、その判断を後続担当にも適用する。後回しとされた検証だけが残る場合は質問を繰り返さず、status=handoffで未実施項目をchecksとsummaryに明記する。新しい障害や範囲外の判断はblockedで質問する。handoffは合格や元の依頼全体の完了を意味しない。\n'
 
-            + '\n\n引き継ぎDBの最新情報と履歴（出典・検証状態を確認）:\n' + self.handoff.context(job, ctx.context_files, ctx.context_refs, context_budget(self.config)))
+            + '\n\n引き継ぎDBの最新情報と履歴（出典・検証状態を確認）:\n' + self.handoff.context(job, ctx.context_files, ctx.context_refs, context_budget(self.config),
+                                                                                      ctx.reference_candidates))
 
 
 
@@ -1739,11 +1787,38 @@ class Engine:
 
                 raise ProviderError('検証結果の形式が不正です。')
 
+            # Legacy stored reports can omit the new field. New provider reports
+            # must supply it through RESULT_SCHEMA, before this validation step.
+            pending_checks = result.get('pending_checks', [])
+            if not isinstance(pending_checks, list) or not all(isinstance(x, str) and x.strip() for x in pending_checks):
+                raise ProviderError('未確認の必須検証の形式が不正です。')
+
             if not isinstance(result.get('question'), str):
 
                 raise ProviderError('質問の形式が不正です。')
 
 
+
+    def _pending_acceptance_items(self, job_id, reviews):
+        """Use the current review cycle's explicit pending checks.
+
+        Original stage reports remain visible in stage_checks; they must not
+        keep a resolved check pending forever after a new review of evidence.
+        User-approved handoffs remain pending independently of review prose.
+        """
+        items = []
+        for task in self.store.all('task'):
+            if task['job_id'] != job_id or task['status'] != 'handed_off':
+                continue
+            result = task.get('result') or {}
+            items.append({'title': task['title'], 'note': task.get('handoff_note', ''),
+                          'checks': result.get('pending_checks') or result.get('checks', [])})
+        for review in reviews:
+            pending = review['result'].get('pending_checks') or []
+            if pending:
+                items.append({'title': review['title'], 'note': '今回のレビューで未確認と報告された必須項目です。',
+                              'checks': pending})
+        return items
 
     def _finish(self, task, result):
 
@@ -1924,14 +1999,21 @@ class Engine:
                                 for t in reviews if t['result'].get('status') == 'needs_changes']
                     self.new_approval(task, 'completion', {'summary': summary, 'checks': checks,
 
+                        'stage_checks': [{'task_id': t['id'], 'title': t['title'],
+                                          'reported_status': t['result'].get('status'),
+                                          'checks': t['result'].get('checks', []),
+                                          'pending_checks': t['result'].get('pending_checks', [])}
+                                         for t in self.store.all('task')
+                                         if t['job_id'] == job['id'] and t['role'] in ('builder', 'researcher')
+                                         and t['status'] in ('succeeded', 'handed_off')
+                                         and isinstance(t.get('result'), dict)],
+
                         'note': 'AIのレビュー結果です。実機や利用者による確認は別途必要です。'
                                 + ('レビュー指摘（未修正）があります。内容を見て、受け入れるか差し戻すかを決めてください。' if findings else ''),
 
                         'review_findings': findings,
 
-                        'pending_items': [{'title': t['title'], 'note': t.get('handoff_note', ''), 'checks': (t.get('result') or {}).get('checks', [])}
-
-                                          for t in self.store.all('task') if t['job_id'] == job['id'] and t['status'] == 'handed_off']})
+                        'pending_items': self._pending_acceptance_items(job['id'], reviews)})
 
             elif result['status'] == 'needs_changes':
                 # Keep confirmation read-only; insert a builder and re-confirmation
@@ -2036,6 +2118,51 @@ class Engine:
                            '利用者が決めるべきこと（範囲・方針・公開・費用・安全・元の依頼と食い違う点）だけを、この計画の時点でまとめてquestionsにする。')
                 prompt += '\n判断が必要ならquestionsを返してtasks=[]とする。それ以外は1〜6個の小さな作業を実行順に提案してください。レビューは統括が追加するので不要です。認証・権限・入力検証・秘密情報・外部送信・破壊操作に関わる変更ならsecurity_review_required=true、それ以外はfalseとする。'
             ctx.agent_run['context_refs'] = ctx.context_refs
+            # Secret policy first (2026-10-10 user decision, ranks above the token reduction and works with it ON or
+            # OFF): a HANDOFF.md snapshot with a credential-like string is not sent. The task stops before any model
+            # call and a person decides (shown masked). A snapshot the person chose to withhold is left out.
+            from team_reference_guard import check as guard_references, question as guard_question, strip as strip_reference
+            blocked, withheld = guard_references(ctx.reference_candidates,
+                                                 self.store.get(task['job_id'], 'job').get('withheld_references', []))
+            if blocked:
+                with self.store.atomic():
+                    self.store.update(task['id'], status='blocked',
+                                      summary='HANDOFF.md の控えに秘密情報らしき文字列があるため、モデルへ送る前に止めました。')
+                    self.store.update(task['job_id'], status='blocked')
+                    self.new_approval(task, 'question', guard_question(blocked))
+                self.store.event('reference_guard', 'HANDOFF.md の控えに秘密情報らしき文字列（'
+                                 + str(sum(len(b['findings']) for b in blocked)) + 'か所）。送らずに利用者の判断を待ちます。',
+                                 task['id'], task['job_id'])
+                agent_outcome, failure_code = 'held', 'reference_secret'
+                return
+            for _, text in withheld:
+                stripped = strip_reference(prompt, text)
+                if stripped is None:
+                    raise ProviderError('HANDOFF.md の控えを除いて送ることができませんでした（分割された文脈など）。'
+                                        'モデルへは送っていません。HANDOFF.md から該当の文字列を削除してください。', 'reference_secret')
+                prompt = stripped
+            ctx.reference_candidates = [(f, t) for f, t in ctx.reference_candidates if all(t != w for _, w in withheld)]
+            # Reference-context image optimisation (team_context_optimizer). SHADOW records the choice only; AUTO
+            # replaces the reference-only text by images when every check passed. The record keeps hashes, sizes
+            # and reasons only — never the text or an image. Anything unexpected keeps the text input.
+            from team_context_optimizer import apply, decide, for_job, load_estimators
+            optimization, selection = decide(ctx.reference_candidates, task['profile']['adapter'], task['profile']['model'],
+                                             for_job(self.config, self.store.get(task['job_id'], 'job')),
+                                             load_estimators(self.store.directory), task['attempt'])
+            if selection:
+                replaced = apply(prompt, selection)
+                if replaced is None:
+                    optimization['selected_transport'] = 'text'
+                    for item in optimization['references']:
+                        if item.get('field') == selection['field']:
+                            item['decision_reason'] = 'reference_not_located'
+                else:
+                    optimization.update(prompt_chars_before=len(prompt), prompt_chars_after=len(replaced),
+                                        image_pages=len(selection['images']))
+                    prompt = replaced
+                    ctx.reference_images = selection['images']
+            if optimization:
+                ctx.agent_run['context_optimization'] = optimization
             ctx.agent_run['context_size'] = {'user_prompt_chars':len(prompt),
                 'native_instructions_chars':len(ctx.agent_system_instructions),
                 'skill_catalog_chars':len(shared_catalog(definition.name)), 'metric':'characters, not provider tokens'}
@@ -2121,6 +2248,15 @@ class Engine:
 
                                           if isinstance(result.get('checks'), list) else []}
 
+                # 2026-10-12 (user approved, plan C): a Claude sign-in failure holds the task instead of failing it.
+                # Claude tasks stay queued until the sign-in changes (team_claude_auth); the user is notified once.
+                guard = getattr(self, 'claude_auth', None)
+                if (not cancelled and not recovery and guard is not None and task['profile'].get('adapter') == 'claude'
+                        and guard.on_failure(exc)):
+                    self.store.update(task['id'], status='queued', failure_code='claude_auth_wait',
+                                      summary='Claude Code のログインが切れたため待機しています。ログインし直すか、長期の鍵を入れ直すと自動で再開します。')
+                    self.store.event('claude_auth_wait', 'Claude Code のログインが切れたため、Claude の担当の作業を止めています。', task['id'], task['job_id'])
+                    return
                 # 2026-10-08: a provider usage limit is waited out instead of failing the job (up to 3 automatic tries).
                 from team_recovery import usage_limit_retry_at
                 retry_at = None if cancelled or recovery else usage_limit_retry_at(exc, now())
@@ -2220,6 +2356,17 @@ class Engine:
 
                     continue  # waiting for a provider usage limit to reset
 
+                guard = getattr(self, 'claude_auth', None)
+                if guard is not None and task['profile'].get('adapter') == 'claude':
+                    logged_in = self.claude_logged_in()
+                    if not guard.available(logged_in):
+                        if logged_in is False:
+                            guard.on_failure('未ログイン')
+                        if task.get('failure_code') != 'claude_auth_wait':
+                            self.store.update(task['id'], failure_code='claude_auth_wait',
+                                summary='Claude Code の認証を待っています。作業ボードでログイン状態を確認してください。認証の復旧後に自動で再開します。')
+                        continue
+
                 task = self.store.update(task['id'], status='running', attempt=task['attempt'] + 1, started_at=now(), retry_at=None)
 
                 busy.add(canonical(job['project']))
@@ -2306,14 +2453,45 @@ class Engine:
             latest = [t for t in reviews if (t.get('review_cycle') or 0) == cycle]
             findings = [{'reviewer': t.get('agent_name', 'reviewer'), 'summary': t['result']['summary']}
                         for t in latest if t['result'].get('status') == 'needs_changes']
+            pending_items = self._pending_acceptance_items(job_id, latest)
+            pending_checks = {
+                check.strip().casefold()
+                for item in pending_items
+                for check in (item.get('checks') or [])
+                if isinstance(check, str) and check.strip()
+            }
+            for task in tasks:
+                if (task['role'] not in ('builder', 'researcher')
+                        or task['status'] not in ('blocked', 'failed', 'interrupted')
+                        or not isinstance(task.get('result'), dict)):
+                    continue
+                reported_pending = task['result'].get('pending_checks') or []
+                if not isinstance(reported_pending, list):
+                    continue
+                checks = [check for check in reported_pending
+                          if isinstance(check, str) and check.strip()
+                          and check.strip().casefold() not in pending_checks]
+                if checks:
+                    pending_items.append({
+                        'title': task['title'],
+                        'note': '修正せず受領へ進む前に、停止した担当が未確認と報告した項目です。',
+                        'checks': checks,
+                    })
+                    pending_checks.update(check.strip().casefold() for check in checks)
             self.store.update(job_id, status='awaiting_acceptance')
             self.new_approval(latest[-1], 'completion', {
                 'summary': '\n\n'.join(t.get('agent_name', 'reviewer') + ': ' + t['result']['summary'] for t in latest),
                 'checks': [t.get('agent_name', 'reviewer') + ': ' + c for t in latest for c in t['result'].get('checks', [])],
                 'note': 'AIのレビュー結果です。利用者が指摘を修正せずに受け入れへ進めました。内容を見て、受け入れるか差し戻すかを決めてください。',
                 'review_findings': findings,
-                'pending_items': [{'title': t['title'], 'note': t.get('handoff_note', ''), 'checks': (t.get('result') or {}).get('checks', [])}
-                                  for t in tasks if t['status'] == 'handed_off']})
+                'pending_items': pending_items,
+                'stage_checks': [{'task_id': t['id'], 'title': t['title'],
+                                  'reported_status': t['result'].get('status'),
+                                  'checks': t['result'].get('checks', []),
+                                  'pending_checks': t['result'].get('pending_checks', [])}
+                                 for t in tasks if t['role'] in ('builder', 'researcher')
+                                 and t['status'] in ('succeeded', 'handed_off', 'blocked', 'failed', 'interrupted')
+                                 and isinstance(t.get('result'), dict)]})
             self.store.event('accepted_without_fix', '利用者が指摘を修正せずに受け入れ確認へ進めました。', job_id=job_id)
         try:
             from team_preview import start as start_previews

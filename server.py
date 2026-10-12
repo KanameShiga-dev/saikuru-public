@@ -85,6 +85,41 @@ class App:
         self.mobile_error = None
         from team_notifications import Notifications
         self.notifications = Notifications(self)
+        # Claude sign-in (2026-10-12, plans A and C): the long-lived token and the hold after a sign-in failure.
+        from team_claude_auth import ClaudeAuth
+        from team_config import claude_config_directory
+        self.claude_auth = ClaudeAuth(claude_config_directory(), notify=self.notify_claude_auth)
+        self.engine.claude_auth = self.claude_auth
+        self.engine.claude_logged_in = lambda: self.health.get('claude', {}).get('authenticated')
+        self.apply_claude_auth()
+
+    def notify_claude_auth(self, message):
+        """A sign-in problem is told at once when PC notifications are on (not only in business hours: work stops)."""
+        self.store.event('claude_auth', message)
+        if self.config.get('notifications', {}).get('windows_enabled'):
+            from team_notifications import windows_message
+            windows_message(message)
+
+    def apply_claude_auth(self):
+        """Show the sign-in state of Claude workers: a stored long-lived token counts as signed in; a hold is shown."""
+        claude = self.health.get('claude')
+        if not claude or not claude.get('available'):
+            return
+        if self.claude_auth.configured():
+            claude.update(authenticated=True, long_lived_token=True,
+                          note='長期の鍵でログイン済み（自動更新なし、有効期限は約1年）。モデル接続は実行時に確認。')
+        else:
+            claude['long_lived_token'] = False
+        if self.claude_auth.snapshot()['held']:
+            claude['note'] = ('ログインが切れたため、Claude の担当の作業を止めています。ログインし直すか、'
+                              '長期の鍵を入れ直すと自動で再開します。')
+
+    def claude_status(self):
+        """environment_status for Claude, without the login check when a long-lived token is stored."""
+        current = environment_status({'claude': self.commands.get('claude')}, check_auth=not self.claude_auth.configured())
+        self.health.update(current)
+        self.apply_claude_auth()
+        return current
 
     def update_monitors(self):
         return (self.cli_update, self.claude_update, self.copilot_update)
@@ -93,7 +128,7 @@ class App:
         return any(m.snapshot()['state'] == 'updating' for m in self.update_monitors())
 
     def refresh_claude_auth(self):
-        self.health.update(environment_status({'claude': self.commands.get('claude')}))
+        self.claude_status()
         if self.health.get('claude', {}).get('authenticated'):
             self.usage.refresh_now('claude')
 
@@ -106,14 +141,16 @@ class App:
                 or (name == 'claude' and 'authenticated' not in self.health.get(name, {})))}
             if not pending or self.engine.shutdown.wait(10):
                 break
-            current = environment_status(pending)
+            current = environment_status(pending, check_auth=not self.claude_auth.configured())
             self.health.update(current)
+            self.apply_claude_auth()
             if current.get('claude', {}).get('authenticated'):
                 self.usage.refresh_now('claude')
         while not self.engine.shutdown.wait(60):
             previous = self.health.get('claude', {}).get('authenticated')
-            current = environment_status({'claude': self.commands.get('claude')})
-            self.health.update(current)
+            if self.claude_auth.refresh() == 'released':
+                self.store.event('claude_auth', 'Claude Code のログインが戻りました。止めていた Claude の担当の作業を再開します。')
+            current = self.claude_status()
             if current.get('claude', {}).get('authenticated') and previous is not True:
                 self.usage.refresh_now('claude')
 
@@ -259,6 +296,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
                 return self.send(200, self.app.notifications.snapshot())
+            if path == '/api/context-optimization':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                from team_context_metrics import comparisons, summary
+                from team_context_optimizer import load_estimators, overview
+                tasks = self.app.store.all('task')
+                return self.send(200, dict(overview(self.app.config, load_estimators(self.app.store.directory)),
+                                           records=summary(tasks), comparisons=comparisons(self.app.store.all('job'), tasks)))
             if path == '/api/job/artifact':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -356,11 +401,12 @@ class Handler(BaseHTTPRequestHandler):
             files = {'/history': 'history.html', '/history.js': 'history.js', '/history.css': 'history.css', '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/theme.css': 'theme.css', '/shell.js': 'shell.js',
                      '/skills': 'skills.html', '/skills.js': 'skills.js', '/skills.css': 'skills.css',
                      '/operation-tests': 'operation-tests.html', '/operation-tests.js': 'operation-tests.js',
+                     '/context-optimization': 'context-optimization.html', '/context-optimization.js': 'context-optimization.js',
                      '/attachments.js': 'attachments.js', '/skill-picker.js': 'skill-picker.js', '/ledger': 'ledger.html', '/ledger.js': 'ledger.js', '/ledger-consultation.js': 'ledger-consultation.js', '/ledger.css': 'ledger.css'}
             if path not in files:
                 return self.send(404, {'error': '見つかりません。'})
             file = ROOT / 'web' / files[path]
-            return self.send(200, file.read_bytes(), (mimetypes.guess_type(file)[0] or 'text/plain') + '; charset=utf-8', path in ('/', '/ledger', '/operation-tests', '/history'))
+            return self.send(200, file.read_bytes(), (mimetypes.guess_type(file)[0] or 'text/plain') + '; charset=utf-8', path in ('/', '/ledger', '/operation-tests', '/history', '/context-optimization'))
         except PermissionError as exc:
             self.send(403, {'error': str(exc)})
         except ValueError as exc:
@@ -492,21 +538,36 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('担当の指定が不正です。')
                     for profile in role_profiles.values():
                         self.app.models.validate(profile)
+                # Token reduction for this request only: 'on' / 'off', or the same request twice (OFF, then ON) to
+                # compare the token use (2026-10-10). The pair shares a comparison id.
+                token_reduction = body.get('token_reduction') or None
+                compare = body.get('token_reduction_compare') is True
+                if token_reduction not in (None, 'on', 'off') or (compare and token_reduction):
+                    raise ValueError('トークン削減は「設定に従う・ON・OFF・ON と OFF で比較」から1つ選んでください。')
+                if compare and (body.get('auto_execute') is True or body.get('evaluation_confirmed') is not True):
+                    raise ValueError('ON/OFF比較は検証用データだけで行ってください。「検証用の課題」を確認し、「計画後、自動で進める」を外してください。同じ保存先への二重実行を避け、各側の承認前に対象の状態を確認してください。')
                 prepared = self.app.prepare_new_request(str(body.get('project', '')))
-                result = engine.create_job(str(body.get('title', '')), goal,
-                                           str(body.get('project', '')), body.get('auto_execute') is True,
-                                           attachment_ids=body.get('attachment_ids', []),
-                                           skill_mode=str(body.get('skill_mode') or 'auto'), skill_ids=body.get('skill_ids', []),
-                                           evaluation_mode=body.get('evaluation_mode') or None,
-                                           evaluation_confirmed=body.get('evaluation_confirmed') is True,
-                                           role_profiles=role_profiles, **document)
-                self.app.store.event('new_request_harness', ' '.join(prepared), job_id=result['id'])
-                if found['confirm']:
-                    from team_audit import record as audit
-                    self.app.store.event('input_guard', '利用者が確認して送信: ' + '、'.join(found['confirm']), job_id=result['id'])
-                    audit(result['project'], {'kind': 'input_guard', 'job_id': result['id'], 'categories': found['confirm'],
-                                              'outcome': 'sent_after_confirmation'})
-                result = dict(result, prepared=prepared)
+                runs = [('off', '（トークン削減 OFF）'), ('on', '（トークン削減 ON）')] if compare else [(token_reduction, '')]
+                comparison_id = secrets.token_hex(16) if compare else None
+                created = []
+                for side, suffix in runs:
+                    title = str(body.get('title', ''))
+                    job = engine.create_job((title[:160 - len(suffix)] + suffix) if suffix else title, goal,
+                                            str(body.get('project', '')), body.get('auto_execute') is True,
+                                            attachment_ids=body.get('attachment_ids', []),
+                                            skill_mode=str(body.get('skill_mode') or 'auto'), skill_ids=body.get('skill_ids', []),
+                                            evaluation_mode=body.get('evaluation_mode') or None,
+                                            evaluation_confirmed=body.get('evaluation_confirmed') is True,
+                                            role_profiles=role_profiles, token_reduction=side, comparison_id=comparison_id,
+                                            **document)
+                    self.app.store.event('new_request_harness', ' '.join(prepared), job_id=job['id'])
+                    if found['confirm']:
+                        from team_audit import record as audit
+                        self.app.store.event('input_guard', '利用者が確認して送信: ' + '、'.join(found['confirm']), job_id=job['id'])
+                        audit(job['project'], {'kind': 'input_guard', 'job_id': job['id'], 'categories': found['confirm'],
+                                               'outcome': 'sent_after_confirmation'})
+                    created.append(job)
+                result = dict(created[0], prepared=prepared, comparison=[j['id'] for j in created] if compare else None)
             elif path == '/api/jobs/artifact-url':
                 result = engine.record_artifact_url(str(body.get('id', '')), str(body.get('url', '')), str(body.get('note', '')))
             elif path == '/api/jobs/rework':
@@ -675,6 +736,11 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.app.copilot_update.request_check()
             elif path == '/api/copilot-update/install':
                 result = self.app.copilot_update.request_update(body.get('version'))
+            elif path == '/api/context-optimization':
+                from team_context_optimizer import update_settings
+                with self.app.store.lock:
+                    self.app.save_config(update_settings(json.loads(json.dumps(self.app.config)), body))
+                result = {'ok': True, 'settings': self.app.config['context_optimization']}
             elif path == '/api/decision-settings':
                 config = json.loads(json.dumps(self.app.config))
                 config['decision'] = body

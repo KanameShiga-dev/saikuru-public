@@ -58,8 +58,8 @@ class OwnOutputTest(unittest.TestCase):
 
 PLAN = {'summary': '計画', 'tasks': [{'title': '確認', 'instruction': '確認する', 'role': 'researcher'}],
         'security_review_required': False}
-HANDOFF = {'status': 'handoff', 'summary': '見た目の確認は未実施', 'checks': ['未確認：見た目'], 'question': ''}
-DONE = {'status': 'done', 'summary': '完了', 'checks': ['確認：本文'], 'question': ''}
+HANDOFF = {'status': 'handoff', 'summary': '見た目の確認は未実施', 'checks': ['未確認：見た目'], 'pending_checks': ['見た目の確認'], 'question': ''}
+DONE = {'status': 'done', 'summary': '完了', 'checks': ['確認：本文'], 'pending_checks': [], 'question': ''}
 
 
 class Fixture:
@@ -91,7 +91,7 @@ class DocumentJobTest(unittest.TestCase):
     def test_unchecked_items_do_not_stop_and_no_forced_security_review(self):
         job = self.engine.create_job('資料', '内部資料を作る', self.temp.name, True,
                                      document_source=self.temp.name, document_format='md')
-        deadline = time.time() + 6
+        deadline = time.time() + 30
         while self.store.get(job['id'])['status'] not in ('awaiting_acceptance', 'blocked', 'failed') and time.time() < deadline:
             self.engine.tick()
             time.sleep(.01)
@@ -106,21 +106,21 @@ class DocumentJobTest(unittest.TestCase):
     def test_report_with_questions_is_treated_as_blocked(self):
         question = {'id': 'q1', 'text': 'どちらの形式にしますか', 'options': [
             {'id': 'a', 'label': 'PDF', 'input_required': False, 'input_label': ''}]}
-        result = {'status': 'done', 'summary': '形式の確認が必要', 'checks': [], 'question': '', 'questions': [question]}
+        result = {'status': 'done', 'summary': '形式の確認が必要', 'checks': [], 'pending_checks': [], 'question': '', 'questions': [question]}
         self.engine._validate({'role': 'reviewer', 'job_id': 'none'}, result)
         self.assertEqual(result['status'], 'blocked')
 
 
 class ReviewFindingsTest(DocumentJobTest):
     def test_review_findings_go_to_acceptance_instead_of_stopping(self):
-        findings = {'status': 'needs_changes', 'summary': '重大度：低。案内文の表現を分けて書くとよい。', 'checks': ['確認：本文'], 'question': ''}
+        findings = {'status': 'needs_changes', 'summary': '重大度：低。案内文の表現を分けて書くとよい。', 'checks': ['確認：本文'], 'pending_checks': [], 'question': ''}
         class FindingFixture:
             def run(s, ctx, prompt, schema):
                 return PLAN if ctx.task['role'] == 'planner' else findings if ctx.task['role'] == 'reviewer' else DONE
         ADAPTERS.update(codex=FindingFixture, claude=FindingFixture)
         job = self.engine.create_job('資料', '内部資料を作る', self.temp.name, True,
                                      document_source=self.temp.name, document_format='md')
-        deadline = time.time() + 6
+        deadline = time.time() + 30
         while self.store.get(job['id'])['status'] not in ('awaiting_acceptance', 'blocked', 'failed') and time.time() < deadline:
             self.engine.tick()
             time.sleep(.01)

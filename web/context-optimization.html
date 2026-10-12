@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>采来 — 参考情報の画像化</title><link rel="stylesheet" href="/theme.css?v=ui-redesign-20261003"><link rel="stylesheet" href="/style.css?v=stop-cause-20261008"><script src="/context-optimization.js?v=context-image-20261010e" defer></script></head>
+<body><header class="app-header"><a href="/" class="brand"><span class="mark">采</span><span>采来 — サイクル —<small>AIに采配を。開発に連続性を。</small></span></a>
+<nav class="app-tabs" aria-label="画面の切り替え"><a href="/">作業ボード</a><a href="/ledger">プロジェクト台帳</a><a href="/history">プロジェクト履歴</a><a href="/operation-tests">操作テスト</a></nav></header><main>
+<h1 class="page-title">参考情報の画像化</h1>
+<section><h2>しくみ</h2>
+<p>担当へ渡す参考情報（プロジェクトの HANDOFF.md の控え）を、文字をそのまま描いた画像にして送ると入力の利用量が減る場合があります。采来は作業ごとに、テキストと画像のどちらが有利かを判定します。</p>
+<p>依頼の文・担当への指示・利用者の判断・作業の証拠・方針ファイルは、常にテキストで送ります。コード・コマンド・パスや秘密情報らしき文字列を含む参考情報も画像にしません。画像は Claude の担当にだけ送ります（GitHub Copilot は画像に未対応、Codex は未校正）。</p>
+</section>
+<section><h2>設定</h2>
+<form id="settings-form">
+<fieldset><legend>トークン削減（参考情報の画像化）</legend><p id="status" class="operation-progress" role="status"></p><label class="check"><input type="checkbox" id="reduction" role="switch">トークン削減を使う（ON）</label><p class="hint">ON：条件を満たした参考情報を画像で送ります。OFF：従来どおりテキストで送ります。</p><label class="check"><input type="checkbox" id="record">OFF のときも判定を記録する（ON と OFF の使用量を比べるため。送る内容は変えません）</label></fieldset>
+<label for="ratio">画像にする基準：推定の削減が <strong id="ratio-value">-</strong> 以上</label>
+<input id="ratio" type="range" min="10" max="30" step="1" aria-describedby="ratio-help">
+<p id="ratio-help" class="hint">10〜30%で選べます（上限30%）。基準を下げるほど画像で送る場面が増えます。推定は、同じ CLI・モデル・文字サイズでの実測にもとづきます。実測が無いモデルは、基準に関係なくテキストで送ります。</p>
+<p id="fixed" class="hint"></p>
+<div class="actions"><button id="save" class="primary" type="submit">保存する</button></div>
+<p id="message" role="status" aria-live="polite"></p>
+</form>
+</section>
+<section><h2>担当ごとの見込み</h2><p class="hint">見込みは、本番と同じ計算で、参考情報の長さごとに求めた推定です（コード・パスなどを含まない普通の文章の場合）。</p><div id="roles"></div></section>
+<section><h2>実測（校正）の記録</h2><p class="hint">測り直し：<code>python -X utf8 team_context_calibrate.py claude &lt;モデル&gt; 1500 &lt;文字サイズpx&gt;</code>（決まったサンプルの文だけを送ります）。30日で使えなくなります。</p><div id="measurements"></div></section>
+<section><h2>同じ依頼の ON／OFF 比較</h2><p class="hint">依頼画面の「効果検証・計測」で「ON と OFF で比較する」を選んで作った依頼の組です。再試行を含む全担当の実行を、CLI が返したトークン数で合計します。測れなかった実行は0とせず件数で示し、合計は「不完全」とします。</p><div id="pairs"></div></section>
+<section><h2>トークン使用量の比較（ON／OFF の全作業）</h2><p class="hint">采来が記録した作業ごとの CLI のトークン数です。作業の内容でも変わるため、件数が少ないうちは差を断定しません。</p><div id="comparison"></div></section>
+<section><h2>最近の判定</h2><div id="records"></div></section>
+</main></body></html>

@@ -225,7 +225,7 @@ class AdapterTest(unittest.TestCase):
             token_file = Path(json.loads(command[command.index('--additional-mcp-config') + 1])
                               ['mcpServers']['project_work']['args'][-1])
             seen['token'] = json.loads(token_file.read_text(encoding='utf-8'))['token']
-            return json.dumps({'status': 'done', 'summary': 's', 'checks': ['c'], 'question': ''})
+            return json.dumps({'status': 'done', 'summary': 's', 'checks': ['c'], 'pending_checks': [], 'question': ''})
         from team_engine import RESULT_SCHEMA
         with mock.patch.object(CopilotAdapter, '_call', fake):
             CopilotAdapter().run(ctx, 'x', RESULT_SCHEMA)

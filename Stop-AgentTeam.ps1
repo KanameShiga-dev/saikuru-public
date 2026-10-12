@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param([int]$Port = 8790)
 $ErrorActionPreference = 'Stop'
 $url = "http://127.0.0.1:$Port"

@@ -222,10 +222,15 @@ class CodexAdapter:
 class ClaudeAdapter:
     def run(self, ctx, prompt, schema):
         profile = ctx.task['profile']
+        # 2026-10-12 (plan A): with the long-lived token stored by the user, the regular login is not checked; the
+        # token goes to this CLI process only (team_claude_auth). A token that no longer works fails the run with a
+        # sign-in error, and the engine then holds Claude tasks (plan C).
+        guard = getattr(getattr(ctx, 'engine', None), 'claude_auth', None)
+        stored_token = guard is not None and guard.configured()
         # The status check sometimes answers slowly (seen 2026-10-08: >15 s once, 0.7-3.4 s normally). A single slow
         # answer must not fail the task, so wait longer and ask once more before giving up. Logged-out stays fatal.
         authentication = None
-        for attempt in range(2):
+        for attempt in range(0 if stored_token else 2):
             ctx.check()
             try:
                 authentication = subprocess.run(ctx.command + ['auth', 'status', '--json'], capture_output=True, text=True,
@@ -241,7 +246,7 @@ class ClaudeAdapter:
                 raise ProviderError('Claude Code CLIを起動できず、ログインを確認できません。CLIの導入状態を確認してください。'
                                     'モデル実行は開始していません。', 'claude_auth') from exc
         try:
-            logged_in = json.loads(authentication.stdout).get('loggedIn') is True
+            logged_in = stored_token or json.loads(authentication.stdout).get('loggedIn') is True
         except (ValueError, AttributeError) as exc:
             raise ProviderError('Claude Code CLIのログイン確認の結果を読み取れませんでした。CLIの更新状態を確認してから再試行してください。'
                                 'モデル実行は開始していません。', 'claude_auth') from exc
@@ -254,6 +259,10 @@ class ClaudeAdapter:
         env['AGENT_TEAM_RUN_TOKEN'] = ctx.token
         env['AGENT_TEAM_ENDPOINT'] = ctx.endpoint
         env['AGENT_TEAM_TASK'] = ctx.task['id']
+        if stored_token:
+            # An API key in the environment would take precedence over the token (Claude Code's documented order).
+            env.pop('ANTHROPIC_API_KEY', None)
+            env = guard.env(env)
         hook = Path(__file__).with_name('approval_hook.py')
         settings = {'hooks': {'PreToolUse': [{'matcher': '*', 'hooks': [
             {'type': 'command', 'command': sys.executable, 'args': [str(hook)],
@@ -281,7 +290,9 @@ class ClaudeAdapter:
                   '--model', profile['model'], '--effort', profile['effort'],
                   '--settings', json.dumps(settings), '--json-schema', json.dumps(schema),
                   '--no-session-persistence']
-        if getattr(ctx, 'attachment_ids', []):
+        # Images (user attachments or reference images drawn by 采来) need the structured input.
+        structured = bool(getattr(ctx, 'attachment_ids', []) or getattr(ctx, 'reference_images', None))
+        if structured:
             command += ['--input-format', 'stream-json']
         for folder in getattr(ctx, 'skill_dirs', []):
             # Enabled skills of this project: readable by the file tools (采来 still denies writes there).
@@ -289,7 +300,7 @@ class ClaudeAdapter:
         process = None
         try:
             process = Process(command, ctx.project, env)
-            if getattr(ctx, 'attachment_ids', []):
+            if structured:
                 from team_attachments import provider_input
                 process.send({'type': 'user', 'message': {'role': 'user',
                     'content': provider_input(ctx, prompt, 'claude')}, 'parent_tool_use_id': None})
@@ -490,6 +501,10 @@ class CopilotAdapter:
         if getattr(ctx, 'attachment_ids', []):
             raise ProviderError('GitHub Copilotは添付ファイル付きの作業に未対応です。CodexまたはClaudeへ切り替えてください。'
                                 'モデル実行は開始していません。', 'copilot_scope')
+        if getattr(ctx, 'reference_images', None):
+            # Never expected: the optimiser keeps text for Copilot. Refuse rather than drop the replaced reference.
+            raise ProviderError('GitHub Copilotには参考画像を送れません（参考情報の画像化の判定の誤り）。モデル実行は開始していません。',
+                                'copilot_scope')
         if getattr(ctx, 'artifact_format', None):
             raise ProviderError('GitHub CopilotはClaudeのArtifact形式の資料に未対応です（Claudeの道具を使うため）。'
                                 'Claudeへ切り替えてください。モデル実行は開始していません。', 'copilot_scope')

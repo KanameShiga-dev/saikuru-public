@@ -57,6 +57,34 @@ def _codex(usage):
     return {'input_uncached': uncached, 'cache_read': cached, 'cache_creation': None, 'output': usage.get('outputTokens')}
 
 
+def copilot_normalized(tokens):
+    """Normalized tokens from the Copilot CLI usage file totals (agent_run.copilot_tokens, team_adapters.copilot_tokens).
+    Copilot's inputTokens already include the cache reads and writes (checked on 445 recorded runs, 2026-10-10)."""
+    if not isinstance(tokens, dict) or not any(isinstance(v, int) for v in tokens.values()):
+        return {'measurement': 'unknown', 'input_uncached': None, 'cache_read': None, 'cache_creation': None,
+                'output': None, 'input_total': None, 'source': None}
+    total, read, write = (tokens.get(k) for k in ('inputTokens', 'cacheReadTokens', 'cacheWriteTokens'))
+    uncached = total - read - write if all(isinstance(v, int) for v in (total, read, write)) and total >= read + write else None
+    complete = uncached is not None and all(type(tokens.get(k)) is int and tokens[k] >= 0
+        for k in ('inputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'outputTokens'))
+    return {'measurement': 'final' if complete else 'partial', 'input_uncached': uncached, 'cache_read': read, 'cache_creation': write,
+            'output': tokens.get('outputTokens'), 'input_total': total, 'reasoning': tokens.get('reasoningTokens'),
+            'source': 'copilot_usage_file'}
+
+
+# Price-like weights relative to one uncached input token (Anthropic API list prices: cache read 0.1x, cache write
+# 1.25x, output 5x). An approximation of cost and plan-limit pressure, not a provider's own count.
+WEIGHTS = {'input_uncached': 1.0, 'cache_read': 0.1, 'cache_creation': 1.25, 'output': 5.0}
+
+
+def weighted(row):
+    """Weighted tokens of one normalized row, or None when an essential part is unknown. A provider without cache
+    writes (Codex) reports None for cache_creation, which counts as 0."""
+    if any(not isinstance(row.get(k), int) for k in ('input_uncached', 'cache_read', 'output')):
+        return None
+    return round(sum(WEIGHTS[k] * (row.get(k) or 0) for k in WEIGHTS))
+
+
 def normalize(provider, usage, source, partial):
     """Normalized tokens for one attempt: {'measurement': final|partial|unknown, input_uncached, cache_read,
     cache_creation, output, input_total}. Any part the provider did not report stays None."""

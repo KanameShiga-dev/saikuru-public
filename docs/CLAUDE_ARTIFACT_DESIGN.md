@@ -34,8 +34,18 @@
 | 記録 | `artifact_staging_write`（作業フォルダへの書き込み）、`artifact_published`（URLの記録）、`artifact_blocked`。毎回のセキュリティレビューの操作記録にも入る |
 | 依頼文 | `claude_*` の依頼だけ「公開は、利用者が承認した非公開 Artifact への送信だけ」と書く。それ以外の資料作成は従来どおり「公開は禁止」 |
 
+## 変更したファイル（変更前は `data/backups/claude-artifact-20261007-112011/`）
+- 新規：`team_artifact_guard.py`、`test_artifact_guard.py`、`artifact_types/claude_design.md`・`claude_slides.md`・`claude_design_system.md`
+- `team_engine.py`：担当の道具と作業フォルダの準備（`prepare_agent`）、担当への指示（`artifact_instructions`）、判定（`artifact_tool_request`）、URL の記録（`record_artifact_url`）
+- `team_adapters.py`：Artifact の道具の有無をイベントに残す。Artifact の結果から URL を拾う（将来用）
+- `team_document_capabilities.py`：`claude_*` 形式の追加、完了条件・計画のチェック
+- `team_consultation.py`：`claude_*` の依頼の文言
+- `team_security_audit.py`：Artifact のイベントを操作記録に追加
+- `server.py`：`/api/jobs/artifact-url`
+- `web/ledger.html`・`web/ledger-consultation.js`：形式の選択肢と説明
+- `web/app.js`：カードに Artifact の URL を表示
 
-
-## 確認範囲
-
-公開版は構文・配信の確認のみ。実モデルでの制作と外部への送信は未確認です。
+## 注意
+- `artifact_types/*.md` は、claude.ai の種類の説明（SKILL.md）から要点を日本語でまとめたもの。種類が更新されたら見直す。詳しい説明（format.md など）は、作った Artifact からでないと読めないため、送信時にデスクトップ側で確認する。
+- 上流（saikuru-public）からの取り込みでは、これはローカル変更として扱う。
+- 既存のテスト `test_team.EngineTests.test_automatic_assignment_and_acceptance` は、今回の変更前から失敗している（毎回のセキュリティレビューで工程が1つ増えたため）。

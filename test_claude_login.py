@@ -14,7 +14,7 @@ class LoginUrlTest(unittest.TestCase):
         self.assertEqual(login_url('https://claude.ai/oauth/authorize?x=1'), 'https://claude.ai/oauth/authorize?x=1')
         self.assertTrue(login_url('https://console.anthropic.com/oauth/authorize?x=1'))
         for bad in ('http://claude.com/oauth', 'https://evil-claude.com/x', 'https://claude.com.evil.test/x',
-                    'https://user:pw@claude.com/x', 'https://claude.com:8443/x', 'file:///C:/x', 'Paste code here if prompted >'):
+                    'https://user:person@example.invalid/x', 'https://claude.com:8443/x', 'file:///C:/x', 'Paste code here if prompted >'):
             with self.subTest(bad=bad):
                 self.assertIsNone(login_url(bad))
 

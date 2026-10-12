@@ -93,7 +93,7 @@ class UsageLimitParseTest(unittest.TestCase):
 
 PLAN = {'summary': '計画', 'tasks': [{'title': '実装', 'instruction': '実装する', 'role': 'builder'}],
         'security_review_required': False}
-DONE = {'status': 'done', 'summary': '完了', 'checks': ['確認'], 'question': ''}
+DONE = {'status': 'done', 'summary': '完了', 'checks': ['確認'], 'pending_checks': [], 'question': ''}
 
 
 class UsageLimitWaitTest(unittest.TestCase):

@@ -35,8 +35,8 @@ def restore(archive_id, destination):
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     dest = inside(destination)
     app = Path(__file__).parent.resolve()
-    if dest.exists() or dest == inside(r'C:\Projects') or dest.is_relative_to(app) or app.is_relative_to(dest) or dest.is_relative_to(ARCHIVE_ROOT):
-        raise ValueError('新しい空の復元先を C:\\Projects 以下に指定してください。既存フォルダには上書きしません。')
+    if dest.exists() or dest == inside(r'C:\AI_Work') or dest.is_relative_to(app) or app.is_relative_to(dest) or dest.is_relative_to(ARCHIVE_ROOT):
+        raise ValueError('新しい空の復元先を C:\\AI_Work 以下に指定してください。既存フォルダには上書きしません。')
     if not dest.parent.is_dir():
         raise ValueError('復元先の親フォルダを先に作成してください。')
     name = Path(record['source']).name

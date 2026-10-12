@@ -1,6 +1,6 @@
 # 実装計画：人の判断待ち時間の計測（勤務時間内のみ計上・A案）
 
-作成日：2026-10-03　対象：`C:\Projects\Projects\Operations\agent-team`　状態：**実装済み（検証範囲は DECISION_WAIT_METRICS.md を参照）**（2026-10-03 利用者が下記8章の3点を決定）。実装担当：Codex
+作成日：2026-10-03　対象：`C:\AI_Work\Projects\Operations\agent-team`　状態：**実装済み（検証範囲は DECISION_WAIT_METRICS.md を参照）**（2026-10-03 利用者が下記8章の3点を決定）。実装担当：Codex
 
 ## 1. 目的と計測の定義
 

@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from team_config import ROOT
 
-BASE = Path('C:/Projects').resolve()
+BASE = Path('C:/AI_Work').resolve()
 
 
 def folder(value):
@@ -14,7 +14,7 @@ def folder(value):
         raise ValueError('フォルダは絶対パスで指定してください。')
     path = path.resolve()
     if not path.is_relative_to(BASE) or not path.is_dir():
-        raise ValueError('C:\\Projects内の既存フォルダを指定してください。')
+        raise ValueError('C:\\AI_Work内の既存フォルダを指定してください。')
     if path.is_relative_to(ROOT) and not path.is_relative_to(ROOT / 'sample-project'):
         raise ValueError('統括サービスの内部フォルダは選択できません。')
     return path

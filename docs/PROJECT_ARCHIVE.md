@@ -13,7 +13,7 @@ Computer Use・プロジェクトのプログラム・LLMは使いません。�
 
 ## 格納先と記録
 
-`C:\Projects\_project_archives\<アーカイブID>\project.zip`
+`C:\AI_Work\_project_archives\<アーカイブID>\project.zip`
 
 同じ場所の `manifest.json` に各ファイルの相対パス・サイズ・更新時刻・モード・SHA-256を記録します。
 ZIPの中は元フォルダ名を頂点とする構成です。空フォルダも含みます。

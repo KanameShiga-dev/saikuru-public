@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "automatic_operations": false,
+  "computer_use_allowed": false,
+  "decision": {
+    "provider": "ollama",
+    "model": "tev1:0.8b",
+    "shadow": true
+  },
+  "max_parallel_projects": 2,
+  "task_timeout_seconds": 1800,
+  "approval_timeout_seconds": 900,
+  "max_repairs": 2,
+  "roles": {
+    "planner": "codex-standard",
+    "builder": "claude-standard",
+    "researcher": "codex-standard",
+    "reviewer": "codex-standard"
+  },
+  "profiles": {
+    "codex-standard": {
+      "adapter": "codex",
+      "model": "gpt-6-sol",
+      "effort": "medium"
+    },
+    "claude-standard": {
+      "adapter": "claude",
+      "model": "sonnet",
+      "effort": "medium"
+    }
+  },
+  "approved_roots": [
+    "C:\\Projects\\Demo"
+  ]
+}

@@ -44,7 +44,7 @@ ZIPの中のGit接続は解除済みなので、復元してもGitHubへの接�
 追加ストリームも復元する場合は、既存フォルダを上書きしない復元ヘルパーを使ってください（このツールのフォルダで実行）。
 
 ```powershell
-python -X utf8 restore_project_archive.py <履歴のアーカイブID> C:\Projects\<新しい復元先>
+python -X utf8 restore_project_archive.py <履歴のアーカイブID> C:\AI_Work\<新しい復元先>
 ```
 
 ZIPとmanifestのSHA-256、復元した通常ファイル・追加ストリームのSHA-256を照合します。

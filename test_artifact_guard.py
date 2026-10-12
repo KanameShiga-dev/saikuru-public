@@ -59,7 +59,7 @@ class ArtifactGuardTest(unittest.TestCase):
                                           'files': {'project/a.html': '../../secret.html'}}, owned=[OWNED])['allow'])
 
     def test_content_check(self):
-        for text in ('連絡先 taro@example.co.jp', 'server 192.168.1.20', r'C:\Users\someone\doc.txt', 'api_key = abc'):
+        for text in ('連絡先 person@example.invalid', 'server 192.168.1.20', r'C:\Users\someone\doc.txt', 'api_key = abc'):
             self.page.write_text(text, encoding='utf-8')
             verdict = self.run_review({'url': OWNED, 'file_path': str(self.page)}, owned=[OWNED])
             self.assertFalse(verdict['allow'], text)
@@ -88,7 +88,7 @@ class ArtifactGuardTest(unittest.TestCase):
             check_staging(self.project, 'job1', 'claude_design')
         (staging / 'project' / 'canvas.json').write_text('{"v":3}', encoding='utf-8')
         check_staging(self.project, 'job1', 'claude_design')
-        self.page.write_text('連絡先 taro@example.co.jp', encoding='utf-8')
+        self.page.write_text('連絡先 person@example.invalid', encoding='utf-8')
         with self.assertRaises(ValueError):
             check_staging(self.project, 'job1', 'claude_design')
 

@@ -1,4 +1,4 @@
-﻿# Parse only. Never invoke or evaluate the supplied command.
+# Parse only. Never invoke or evaluate the supplied command.
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.Encoding]::UTF8
 [Console]::OutputEncoding = [Text.Encoding]::UTF8

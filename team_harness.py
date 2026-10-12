@@ -16,7 +16,7 @@ from team_ledger import ROOT, inside
 SKIP_DIRS = {'.git', '.venv', 'venv', 'node_modules', 'library', 'temp', 'obj', 'bin',
              'build', 'builds', 'dist', 'out', 'coverage', '.next', '.gradle', 'target',
              'cache', 'logs', 'userdata', 'backups', '_archive', '_migration', '__pycache__'}
-CLAUDE_ROUTER = ('# Project Router\n\n@AGENTS.md\n\n'
+CLAUDE_ROUTER = ('# Project Router\n\person@example.invalid\n\n'
                  '共通ルールの正本は AGENTS.md です（上の行で読み込みます）。共通のルールはこのファイルではなく AGENTS.md に書いてください。'
                  'このファイルには Claude 固有の補足だけを書きます。\n')
 # CLAUDE.md written by earlier versions of the harness (safe to replace with CLAUDE_ROUTER: it only pointed to AGENTS.md).

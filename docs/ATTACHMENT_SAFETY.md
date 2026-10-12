@@ -41,7 +41,7 @@
 Windows PowerShell 5.1用OCRヘルパーはUTF-8 BOM。固定のAPI呼び出しとJSONだけを使用し、資料本文をPowerShellのコードへ展開しない。
 
 ## 確認と限界
-構文（Python7ファイル・JS3ファイル・PowerShellヘルパー）・許可拡張子45種類の前後一致・HTMLのID重複なし・入力から保存／AI送信までの処理経路を読み取り確認。処理中の作業・相談がない状態で正常再起動し、新規依頼・台帳・添付JSがディスクと同じ内容で配信されることを確認。日本語と英語のWindows OCR言語が登録され、利用する解析ライブラリが既存の環境にあることを確認。
+構文（Python7ファイル・JS3ファイル・PowerShellヘルパー）・許可拡張子45種類の前後一致・HTMLのID重複なし・入力から保存／AI送信までの処理経路を読み取り確認。作業0件・相談0件で8790を正常再起動し、新規依頼・台帳・添付JSがディスクと同じ内容で配信されることを確認。日本語と英語のWindows OCR言語が登録され、利用する解析ライブラリが既存の環境にあることを確認。
 
 今回はテスト追加・テストスイート・検査用の添付送信・実モデル呼び出しは行っていない。実際のPDF/Office/OCR、拒否・誤検知、画像貼り付け、AIまでの一巡とスマホ実機は未確認。
 
@@ -50,7 +50,7 @@ Windows PowerShell 5.1用OCRヘルパーはUTF-8 BOM。固定のAPI呼び出し�
 参考：[OWASP Prompt Injection Prevention](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html)、[Microsoft Windows OCR API](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr.ocrengine.recognizeasync)。
 
 ## 戻し方
-変更前のソース／マニュアルをローカルでバックアップしています。正常停止して必要なソースを戻し、再起動する。新しい添付や依頼を失わないようDBは巻き戻さない。新たに許可した文書を旧画像のみの版へ戻す場合、その文書をAIへ送信しない状態を保ち、文書添付のある依頼を再開しない。通常は画像版に戻すより、添付送信を停止したうえで検査処理を修正する。
+変更前のソース／マニュアルはdata/backups/document-attachments-20261004。正常停止して必要なソースを戻し、再起動する。新しい添付や依頼を失わないようDBは巻き戻さない。新たに許可した文書を旧画像のみの版へ戻す場合、その文書をAIへ送信しない状態を保ち、文書添付のある依頼を再開しない。通常は画像版に戻すより、添付送信を停止したうえで検査処理を修正する。
 
 ## 導入例
 専用Pythonへ `python -m pip install -r requirements-attachments.txt` で依存を準備します。Windowsに日本語・英語OCRが必要です。インストールは今回の公開作業では実施していません。

@@ -1,0 +1,35 @@
+from pathlib import Path
+from html import escape
+root=Path(__file__).resolve().parent
+p=['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1080" role="img" aria-label="采来 — サイクル —：モデル・Git・Ollama全体構成図"><defs><marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#466761"/></marker></defs><style>text{font-family:Meiryo,sans-serif;fill:#153d35}.t{font-size:22px;font-weight:bold}.b{font-size:17px}.s{font-size:15px}</style><rect width="1200" height="1080" fill="#f3f7f4"/><text x="30" y="38" class="t">采来 — サイクル — ｜ モデル・引き継ぎ・Git・ローカル判断</text><rect x="15" y="60" width="1170" height="710" rx="16" fill="#edf5f0" stroke="#9bbbae"/><text x="30" y="87" class="s">このPC：ローカル管理・判断・記録</text>']
+def box(x,y,w,h,title,lines,fill='#ffffff'):
+ p.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="9" fill="{fill}" stroke="#9bbbae"/><text x="{x+15}" y="{y+30}" class="t">{escape(title)}</text>')
+ for i,s in enumerate(lines):p.append(f'<text x="{x+15}" y="{y+59+i*25}" class="b">{escape(s)}</text>')
+def arrow(points,label='',x=0,y=0,dash=False):
+ p.append(f'<polyline points="{points}" fill="none" stroke="#466761" stroke-width="2" marker-end="url(#ah)"'+(' stroke-dasharray="7 6"' if dash else '')+'/>')
+ if label:p.append(f'<text x="{x}" y="{y}" class="s">{escape(label)}</text>')
+box(360,110,480,85,'利用者：PC ／ スマホ',['依頼・範囲確認・回答・承認・結果確認'])
+box(340,240,520,105,'Web UI + ローカルAPI',['作業ボード ／ 台帳 ／ チーム設定','スマホは認証付きHTTPS入口を経由'])
+arrow('600,195 600,240','操作',615,223)
+box(310,395,580,125,'Python統括：server / team_engine',['計画 → 調査・実装 → レビュー → 結果確認','担当・モデル切り替え、承認、再試行','次の担当へ：記録・根拠・残作業・対象ソース'],'#dceee3')
+arrow('600,345 600,395','UI API',615,377)
+box(35,250,240,140,'共通Agent / Skill',['役割・安全境界の定義','メタ情報から選択','必要な本文だけ読込'])
+arrow('275,320 295,320 295,430 310,430')
+box(925,250,240,140,'ローカルOllama',['Tev1 判断モデル','Agent選択候補の測定','シャドー：既存判断採用'],'#e6ecff')
+arrow('890,430 910,430 910,320 925,320')
+arrow('1045,390 1045,465 890,465','候補・時間・結果',933,453)
+box(35,580,330,145,'SQLite + 設定・履歴',['team / handoff / ledger DB','担当報告・利用者判断・残作業','役割・モデル・Provider設定','DB / ZIP / 資料バックアップ'])
+box(435,580,330,145,'プロジェクト + Git',['ソース・資料・検証結果','基準コミット・変更差分','未コミット・未追跡も確認','差分を引き継ぎへ活用'])
+box(835,580,330,145,'CLIアダプター',['Codex app-server','Claude Code headless','担当ごとの独立セッション','結果・利用量を統括へ'])
+arrow('390,520 200,520 200,580')
+arrow('600,520 600,580','作業対象',615,553)
+arrow('810,520 1000,520 1000,580','実行 / 報告',902,552)
+arrow('765,635 835,635','参照・変更',766,625)
+arrow('435,690 365,690','差分・根拠',365,679,True)
+p.append('<text x="35" y="754" class="s">実線：実装の接続 ／ 破線：Git差分を活用する推奨運用（全経路の自動最適化は未確認）</text><rect x="15" y="810" width="1170" height="160" rx="16" fill="#fff2df" stroke="#c7a674"/><text x="35" y="835" class="s">外部AIサービス：CLI経由の開発処理（アカウント利用枠を消費）</text>')
+box(40,850,520,95,'Codex → OpenAIモデル',['GPT系：役割ごとの設定・利用可能な一覧で選択','計画・調査・実装・レビューへ割り当て'])
+box(640,850,520,95,'Claude Code → Anthropicモデル',['Opus / Sonnet等：一覧・実行権限を確認','モデル切り替え時も記録とソースを照合'])
+arrow('975,725 975,790 300,790 300,850')
+arrow('1030,725 1030,790 900,790 900,850')
+p.append('<text x="35" y="1003" class="b">削減の狙い：Git差分 + 必要時読込 + 重複整理 → 再提示・再調査を抑える</text><text x="35" y="1034" class="s">引き継ぎはモデル内部記憶の移植ではありません。Git差分の全面自動最適化・削減率は未確認／未測定。</text><text x="35" y="1063" class="s">OllamaはAgent選択のシャドー測定。Lunaは別途認証・課金許可が必要。Decisions APIは未対応。</text></svg>')
+(root/'architecture-overview.svg').write_text(''.join(p),encoding='utf-8')

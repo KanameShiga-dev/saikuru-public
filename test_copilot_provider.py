@@ -133,7 +133,7 @@ class AdapterScopeTest(unittest.TestCase):
         seen = {}
         def fake(adapter, ctx, command, text, cwd, env, allowed, baseline=None):
             seen['allowed'] = allowed
-            return json.dumps({'status': 'done', 'summary': 's', 'checks': ['c'], 'question': ''})
+            return json.dumps({'status': 'done', 'summary': 's', 'checks': ['c'], 'pending_checks': [], 'question': ''})
         with mock.patch.object(CopilotAdapter, '_call', fake):
             CopilotAdapter().run(ctx, 'x', RESULT_SCHEMA)
         self.assertEqual(seen['allowed'], ['project_read-read_file', 'project_read-write_document', 'project_read-generate_media'])
@@ -151,7 +151,7 @@ class AdapterScopeTest(unittest.TestCase):
     def test_answer_with_preface_or_closing_text(self):
         # 2026-10-09: Copilot has no output-schema option; a preface around the JSON must not fail the review.
         from team_engine import RESULT_SCHEMA
-        result = {'status': 'done', 'summary': '指摘なし', 'checks': ['確認：{x} の扱い'], 'question': ''}
+        result = {'status': 'done', 'summary': '指摘なし', 'checks': ['確認：{x} の扱い'], 'pending_checks': [], 'question': ''}
         body = json.dumps(result, ensure_ascii=False)
         for text in ('レビュー結果です。\n' + body, body + '\n以上です。', '結果：\n```json\n' + body + '\n```\n補足なし',
                      '例 {"note": 1} を参照。\n' + body):
@@ -168,7 +168,7 @@ class ReportRepairTest(unittest.TestCase):
     def setUp(self):
         from team_engine import RESULT_SCHEMA
         self.schema = RESULT_SCHEMA
-        self.full = {'status': 'done', 'summary': '指摘なし', 'checks': ['確認：テスト'], 'question': '',
+        self.full = {'status': 'done', 'summary': '指摘なし', 'checks': ['確認：テスト'], 'pending_checks': [], 'question': '',
                      'questions': [], 'context_updates': []}
         self.events = []
         definition = SimpleNamespace(sandbox='read-only', tools=())

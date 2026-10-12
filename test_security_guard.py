@@ -92,7 +92,7 @@ class InputGuardTests(unittest.TestCase):
         self.assertTrue(scan_input('ghp_' + 'a' * 30)['block'])
 
     def test_personal_data_needs_confirmation(self):
-        text = '担当は taro@example.com、090-1234-5678 です'
+        text = '担当は taro@example.com、000-0000-0000 です'
         with self.assertRaises(ValueError) as ctx:
             require_clean_input(text)
         self.assertTrue(str(ctx.exception).startswith('[INPUT_GUARD_CONFIRM]'))

@@ -1,0 +1,102 @@
+{
+  "as_of": "2026-10-03",
+  "environment": "real 采来 — サイクル — UI after the 2026-10-03 redesign; isolated synthetic fixtures; no task execution",
+  "screenshots": [
+    {
+      "file": "assets/01-board.jpg",
+      "screen": "作業ボード",
+      "sha256": "19f04a3063ca380e5d8fd2aabcb244df3ccd483352a9388c8a72d700cd2d8791"
+    },
+    {
+      "file": "assets/02-request.jpg",
+      "screen": "依頼追加",
+      "sha256": "0cc7a1ac16eaf75cf596ce2493b7bfd8b047d181940da66a031a3ca0e6bdbd97"
+    },
+    {
+      "file": "assets/03-settings.jpg",
+      "screen": "チーム設定・判断Provider",
+      "sha256": "c8df098592b6365fd98f1992a557f5804709c416a34f9c9c7feb078ea419a93a"
+    },
+    {
+      "file": "assets/04-cli.jpg",
+      "screen": "CLI更新",
+      "sha256": "93d23468786c49b2c2fd7dd506b9677172dc90ecd9365474832bd44cf5a0f311"
+    },
+    {
+      "file": "assets/05-recovery.jpg",
+      "screen": "担当詳細・再開",
+      "sha256": "960f93b72930e43985a73933d2ae4d3611b8fdd7a5b38869f9c42e46f07a13b0"
+    },
+    {
+      "file": "assets/06-ledger.jpg",
+      "screen": "台帳一覧",
+      "sha256": "fe599d12d33c958ea5cbf87c09ad8b20281fc0f6d7287d6e9591e3547e319e50"
+    },
+    {
+      "file": "assets/07-project.jpg",
+      "screen": "台帳詳細",
+      "sha256": "adad1f04d99fd85c1a28a385620e9f18205adc0445fbfe3879bf12361cfdcbc6"
+    },
+    {
+      "file": "assets/08-harness.jpg",
+      "screen": "ハーネス提案",
+      "sha256": "3f5f7d4517d629558b1401f88501e778525b2fc96d37f7e11da9db223ddee98f"
+    },
+    {
+      "file": "assets/09-move.jpg",
+      "screen": "フォルダ移動",
+      "sha256": "59c1d103273f47636f27e2b3ab93c8940e7e19ccd229c744c667229960356844"
+    },
+    {
+      "file": "assets/10-archive.jpg",
+      "screen": "アーカイブ・削除",
+      "sha256": "bbbf9df337fddfaedbc37090df378abf07746cf0c6c6c9ffc73a017d94f1edef"
+    },
+    {
+      "file": "assets/11-nodes.jpg",
+      "screen": "親子情報",
+      "sha256": "7cd9af3937b146d18135f81c48dbb5c8ad443730cb955163a91c0a7a9e61c864"
+    },
+    {
+      "file": "assets/12-usage.jpg",
+      "screen": "利用枠",
+      "sha256": "eb4f2073921612647e54dd01eee241a55876844133b27695ef77b3d453d44ab6"
+    },
+    {
+      "file": "assets/13-mobile.jpg",
+      "screen": "スマホ接続",
+      "sha256": "cb2e2aaaa9ebc2a70db31649174a5c07eca33dcf01c853af6181c56a6b296653"
+    },
+    {
+      "file": "assets/14-convert.jpg",
+      "screen": "変換プレビュー",
+      "sha256": "07aee00db828b6b88347f8dbb8133770dded93857a3f41465af42ec17e6fadd6"
+    },
+    {
+      "file": "assets/15-metadata.jpg",
+      "screen": "基本情報",
+      "sha256": "aa00be28a5a40db5afac2a6a97ea0980d8fdf0734e6748d45794db5c95350969"
+    },
+    {
+      "file": "assets/16-history-projects.jpg",
+      "screen": "プロジェクト別の履歴一覧",
+      "sha256": "e05db65c28f1043d052d5e9c4060c187bba5c284410dd6cb088701f36d6e9874"
+    },
+    {
+      "file": "assets/17-history-timeline.jpg",
+      "screen": "依頼と工程の時刻",
+      "sha256": "d9ed06528e4b5154cfa53307e975d67500ce0746c917e25d352180a5c3f65de9"
+    },
+    {
+      "file": "assets/18-history-details.jpg",
+      "screen": "承認と作業イベント",
+      "sha256": "bc5923da5e5f6be805761e2ba7843e61f02abab9db688d49b145cb28dd26eb3b"
+    },
+    {
+      "file": "assets/history-detail-full.jpg",
+      "screen": "history-detail-full",
+      "sha256": "153f9ff9a341a5923a20b58063527100fcbbdf01ca1cb5c2f3393d59722b9016"
+    }
+  ],
+  "history_capture_as_of": "2026-10-03"
+}

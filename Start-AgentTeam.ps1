@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param([int]$Port = 8790)
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot

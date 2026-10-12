@@ -8,7 +8,7 @@ description: Learn a unified design (colours, fonts, type sizes, line height, pa
 参考PDFから「デザインプロファイル」（色・書体・文字サイズ・行間・用紙・余白）を取り出し、成果物（PPTX・PDF・Word・HTML）に同じデザインを当てる。
 
 ## 仕組み
-- 本体：`design_profile.py（采来の設置フォルダ）`
+- 本体：`C:\AI_Work\operation\saikuru\design_profile.py`
   - `learn(pdf)`：PDFを読み取るだけ（pypdf で文字・書体・サイズ・文字色、pypdfium2 でページを小さな画像にして配色）。PDFの中身は実行しない。
   - 出力：`<名前>.design.json`（プロファイル）と `<名前>.design.md`（日本語の要約）
   - 反映用：`slide_palette()`（PPTX・PDF・動画）、`apply_docx()`・`style_docx_table()`（Word）、`css()`（HTML・印刷用PDF）
@@ -31,11 +31,11 @@ description: Learn a unified design (colours, fonts, type sizes, line height, pa
 
 ## デスクトップ（Claude Code）で使う
 ```bash
-python -X utf8 design_profile.py（采来の設置フォルダ） <参考.pdf> <出力>.design.json --md <出力>.design.md --name <名前>
+python -X utf8 C:\AI_Work\operation\saikuru\design_profile.py <参考.pdf> <出力>.design.json --md <出力>.design.md --name <名前>
 ```
 作成する Python のコードからは、次のように反映する：
 ```python
-# 采来の設置フォルダをPythonのモジュール検索先に設定してください
+import sys; sys.path.insert(0, r'C:\AI_Work\operation\saikuru')
 import design_profile as dp
 profile = dp.load('<名前>.design.json')
 # Word
