@@ -16,14 +16,14 @@ from team_ledger import ROOT, inside
 SKIP_DIRS = {'.git', '.venv', 'venv', 'node_modules', 'library', 'temp', 'obj', 'bin',
              'build', 'builds', 'dist', 'out', 'coverage', '.next', '.gradle', 'target',
              'cache', 'logs', 'userdata', 'backups', '_archive', '_migration', '__pycache__'}
-CLAUDE_ROUTER = ('# Project Router\n\person@example.invalid\n\n'
+CLAUDE_ROUTER = ('# Project Router\n\n@AGENTS.md\n\n'
                  '共通ルールの正本は AGENTS.md です（上の行で読み込みます）。共通のルールはこのファイルではなく AGENTS.md に書いてください。'
                  'このファイルには Claude 固有の補足だけを書きます。\n')
 # CLAUDE.md written by earlier versions of the harness (safe to replace with CLAUDE_ROUTER: it only pointed to AGENTS.md).
 OLD_CLAUDE_ROUTER = '# Project Router\n\nRead AGENTS.md for applicable project scope and instructions. Load only task-relevant documents.\n'
 TARGETS = [
     'AGENTS.md', 'CLAUDE.md', 'PROJECT_CONTEXT.md', 'GOAL.md', 'SCOPE.md', 'ARCHITECTURE.md', 'COMMAND_ALLOWLIST.md', 'SECURITY.md',
-    'SECURITY_POLICY.md', 'DATA_CLASSIFICATION.md', 'TOOL_POLICY.yaml', 'audit/README.md',
+    'SECURITY_POLICY.md', 'DATA_CLASSIFICATION.md', 'TOOL_POLICY.yaml', 'audit/README.md', '.claude/settings.json',
     '.harness/README.md', '.harness/context.md', '.harness/workflow.md', '.harness/rules.md',
     '.harness/definition-of-done.md', '.harness/prompts/investigate.md',
     '.harness/prompts/implement.md', '.harness/prompts/fix.md', '.harness/prompts/test.md',

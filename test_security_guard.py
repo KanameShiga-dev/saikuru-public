@@ -109,10 +109,28 @@ class InputGuardTests(unittest.TestCase):
 
 class TemplateTests(unittest.TestCase):
     def test_security_files(self):
-        self.assertEqual(set(FILES), {'SECURITY_POLICY.md', 'DATA_CLASSIFICATION.md', 'TOOL_POLICY.yaml', 'audit/README.md'})
+        self.assertEqual(set(FILES), {'SECURITY_POLICY.md', 'DATA_CLASSIFICATION.md', 'TOOL_POLICY.yaml', 'audit/README.md',
+                                      '.claude/settings.json'})
         from team_harness import TARGETS, security_files
         self.assertTrue(set(FILES) <= set(TARGETS))
         self.assertIn('# Security Policy — demo', security_files('demo')['SECURITY_POLICY.md'])
+
+    def test_project_claude_settings_are_valid_and_portable(self):
+        import json
+        from team_harness import security_files
+        settings = json.loads(security_files('demo')['.claude/settings.json'])
+        self.assertEqual(set(settings), {'permissions'})
+        deny, ask = settings['permissions']['deny'], settings['permissions']['ask']
+        self.assertIn('Read(.env)', deny)
+        self.assertIn('Read(~/.ssh/**)', deny)
+        # The negation must follow the rule it carves out of, or it carves nothing.
+        self.assertLess(deny.index('Read(.env.*)'), deny.index('Read(!.env.example)'))
+        self.assertIn('Bash(git push *)', ask)
+        self.assertNotIn('allow', settings['permissions'])
+        text = json.dumps(settings)
+        # Same file on every PC: no drive letters, user folders or absolute paths.
+        for marker in (':\\\\', 'Users', '//'):
+            self.assertNotIn(marker, text)
 
 
 if __name__ == '__main__':

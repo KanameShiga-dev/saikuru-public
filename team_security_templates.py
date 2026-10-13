@@ -36,7 +36,7 @@ release), 采来's Input Guard, Tool Guard and audit log do not exist. The rules
 - Never include personal or confidential information in pushes, publications, commits, issues, or anything
   sent to AI providers, web search or external services.
 - Where the AI tool supports it, use its own permission settings to deny reading credential files and to
-  require confirmation before push and publish commands.
+  require confirmation before push and publish commands. `.claude/settings.json` does this for Claude Code.
 - Before every push or release, read the outgoing diff and search it for credentials, personal data and
   confidential names. Exclude or redact what you find and report it. String search cannot find unregistered
   names; when unsure, leave the item out and ask.
@@ -68,6 +68,8 @@ Exceptions are not made in this project. Only an administrator can allow one, ex
 - DATA_CLASSIFICATION.md — what may go where
 - TOOL_POLICY.yaml — the tool and outbound rules 采来 enforces
 - audit/ — guard decisions for this project
+- .claude/settings.json — Claude Code permissions for anyone opening this project: credential files are not
+  read and push/publish commands ask first (file tools only; not a boundary for shell commands)
 - These files are protected: agents cannot edit them.
 '''
 
@@ -113,6 +115,7 @@ file_access:
     - DATA_CLASSIFICATION.md
     - TOOL_POLICY.yaml
     - audit/
+    - .claude/                     # includes the shared Claude Code settings
     - .env*
     - .git/
 
@@ -142,6 +145,45 @@ human_approval_required:
 requested_exceptions: []
 '''
 
+# Claude Code shared project settings (.claude/settings.json). Lists merge with user and local settings, and rules
+# are evaluated deny, then ask, then allow. Bare file names match at any depth under the project; ~/ is the home
+# folder of whoever opens the project, so nothing here names a person or a PC. Read rules cover Claude's file tools,
+# not shell commands. 采来's own workers start with --restricted and use 采来's guards instead of this file.
+CLAUDE_SETTINGS = '''{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(!.env.example)",
+      "Read(*.pem)",
+      "Read(*.pfx)",
+      "Read(*.p12)",
+      "Read(*.keystore)",
+      "Read(id_rsa)",
+      "Read(id_ed25519)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/credentials)",
+      "Read(~/.git-credentials)",
+      "Read(~/.npmrc)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(~/.codex/auth.json)",
+      "Read(~/.config/gh/hosts.yml)",
+      "Read(~/AppData/Roaming/GitHub CLI/hosts.yml)"
+    ],
+    "ask": [
+      "Bash(git push)",
+      "Bash(git push *)",
+      "Bash(gh repo create *)",
+      "Bash(gh repo edit *)",
+      "Bash(gh pr create *)",
+      "Bash(gh release *)",
+      "Bash(gh gist *)",
+      "Bash(npm publish *)"
+    ]
+  }
+}
+'''
+
 AUDIT_README = '''# Audit Log — {name}
 
 采来 appends its guard decisions here as JSON Lines (`YYYY-MM.jsonl`), one decision per line:
@@ -158,4 +200,5 @@ FILES = {
     'DATA_CLASSIFICATION.md': DATA_CLASSIFICATION,
     'TOOL_POLICY.yaml': TOOL_POLICY,
     'audit/README.md': AUDIT_README,
+    '.claude/settings.json': CLAUDE_SETTINGS,
 }
