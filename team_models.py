@@ -94,6 +94,12 @@ def copilot_models(command):
             for model, (label, effort, credits) in COPILOT_MODELS.items() if model in listed and 'astra' not in model]
 
 
+def gemini_models(command):
+    from team_config import GEMINI_MODELS
+    return [{'id': model, 'label': label + '（無料枠・1日の回数に上限）', 'efforts': ['medium']}
+            for model, label in GEMINI_MODELS.items()]
+
+
 class ModelCatalog:
     def __init__(self, commands):
         self.commands = commands
@@ -112,7 +118,8 @@ class ModelCatalog:
                 command = self.commands.get(provider)
                 if not command:
                     raise ValueError('CLIが見つかりません。')
-                rows = {'codex': codex_models, 'claude': claude_models, 'copilot': copilot_models}[provider](command)
+                rows = {'codex': codex_models, 'claude': claude_models, 'copilot': copilot_models,
+                        'gemini': gemini_models}[provider](command)
                 rows = list({row['id']: row for row in rows}.values())
                 note = 'CLIから取得したモデル候補です。利用枠・権限によって実行時に拒否される場合があります。'
                 if not rows:

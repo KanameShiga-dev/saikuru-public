@@ -5,6 +5,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 
 
@@ -94,10 +95,15 @@ class HandoffDB:
 
     def record(self, project, job_id, task_id, kind, source_id, happened_at, payload):
         with self.lock:
-            self.db.execute('INSERT OR IGNORE INTO records(project,job_id,task_id,kind,source_id,happened_at,payload) VALUES (?,?,?,?,?,?,?)',
+            cursor = self.db.execute('INSERT OR IGNORE INTO records(project,job_id,task_id,kind,source_id,happened_at,payload) VALUES (?,?,?,?,?,?,?)',
                 (canonical(project), job_id, task_id, kind, source_id, happened_at or time.time(),
                  json.dumps(payload, ensure_ascii=False)))
-            self.db.commit()
+            # An already-recorded source writes nothing: end its transaction without a FULL-sync commit
+            # (startup re-syncs every job, so most calls are no-ops).
+            if cursor.rowcount:
+                self.db.commit()
+            else:
+                self.db.rollback()
 
     def fact(self, project, job_id, key, value, evidence, authority, source_id):
         key, value, evidence = str(key).strip()[:160], str(value).strip()[:2000], str(evidence).strip()[:500]
@@ -655,5 +661,5 @@ class HandoffDB:
                  json.dumps({'key':key,'value':value,'evidence':evidence},ensure_ascii=False)))
 
     def backup(self, target):
-        with self.lock, sqlite3.connect(target) as dest:
+        with self.lock, closing(sqlite3.connect(target)) as dest:
             self.db.backup(dest)

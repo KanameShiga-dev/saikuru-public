@@ -40,6 +40,7 @@ VALID_PATHS.update({'/attachments.js', '/api/attachments', '/api/attachments/ima
     '/api/ledger/consultation/open', '/api/ledger/consultation/send',
     '/api/ledger/consultation/cancel', '/api/ledger/consultation/submit'})
 VALID_PATHS.add('/api/instruction-health')
+VALID_PATHS.update({'/api/jobs/archive', '/api/jobs/evaluation', '/api/tasks/detail'})
 VALID_PATHS.add('/api/decision-wait-stats')
 VALID_PATHS.add('/api/notifications')
 VALID_PATHS.add('/api/notifications/test')

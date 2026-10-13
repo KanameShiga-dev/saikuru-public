@@ -48,7 +48,7 @@ class SettingsTest(unittest.TestCase):
             validate_config(config_with(enabled=['codex']))  # builder default is Claude
 
     def test_empty_or_unknown_provider_list_is_refused(self):
-        for enabled in ([], ['codex', 'gemini'], ['codex', 'codex']):
+        for enabled in ([], ['codex', 'unknown'], ['codex', 'codex']):
             config = config_with()
             config['provider_settings']['enabled'] = enabled
             with self.assertRaises(ValueError):

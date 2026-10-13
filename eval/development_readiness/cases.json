@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "case_id": "synthetic-stock-v1",
+  "defects": [
+    {"id": "D1", "description": "The low-stock threshold must be inclusive."},
+    {"id": "D2", "description": "Duplicate item quantities must be added rather than overwritten."},
+    {"id": "D3", "description": "Negative quantities must raise ValueError."}
+  ],
+  "correct_behaviors": ["Sorted output", "Input records are not modified", "Empty input returns an empty list"]
+}

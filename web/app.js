@@ -264,6 +264,7 @@ function render() {
   const filter=$('filter').value;
   $('filter').replaceChildren(new Option('すべての依頼',''),...state.jobs.map(j=>new Option(j.title,j.id)));$('filter').value=filter;
   $('job-count').textContent=`${state.jobs.length}件`;
+  $('history-summary').textContent=`直近${state.history?.days||7}日と未終了の依頼を表示。過去の終了案件は${state.history?.hidden_jobs||0}件です。`;
   const labels=['待機している作業','チームが作業中','あなたの判断','終了した作業'];
   $('board').querySelectorAll('details[data-period-key]').forEach(d=>completedFolds.set(d.dataset.periodKey,d.open));
   $('board').replaceChildren(...labels.map((label,index)=>{
@@ -722,7 +723,59 @@ function recoveryPanel(task,job){
     catch(error){message.textContent=error.message;remember();}finally{save.disabled=resume.disabled=false;}});
   return box;
 }
+let archiveOffset=null,archiveQuery='',archiveGeneration=0,archiveDetailGeneration=0;
+async function searchArchive(more=false){
+ const generation=++archiveGeneration;
+ if(!more){archiveQuery=$('archive-query').value.trim();archiveOffset=0;$('archive-results').replaceChildren();$('archive-detail').replaceChildren();$('archive-more').hidden=true;archiveDetailGeneration++;}
+ $('archive-message').textContent='検索しています…';$('archive-more').disabled=true;
+ try{
+  const data=await api('/api/jobs/archive?q='+encodeURIComponent(archiveQuery)+'&offset='+(archiveOffset||0));
+  if(generation!==archiveGeneration)return;
+  archiveOffset=data.next_offset;
+  for(const job of data.jobs){const row=el('p');row.append(button(`${job.title} — ${jobStatuses[job.status]||job.status}`,()=>showArchive(job.id)));$('archive-results').append(row);}
+  $('archive-message').textContent=data.total?`${data.total}件中${$('archive-results').childElementCount}件を表示しています。`:'該当する終了案件はありません。';
+  $('archive-more').hidden=archiveOffset===null;
+ }catch(e){if(generation===archiveGeneration)$('archive-message').textContent='検索できませんでした。「検索」で再試行してください。 '+e.message;}
+ finally{if(generation===archiveGeneration)$('archive-more').disabled=false;}
+}
+async function showArchive(id){
+ const generation=++archiveDetailGeneration,area=$('archive-detail');area.replaceChildren(el('p','詳細を読み込んでいます…'));
+ try{
+  const data=await api('/api/jobs/archive?id='+encodeURIComponent(id));if(generation!==archiveDetailGeneration)return;
+  area.replaceChildren(el('h3',data.job.title),el('p',jobStatuses[data.job.status]||data.job.status),el('p',data.job.goal),button('この依頼の評価記録',()=>openEffort(id)));
+  for(const task of data.tasks){const box=el('details');box.append(el('summary',`${task.title} — ${statuses[task.status]||task.status}`),el('pre',task.instruction||''),el('pre',typeof task.result==='string'?task.result:JSON.stringify(task.result||{},null,2)));area.append(box);}
+  const decisions=el('details');decisions.append(el('summary',`判断履歴 ${data.approvals.length}件`));
+  for(const a of data.approvals)decisions.append(el('p',`${a.kind} / ${a.status}${a.note?' / '+a.note:''}`));
+  area.append(decisions);area.focus();
+ }catch(e){if(generation===archiveDetailGeneration)area.replaceChildren(el('p','詳細を取得できませんでした。案件を選び直してください。 '+e.message));}
+}
+let effortJob=null,effortRevision=0,effortGeneration=0;
+async function openEffort(id){
+ const generation=++effortGeneration;effortJob=id;$('effort-form').hidden=true;$('effort-summary').replaceChildren();$('effort-message').textContent='記録を読み込んでいます…';
+ if(!$('effort-dialog').open)$('effort-dialog').showModal();
+ try{const data=await api('/api/jobs/evaluation?id='+encodeURIComponent(id));if(generation!==effortGeneration)return;
+  $('effort-title').textContent='評価記録: '+data.title;
+  effortRevision=data.revision;$('effort-minutes').value=data.record?.minutes??'';$('effort-observer').value=data.record?.observer||'real_user';$('effort-confirmed').checked=false;
+  $('effort-summary').replaceChildren(el('p',`受領状態: ${jobStatuses[data.status]||data.status}`),el('p',`承認 ${data.approved_decisions}件 / 拒否 ${data.denied_decisions}件 / 判断待ち ${data.pending_decisions}件`),el('p',`利用者の差し戻し ${data.user_rework_count}回 / 要修正のレビュー報告 ${data.review_needs_changes_reports}件 / タスク再試行 ${data.task_retry_count}回`),el('p','過去のレビュー報告の保存範囲内で集計。受領状態だけでは実利用者本人の確認を証明しません。'));
+  $('effort-message').textContent=data.record?`保存済み: ${data.record.minutes}分（${data.record.observer==='real_user'?'本人記録':'代理記録'}）。訂正時は累計を入力してください。`:'実作業時間は未測定です。';$('effort-form').hidden=false;
+ }catch(e){if(generation===effortGeneration)$('effort-message').textContent='記録を取得できませんでした。再読み込みしてください。 '+e.message;}
+}
+$('archive-open').addEventListener('click',()=>{$('archive-dialog').showModal();searchArchive();});
+$('archive-form').addEventListener('submit',e=>{e.preventDefault();searchArchive();});
+$('archive-more').addEventListener('click',()=>searchArchive(true));
+$('effort-open').addEventListener('click',()=>{const id=$('filter').value;if(!id){notice('作業ボードの「表示する依頼」で対象を選んでください。');$('filter').focus();return;}openEffort(id);});
+$('effort-reload').addEventListener('click',()=>{if(effortJob)openEffort(effortJob);});
+$('effort-form').addEventListener('submit',async e=>{
+ e.preventDefault();const submit=e.submitter;submit.disabled=true;const id=effortJob;
+ try{await api('/api/jobs/evaluation',{job_id:id,revision:effortRevision,minutes:Number($('effort-minutes').value),observer:$('effort-observer').value,confirmed:$('effort-confirmed').checked});if(id===effortJob)await openEffort(id);}
+ catch(error){$('effort-message').textContent='保存できませんでした。 '+error.message;}
+ finally{submit.disabled=false;}
+});
+const taskDetails=new Map(),taskDetailLoading=new Set();
+function mergeTaskDetails(){for(const t of state.tasks){const d=t.slim&&taskDetails.get(t.id);if(d)Object.assign(t,d,{slim:false});}}
+async function loadTaskDetail(task){if(taskDetailLoading.has(task.id))return;taskDetailLoading.add(task.id);try{taskDetails.set(task.id,await api('/api/tasks/detail?id='+encodeURIComponent(task.id)));mergeTaskDetails();const t=state.tasks.find(x=>x.id===task.id);if(t&&selected===t.id&&$('detail-dialog').open)renderDetail(t,detailVersion);}catch(e){notice(e.message);}finally{taskDetailLoading.delete(task.id);}}
 function renderDetail(task,version) {
+  if(task.slim){loadTaskDetail(task);$('detail-title').textContent=task.title;$('detail-body').replaceChildren(el('p','詳細を読み込み中…'));renderedDetailTask=null;return;}
   if(renderedDetailTask){const saved=detailFolds.get(renderedDetailTask);if(saved)$('detail-body').querySelectorAll(':scope > details[data-fold-key]').forEach(d=>saved.open[d.dataset.foldKey]=d.open);}
   renderedDetailTask=task.id;
   const drafts={};$('detail-body').querySelectorAll('textarea').forEach(t=>drafts[t.id]=t.value);
@@ -894,7 +947,7 @@ function renderDetail(task,version) {
 }
 // 2026-10-08 カードを開くたびに折りたたみを初期状態（停止理由を開く）から始める。以前の開閉を引き継ぐと、停止後も閉じたままになっていた。
 function openTask(id){selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
-async function refresh(){try{state=await api('/api/state');render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
+async function refresh(){try{state=await api('/api/state');mergeTaskDetails();render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
 const decisionNotificationObjects=new Map(),decisionPopupObjects=new Map();
 let seenDecisions=new Set();
 try{seenDecisions=new Set(JSON.parse(localStorage.getItem('agent-team-decision-seen')||'[]'));}catch(error){}

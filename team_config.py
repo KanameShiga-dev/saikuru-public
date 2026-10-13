@@ -6,7 +6,15 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-PROVIDERS = ('codex', 'claude', 'copilot')
+PROVIDERS = ('codex', 'claude', 'copilot', 'gemini')
+# Gemini (2026-10-13, user decision): an emergency reserve on the free API tier, not a regular worker. The free tier
+# caps requests per model per day (about 8 were enough to exhaust gemini-3.8-flash), Pro models and Google Search are
+# not available, and Google may use free-tier input for training. So it takes only planner/reviewer/consultation,
+# only text that passes the Input Guard, and falls back through these models when one is exhausted.
+GEMINI_ROLES = ('planner', 'reviewer')
+GEMINI_KEY_TARGET = 'saikuru/gemini-api-key'
+GEMINI_MODELS = {'gemini-3.7-flash': 'Gemini 3.7 Flash', 'gemini-3.5-flash-lite': 'Gemini 3.5 Flash Lite',
+                 'gemini-3.1-flash-lite': 'Gemini 3.1 Flash Lite', 'gemini-3.8-flash': 'Gemini 3.8 Flash'}
 # Copilot has no approval hook in prompt mode, so its own edit/shell tools stay denied. It works only through 采来's
 # tools: the read-only broker (planner/reviewer), the document tools, and copilot_work_tools whose writes and
 # commands 采来 decides first (builder, 2026-10-09). The researcher of a development job is not covered.
@@ -68,7 +76,16 @@ def discover():
         candidates = list(packages.glob('GitHub.Copilot_*/copilot.exe')) if packages.is_dir() else []
         if candidates:
             copilot_command = [str(max(candidates, key=lambda p: p.stat().st_mtime))]
-    return {'codex': codex_command, 'claude': claude_command, 'copilot': copilot_command}
+    gemini_command = []
+    executable = shutil.which('gemini.cmd')
+    if not executable:
+        # WinGet's Node.js reaches the PATH of new processes only; look in its fixed package folder.
+        packages = home / 'AppData/Local/Microsoft/WinGet/Packages'
+        candidates = list(packages.glob('OpenJS.NodeJS*/node-*/gemini.cmd')) if packages.is_dir() else []
+        executable = str(max(candidates, key=lambda p: p.stat().st_mtime)) if candidates else None
+    if executable:
+        gemini_command = [executable]
+    return {'codex': codex_command, 'claude': claude_command, 'copilot': copilot_command, 'gemini': gemini_command}
 
 
 def default_provider_settings():
@@ -126,6 +143,9 @@ def validate_config(config):
     if not isinstance(notifications, dict) or set(notifications) != {'windows_enabled','business_hours_only'} or any(type(v) is not bool for v in notifications.values()):
         raise ValueError('通知設定が不正です。')
     decision = config.get('decision', {'provider':'ollama','model':'tev1:0.8b','shadow':True})
+    days = config.get('history_days', 7)
+    if type(days) is not int or not 1 <= days <= 3650:
+        raise ValueError('履歴の表示期間は1〜3650日の整数で指定してください。')
     if (not isinstance(decision, dict) or set(decision) != {'provider','model','shadow'}
             or decision['provider'] not in {'auto','ollama','decisions','luna','disabled'}
             or decision['model'] not in {'tev1:0.8b','tev1:4b'} or decision['shadow'] is not True):
@@ -178,6 +198,8 @@ def validate_config(config):
             raise ValueError('役割の担当に、使用しないプロバイダが設定されています。先に担当を変更してください。')
         if adapter == 'copilot' and role not in COPILOT_ROLES:
             raise ValueError('GitHub Copilotは計画・実装・レビュー担当で選択できます（調査担当は未対応）。')
+        if adapter == 'gemini' and role not in GEMINI_ROLES:
+            raise ValueError('Geminiは計画・レビュー担当（非常用）でだけ選択できます。')
     for profile in config['profiles'].values():
         if profile['adapter'] not in PROVIDERS:
             raise ValueError('未対応の接続部です。')
@@ -218,6 +240,9 @@ def environment_status(commands, check_auth=True):
             if name == 'copilot' and run.returncode == 0:
                 result[name]['note'] = ('CLI起動を確認。計画・実装・レビュー担当（道具は采来の確認付きのものだけ）。'
                                         '未ログインの場合は端末で copilot login を実行してください。')
+            if name == 'gemini' and run.returncode == 0:
+                result[name]['note'] = ('CLI起動を確認。無料枠の非常用（計画・レビューのみ、1日の回数に上限あり、'
+                                        '入力が学習に使われる可能性）。APIキーは資格情報マネージャーに保管。')
         except (OSError, subprocess.TimeoutExpired):
             result[name] = {'available': False, 'version': '', 'note': 'CLIを起動できません。'}
     return result

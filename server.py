@@ -200,14 +200,77 @@ class App:
             self.engine.config = config
             self.store.event('config_changed', '統括サービスの設定を更新しました。実行中タスクは元のプロファイルを継続します。')
 
+    ENDED_JOB_STATUSES = ('accepted', 'accepted_with_pending_checks', 'cancelled')
+    # Heavy parts of a finished job's tasks (most of the state's size): the screen reads them through task_detail().
+    SLIM_FIELDS = ('result', 'instruction', 'instruction_history', 'decision_record', 'agent_run_history', 'agent_run')
+
+    @classmethod
+    def slim_task(cls, task):
+        slim = {k: v for k, v in task.items() if k not in cls.SLIM_FIELDS}
+        run = task.get('agent_run')
+        if isinstance(run, dict):
+            slim['agent_run'] = {k: run[k] for k in ('status', 'sandbox') if k in run}
+        slim['slim'] = True
+        return slim
+
+    def task_detail(self, task_id):
+        task = self.store.get(task_id, 'task')
+        return {k: task[k] for k in self.SLIM_FIELDS if k in task}
+
+    def history_days(self):
+        days = self.config.get('history_days', 7)
+        return days if type(days) is int and 1 <= days <= 3650 else 7
+
     def state(self):
-        return {'jobs': self.store.all('job'), 'tasks': self.store.all('task'),
-                'approvals': self.store.all('approval'), 'events': self.store.events(),
+        # 2026-10-13: the screen gets running work and work finished within history_days (default 7). Older work stays
+        # in the database and is read through archive() on demand; sending all of it made every refresh take seconds.
+        cutoff = time.time() - self.history_days() * 86400
+        # The decoded objects are rebuilt only after a write (store.revision) or when the window moves by a minute.
+        key = (self.store.revision, self.history_days(), int(time.time() // 60))
+        cached = getattr(self, '_state_cache', None)
+        if cached and cached[0] == key:
+            jobs_total, shown, tasks, approvals = cached[1]
+        else:
+            jobs = self.store.all('job')
+            shown = [j for j in jobs if j.get('status') not in self.ENDED_JOB_STATUSES or j.get('updated_at', 0) >= cutoff]
+            ids = {j['id'] for j in shown}
+            ended = {j['id'] for j in shown if j.get('status') in self.ENDED_JOB_STATUSES}
+            tasks = [self.slim_task(t) if t.get('job_id') in ended else t for t in self.store.all('task') if t.get('job_id') in ids]
+            approvals = [a for a in self.store.all('approval') if a.get('job_id') in ids]
+            jobs_total = len(jobs)
+            self._state_cache = (key, (jobs_total, shown, tasks, approvals))
+        return {'jobs': shown, 'tasks': tasks,
+                'approvals': approvals, 'events': self.store.events(),
+                'history': {'days': self.history_days(), 'hidden_jobs': jobs_total - len(shown)},
                 'config': self.config, 'providers': self.health, 'paused': self.engine.paused,
                 'sample_project': str(ROOT / 'sample-project'), 'server_time': time.time(),
                 'usage': self.usage.snapshot(), 'cli_update': self.cli_update.snapshot(),
                 'claude_update': self.claude_update.snapshot(), 'copilot_update': self.copilot_update.snapshot(),
                 'notifications': self.notifications.snapshot()}
+
+    def archive(self, query='', job_id='', limit=50, offset=0):
+        """Finished work older than the screen's period: a summary list matching the text, or one job with its tasks."""
+        if not isinstance(query, str) or len(query) > 200:
+            raise ValueError('検索語は200文字以内で入力してください。')
+        if job_id:
+            job = self.store.get(job_id, 'job')
+            if job.get('status') not in self.ENDED_JOB_STATUSES:
+                raise ValueError('終了した依頼だけ、ここで取得できます。')
+            return {'job': job, 'tasks': self.store.for_job('task', job_id), 'approvals': self.store.for_job('approval', job_id)}
+        cutoff = time.time() - self.history_days() * 86400
+        words = [w for w in str(query).lower().split() if w]
+        rows = []
+        limit = max(1, min(int(limit), 200))
+        offset = max(0, int(offset))
+        for job in sorted(self.store.all('job'), key=lambda j: (j.get('updated_at', 0), j['id']), reverse=True):
+            if job.get('status') not in self.ENDED_JOB_STATUSES or job.get('updated_at', 0) >= cutoff:
+                continue
+            text = ' '.join(str(job.get(k) or '') for k in ('title', 'goal', 'project')).lower()
+            if all(w in text for w in words):
+                rows.append({k: job.get(k) for k in ('id', 'title', 'status', 'project', 'created_at', 'updated_at')})
+        total = len(rows)
+        return {'jobs': rows[offset:offset + limit], 'days': self.history_days(), 'total': total,
+                'next_offset': offset + limit if offset + limit < total else None}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -315,6 +378,22 @@ class Handler(BaseHTTPRequestHandler):
                 from consultation_read_tools import safe_path
                 artifact=safe_path(Path(job['project']).resolve(),relative)
                 return self.send(200,{'path':relative,'content':artifact.read_text(encoding='utf-8')})
+            if path == '/api/tasks/detail':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                return self.send(200, self.app.task_detail(parse_qs(urlparse(self.path).query).get('id', [''])[0]))
+            if path == '/api/jobs/evaluation':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                from team_evaluation import snapshot
+                return self.send(200, snapshot(self.app.store, parse_qs(urlparse(self.path).query).get('id', [''])[0]))
+            if path == '/api/jobs/archive':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                return self.send(200, self.app.archive(query.get('q', [''])[0], query.get('id', [''])[0],
+                                                       int((query.get('limit') or ['50'])[0]),
+                                                       int((query.get('offset') or ['0'])[0])))
             if path == '/api/ledger/consultation/models':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -759,6 +838,18 @@ class Handler(BaseHTTPRequestHandler):
                 with self.app.store.lock:
                     self.app.save_config(update_settings(json.loads(json.dumps(self.app.config)), body))
                 result = {'ok': True, 'settings': self.app.config['context_optimization']}
+            elif path == '/api/jobs/evaluation':
+                from team_evaluation import record_effort
+                result = record_effort(self.app.store, body)
+            elif path == '/api/history-settings':
+                days = body.get('days')
+                if set(body) != {'days'} or type(days) is not int or not 1 <= days <= 3650:
+                    raise ValueError('履歴の表示期間は1〜3650日の整数で指定してください。')
+                with self.app.store.lock:
+                    config = json.loads(json.dumps(self.app.config))
+                    config['history_days'] = days
+                    self.app.save_config(config)
+                result = {'ok': True, 'days': days}
             elif path == '/api/decision-settings':
                 config = json.loads(json.dumps(self.app.config))
                 config['decision'] = body

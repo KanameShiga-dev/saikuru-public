@@ -1174,7 +1174,7 @@ class Engine:
             return {}
         if not isinstance(value, dict) or set(value) - {'planner', 'builder', 'researcher', 'reviewer'}:
             raise ValueError('担当の指定は planner・builder・researcher・reviewer だけです。')
-        from team_config import COPILOT_ROLES, PROVIDERS
+        from team_config import COPILOT_ROLES, GEMINI_ROLES, PROVIDERS
         enabled = self.config.get('provider_settings', {}).get('enabled', ('codex', 'claude'))
         result = {}
         for role, profile in value.items():
@@ -1185,6 +1185,8 @@ class Engine:
                 raise ValueError('使用しないプロバイダは指定できません。')
             if profile['adapter'] == 'copilot' and role not in COPILOT_ROLES:
                 raise ValueError('GitHub Copilotは計画・実装・レビュー担当にのみ指定できます（調査担当は未対応）。')
+            if profile['adapter'] == 'gemini' and role not in GEMINI_ROLES:
+                raise ValueError('Geminiは計画・レビュー担当（非常用）にのみ指定できます。')
             if profile['effort'] not in ('low', 'medium'):
                 raise ValueError('この版はlow/mediumのみ対応。')
             if profile['adapter'] in ('codex', 'copilot') and 'astra' in profile['model'].lower():
@@ -1632,9 +1634,9 @@ class Engine:
 
         job = self.store.get(job_id, 'job')
 
-        tasks = [t for t in self.store.all('task') if t['job_id'] == job_id]
+        tasks = self.store.for_job('task', job_id)
 
-        approvals = [a for a in self.store.all('approval') if a['job_id'] == job_id]
+        approvals = self.store.for_job('approval', job_id)
 
         self.handoff.sync(job, tasks, approvals)
 
@@ -2698,7 +2700,11 @@ class Engine:
 
                 raise ValueError('終了した依頼は切り替えできません。')
 
-            from team_config import COPILOT_ROLES
+            from team_config import COPILOT_ROLES, GEMINI_ROLES
+            if profile.get('adapter') == 'gemini' and task['role'] not in GEMINI_ROLES:
+
+                raise ValueError('Geminiは計画・レビュー担当（非常用）のタスクにのみ切り替えできます。')
+
             if profile.get('adapter') == 'copilot' and task['role'] not in COPILOT_ROLES:
 
                 raise ValueError('GitHub Copilotは計画・実装・レビュー担当のタスクにのみ切り替えできます（調査担当は未対応）。')

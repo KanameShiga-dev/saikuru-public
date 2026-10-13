@@ -670,4 +670,161 @@ class CopilotAdapter:
                     ctx.add_copilot_usage(credits, premium, tokens)  # per task, for comparing models
 
 
-ADAPTERS = {'codex': CodexAdapter, 'claude': ClaudeAdapter, 'copilot': CopilotAdapter}
+class GeminiAdapter:
+    """Gemini CLI headless, as an emergency reserve on the free API tier (2026-10-13, user decision).
+    Fail-closed like Copilot: a private CLI home whose policy denies every tool except 采来's read-only broker
+    (planner/reviewer/consultation only). The API key comes from the Credential Manager into this one child's
+    environment only. Free-tier input may be used for Google's training, so nothing that the Input Guard flags is sent.
+    Each model has a daily request cap: an exhausted or overloaded model is skipped for the next one."""
+
+    QUOTA = ('exhausted your daily quota', 'resource_exhausted', 'terminalquotaerror', 'quota exceeded')
+    BUSY = ('high demand', 'unavailable', '"code": 503', 'status 503')
+    READ_TOOLS = ('list_files', 'read_file', 'search_files', 'read_document')
+
+    def run(self, ctx, prompt, schema):
+        from team_config import GEMINI_KEY_TARGET, GEMINI_MODELS, GEMINI_ROLES
+        from team_claude_auth import read_stored_token
+        from team_dlp import scan_input
+        profile, role = ctx.task['profile'], ctx.task.get('role')
+        if (getattr(ctx, 'attachment_ids', []) or getattr(ctx, 'reference_images', None)
+                or getattr(ctx, 'artifact_format', None) or getattr(ctx, 'document_scope', False)):
+            raise ProviderError('Geminiは添付ファイル・画像・資料作成の作業に未対応です。CodexまたはClaudeへ切り替えてください。'
+                                'モデル実行は開始していません。', 'gemini_scope')
+        if role not in GEMINI_ROLES or not getattr(ctx, 'text_only', False) or ctx.agent_definition.sandbox != 'read-only':
+            raise ProviderError('Geminiは計画・レビュー・相談（非常用）の担当にだけ使えます。この作業はCodexまたはClaudeへ'
+                                '切り替えてください。モデル実行は開始していません。', 'gemini_scope')
+        sent = ctx.agent_system_instructions + '\n\n' + prompt
+        found = scan_input(sent)
+        if found['block'] or found['confirm']:
+            raise ProviderError('Geminiの無料枠は入力が学習に使われる可能性があるため、次を含む内容は送りません: '
+                                + '、'.join(found['block'] + found['confirm']) + '。CodexまたはClaudeへ切り替えてください。'
+                                'モデル実行は開始していません。', 'gemini_scope')
+        key = read_stored_token(GEMINI_KEY_TARGET)
+        if not key:
+            raise ProviderError('GeminiのAPIキーが資格情報マネージャー（' + GEMINI_KEY_TARGET + '）にありません。'
+                                'モデル実行は開始していません。', 'gemini_auth')
+        read_mcp = getattr(ctx, 'read_mcp', None) if getattr(ctx, 'consultation_research', False) else None
+        models = [profile['model']] + [m for m in GEMINI_MODELS if m != profile['model']]
+        text = (ctx.agent_system_instructions
+                + ('\n\n---\n使える道具は project_read の list_files・read_file・search_files・read_document（読み取り専用）だけです。'
+                   '回数に上限があるため、必要な読み取りだけにしてください。' if read_mcp else '')
+                + '\n\n---\n\n' + prompt
+                + '\n\n---\n最終回答は、次のJSONスキーマに適合するJSONオブジェクトだけを出力してください。'
+                  'すべての項目を省略せずに含めてください（該当がなければ空文字・空の配列）。'
+                  '前置き・説明文・コードブロックは付けないでください。\n' + json.dumps(schema, ensure_ascii=False))
+        with tempfile.TemporaryDirectory(prefix='agent-team-gemini-') as root:
+            home, work = Path(root) / 'home', Path(root) / 'work'
+            (home / '.gemini' / 'policies').mkdir(parents=True)
+            work.mkdir()
+            self._configure(home, read_mcp)
+            env = {k: v for k, v in os.environ.items() if k not in ('GOOGLE_API_KEY', 'GEMINI_API_KEY')}
+            env.update({'GEMINI_API_KEY': key, 'GEMINI_CLI_HOME': str(home), 'GEMINI_CLI_TRUST_WORKSPACE': 'true'})
+            ctx.agent_started('gemini-' + uuid.uuid4().hex[:12], 'Gemini CLI / 非常用（読み取り専用）')
+            skipped = []
+            for model in models:
+                try:
+                    ctx.event('Geminiへ接続しました。モデル: ' + model)
+                    answer = self._call(ctx, model, text, work, env)
+                except ProviderError as exc:
+                    if exc.code in ('gemini_quota', 'gemini_busy'):
+                        skipped.append(model + '（' + ('1日の上限' if exc.code == 'gemini_quota' else '混雑') + '）')
+                        ctx.event('Geminiの ' + model + ' は使えません（' + str(exc)[:200] + '）。次のモデルを試します。')
+                        continue
+                    raise
+                try:
+                    result = copilot_answer(answer, schema)
+                    errors = schema_errors(result, schema)
+                except ProviderError:
+                    result, errors = None, ['結果（JSONとして読めない）']
+                if not errors:
+                    return result
+                ctx.event('報告の項目が指定と違うため、同じモデルに形だけ直させます：' + '、'.join(errors[:8])[:400])
+                ask = (text + '\n\n---\n直前の回答は、指定のJSONスキーマに合っていません（' + '、'.join(errors[:20])
+                       + '）。直前の回答:\n' + (answer or '')[:20000] + '\n\n調べ直さず、同じ内容を指定のスキーマに合うJSONオブジェクト'
+                       'だけで出力し直してください。確認していないことは未確認と書いてください。')
+                answer = self._call(ctx, model, ask, work, env, repair=True)
+                try:
+                    result = copilot_answer(answer, schema)
+                    errors = schema_errors(result, schema)
+                except ProviderError:
+                    errors = ['結果（JSONとして読めない）']
+                if errors:
+                    raise ProviderError('担当の報告に必要な項目がそろいませんでした（' + '、'.join(errors[:8])[:300]
+                                        + '）。形の修正を1回頼みましたが直りませんでした。担当・モデルを切り替えてください。', 'format')
+                ctx.event('報告の形を直しました（同じモデル、道具なし）。')
+                return result
+            raise ProviderError('Geminiの無料枠は今日は使えません: ' + '、'.join(skipped)
+                                + '。非常用のため、CodexまたはClaudeへ切り替えるか、上限のリセット後にやり直してください。', 'gemini_quota')
+
+    def _configure(self, home, read_mcp):
+        settings = {'security': {'auth': {'selectedType': 'gemini-api-key'}}, 'general': {'enableAutoUpdate': False},
+                    'telemetry': {'enabled': False}, 'privacy': {'usageStatisticsEnabled': False},
+                    'tools': {'exclude': ['run_shell_command', 'write_file', 'replace', 'read_file', 'list_directory', 'glob',
+                                          'search_file_content', 'grep_search', 'google_web_search', 'web_fetch',
+                                          'read_many_files', 'save_memory', 'write_todos', 'activate_skill',
+                                          'invoke_agent', 'enter_plan_mode']}}
+        # Deny everything, then allow only the broker's read tools (a higher priority wins).
+        rules = '[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 100\n'
+        if read_mcp:
+            settings['mcpServers'] = {'project_read': {'command': read_mcp['command'], 'args': read_mcp['args']}}
+            settings['mcp'] = {'allowed': ['project_read']}
+            rules += ('\n[[rule]]\nmcpName = "project_read"\ntoolName = ' + json.dumps(list(self.READ_TOOLS))
+                      + '\ndecision = "allow"\npriority = 200\n')
+        (home / '.gemini' / 'settings.json').write_text(json.dumps(settings), encoding='utf-8')
+        (home / '.gemini' / 'policies' / 'agent-team.toml').write_text(rules, encoding='utf-8')
+
+    def _call(self, ctx, model, text, cwd, env, repair=False):
+        command = ctx.command + ['-p', '標準入力の指示に従って回答してください。', '-m', model, '-o', 'json', '--skip-trust']
+        process, out = None, []
+        try:
+            process = Process(command, cwd, env)
+            process.proc.stdin.write(text)
+            process.proc.stdin.close()
+            while True:
+                ctx.check()
+                try:
+                    line = process.lines.get(timeout=.25)
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break
+                out.append(line)
+            process.proc.wait(timeout=30)
+            raw, detail = ''.join(out), ''.join(process.stderr)
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = {}
+            lowered = (detail + raw).lower()
+            if process.proc.returncode != 0 or data.get('error') or not data.get('response'):
+                if any(s in lowered for s in self.QUOTA) or process.proc.returncode == 429:
+                    raise ProviderError('Gemini ' + model + ': 無料枠の上限', 'gemini_quota')
+                if any(s in lowered for s in self.BUSY):
+                    raise ProviderError('Gemini ' + model + ': 混雑', 'gemini_busy')
+                raise ProviderError('Geminiの実行が完了しませんでした（終了コード ' + str(process.proc.returncode) + '）: '
+                                    + (str(data.get('error', ''))[:300] or detail[-300:]), 'gemini')
+            self._usage(ctx, data)
+            return data['response']
+        except subprocess.TimeoutExpired as exc:
+            raise ProviderError('Geminiの終了待ちが時間切れになりました。') from exc
+        finally:
+            if process is not None:
+                process.close()
+
+    @staticmethod
+    def _usage(ctx, data):
+        """Token counts per model, added to this run's record (a guide: the free tier is not billed)."""
+        run = getattr(ctx, 'agent_run', None)
+        if not isinstance(run, dict):
+            return
+        total = run.setdefault('gemini_tokens', {})
+        for stats in ((data.get('stats') or {}).get('models') or {}).values():
+            for key, value in (stats.get('tokens') or {}).items():
+                if isinstance(value, (int, float)):
+                    total[key] = total.get(key, 0) + value
+            requests = (stats.get('api') or {}).get('totalRequests')
+            if isinstance(requests, (int, float)):
+                run['gemini_requests'] = run.get('gemini_requests', 0) + requests
+
+
+ADAPTERS = {'codex': CodexAdapter, 'claude': ClaudeAdapter, 'copilot': CopilotAdapter, 'gemini': GeminiAdapter}

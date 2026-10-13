@@ -91,8 +91,8 @@ def load_agent(role, provider, selected_name=None):
     allowed = names + (('common-security-reviewer',) if role == 'reviewer' else ()) + (('common-harness-auditor',) if role == 'researcher' else ())
     if name not in allowed:
         raise ProviderError(f'この担当には指定の共通Agentを割り当てられません: {name}')
-    if provider == 'copilot':
-        # Copilot has no own agent files here: reuse the shared Claude definition (Codex as fallback).
+    if provider in ('copilot', 'gemini'):
+        # Copilot/Gemini have no own agent files here: reuse the shared Claude definition (Codex as fallback).
         # Its tools are replaced by 采来's read-only broker before the run.
         try:
             return _load_claude(name)

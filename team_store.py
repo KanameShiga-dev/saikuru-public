@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from pathlib import Path
 
 
@@ -22,11 +22,14 @@ class Store:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.revision = 0
         self.depth = 0
         self.db = sqlite3.connect(self.directory / 'team.sqlite3', check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA synchronous=FULL')
         self.db.execute('CREATE TABLE IF NOT EXISTS objects (kind TEXT, id TEXT PRIMARY KEY, body TEXT NOT NULL)')
+        # Per-job lookups (for_job, transition reasons) read only that job's rows instead of decoding every body.
+        self.db.execute("CREATE INDEX IF NOT EXISTS objects_job ON objects(kind, json_extract(body,'$.job_id'))")
         self.db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS transitions (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, id TEXT, job_id TEXT, from_status TEXT, to_status TEXT, at REAL, reason TEXT)')
         self.db.execute('CREATE INDEX IF NOT EXISTS transition_job ON transitions(job_id, seq)')
@@ -36,6 +39,7 @@ class Store:
 
     def put(self, kind, obj):
         with self.lock:
+            self.revision += 1
             obj = copy.deepcopy(obj)
             obj['updated_at'] = now()
             body = json.dumps(obj, ensure_ascii=False)
@@ -98,6 +102,12 @@ class Store:
         with self.lock:
             return [json.loads(row[0]) for row in self.db.execute('SELECT body FROM objects WHERE kind=? ORDER BY rowid', (kind,))]
 
+    def for_job(self, kind, job_id):
+        """Objects of one job, filtered in SQLite so only that job's bodies are decoded (same order as all())."""
+        with self.lock:
+            return [json.loads(row[0]) for row in self.db.execute(
+                "SELECT body FROM objects WHERE kind=? AND json_extract(body,'$.job_id')=? ORDER BY rowid", (kind, job_id))]
+
     def event(self, event_type, message, task_id=None, job_id=None):
         # Persist summaries, not raw provider protocol messages or environment variables.
         record = dict(type=event_type, message=str(message)[:3000], task_id=task_id,
@@ -142,6 +152,6 @@ class Store:
 
     def backup(self):
         target = self.directory / ('backup-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uid()[:6] + '.sqlite3')
-        with self.lock, sqlite3.connect(target) as dest:
+        with self.lock, closing(sqlite3.connect(target)) as dest:
             self.db.backup(dest)
         return target.name
