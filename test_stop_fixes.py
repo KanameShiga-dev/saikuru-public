@@ -92,7 +92,10 @@ class UsageLimitParseTest(unittest.TestCase):
 
 
 PLAN = {'summary': '計画', 'tasks': [{'title': '実装', 'instruction': '実装する', 'role': 'builder'}],
-        'security_review_required': False}
+        'security_review_required': False,
+        # Plans for new development jobs must carry a code-test decision; these jobs change no real code.
+        'code_test_plan': {'required': False, 'reason': '架空のテスト用の計画。実コードの変更なし。',
+                           'cases': [], 'command': '', 'existing_tests': []}}
 DONE = {'status': 'done', 'summary': '完了', 'checks': ['確認'], 'pending_checks': [], 'question': ''}
 
 

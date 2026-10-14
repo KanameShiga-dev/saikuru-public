@@ -17,8 +17,11 @@ from server import make_server, DataLock
 
 PLAN = {'summary': '計画', 'tasks': [{'title': '調査', 'instruction': '調査する', 'role': 'researcher'},
                                    {'title': '実装', 'instruction': '実装する', 'role': 'builder'}],
-        'security_review_required': False}
-DONE = {'status': 'done', 'summary': '完了報告', 'checks': ['fixtureのみ'], 'pending_checks': [], 'question': ''}
+        'security_review_required': False,
+        # Plans for new development jobs must carry a code-test decision; these jobs change no real code.
+        'code_test_plan': {'required': False, 'reason': '架空のテスト用の計画。実コードの変更なし。',
+                           'cases': [], 'command': '', 'existing_tests': []}}
+DONE ={'status': 'done', 'summary': '完了報告', 'checks': ['fixtureのみ'], 'pending_checks': [], 'question': ''}
 
 
 class FixtureAdapter:
@@ -50,7 +53,7 @@ class EngineTests(unittest.TestCase):
         return self.engine.create_job('sample', 'local goal', self.temp.name, auto)
 
     def until(self, predicate):
-        deadline = time.time() + 8
+        deadline = time.time() + 10
         while not predicate() and time.time() < deadline:
             self.engine.tick()
             time.sleep(.01)

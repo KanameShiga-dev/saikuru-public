@@ -373,6 +373,8 @@ function reportText(result){
   let text=result.summary||'';
   if(result.stage_checks?.length)text+='\n\n各担当の検証報告（未実施の項目を含みます。合格の保証ではありません）:\n'+result.stage_checks.map(item=>`${item.title}（担当報告: ${item.reported_status||'不明'}）\n${(item.checks||[]).join('\n')}${item.pending_checks?.length?'\n担当時点で未確認と報告された項目:\n'+item.pending_checks.map(c=>'・'+c).join('\n'):''}`).join('\n\n');
   if(result.tasks)text+='\n\n'+result.tasks.map((t,i)=>`${i+1}. ${t.title}（${roles[t.role]||t.role}）\n${t.instruction}`).join('\n\n');
+  if(result.code_test_plan){const p=result.code_test_plan;text+='\n\nコードテスト計画: '+(p.required?'実施する':'対象外（'+(p.reason||'理由未記載')+'）');if(p.required)text+='\n既存テスト: '+(p.existing_tests?.length?p.existing_tests.join('、'):'なし')+'\n確認する条件:\n'+(p.cases||[]).map(c=>'・'+c).join('\n')+'\n実行予定: '+p.command+'\n※計画のコマンドは自動承認されません。実行時に既存の安全確認を通します。';}
+  if(result.test_files?.length)text+='\n\n今回使用したテストファイル: '+result.test_files.join('、')+(result.test_change_reason?'\nテスト変更の理由: '+result.test_change_reason:'');
   if(result.security_review_required===true)text+='\n\n通常レビューの後、common-security-reviewerを独立セッションで起動します。';
   if(result.checks?.length)text+='\n\n報告された検証:\n'+result.checks.map(c=>'・'+c).join('\n');
   if(result.pending_checks?.length)text+='\n\n未確認の必須検証（依頼全体の達成は未確認）:\n'+result.pending_checks.map(c=>'・'+c).join('\n');
@@ -750,13 +752,31 @@ async function showArchive(id){
  }catch(e){if(generation===archiveDetailGeneration)area.replaceChildren(el('p','詳細を取得できませんでした。案件を選び直してください。 '+e.message));}
 }
 let effortJob=null,effortRevision=0,effortGeneration=0;
+const qualityStates={passed:'確認済み',failed:'不合格',inconclusive:'未確認',invalidated:'無効（確認後に変更されました）'};
+const qualityChecks={'CQA-03':'検証コマンド','CQA-06':'テストファイル','DQA-01':'成果物'};
+async function loadQuality(id,generation){
+ // SQAH Phase 3: read-only. It decides nothing; acceptance stays with the reviews and the person.
+ const box=el('div');box.append(el('h3','品質確認（読み取り専用）'),el('p','読み込んでいます…'));$('effort-summary').append(box);
+ try{const q=await api('/api/quality/job?id='+encodeURIComponent(id));if(generation!==effortGeneration)return;
+  const rows=[el('h3','品質確認（読み取り専用）'),el('p',`全体: ${qualityStates[q.overall]||q.overall}（確認済みでも受領の判断は変えません）`)];
+  rows.push(el('p','【采来が確認した事実】'));
+  if(!q.facts.length)rows.push(el('p','確認できた事実はありません。'));
+  for(const f of q.facts)rows.push(el('p',`${qualityChecks[f.id]||f.id}: ${qualityStates[f.state]||f.state} — ${f.detail}`));
+  const reviews=q.findings.reviews.map(r=>`${r.agent} ${r.status||'未報告'}`).join(' / ')||'なし';
+  rows.push(el('p','【AIレビューの所見（証拠には数えません）】'),el('p',reviews));
+  rows.push(el('p','【未確認】'),el('p',`受領判断に残る未確認項目 ${q.unresolved.pending_items}件`));
+  rows.push(el('p','【承認】'),el('p',q.approval.accepted?'通常受領済み':q.approval.conditional?'条件付き受領':`受領判断: ${q.approval.status||'なし'}`));
+  rows.push(el('p','この表示は記録を読み直したもので、ファイルや状態は変更しません。検証コマンドの指定がない案件や導入前の案件は「未確認」と表示されます。'));
+  box.replaceChildren(...rows);
+ }catch(e){if(generation===effortGeneration)box.replaceChildren(el('h3','品質確認（読み取り専用）'),el('p','取得できませんでした。'+e.message));}
+}
 async function openEffort(id){
  const generation=++effortGeneration;effortJob=id;$('effort-form').hidden=true;$('effort-summary').replaceChildren();$('effort-message').textContent='記録を読み込んでいます…';
  if(!$('effort-dialog').open)$('effort-dialog').showModal();
  try{const data=await api('/api/jobs/evaluation?id='+encodeURIComponent(id));if(generation!==effortGeneration)return;
   $('effort-title').textContent='評価記録: '+data.title;
   effortRevision=data.revision;$('effort-minutes').value=data.record?.minutes??'';$('effort-observer').value=data.record?.observer||'real_user';$('effort-confirmed').checked=false;
-  $('effort-summary').replaceChildren(el('p',`受領状態: ${jobStatuses[data.status]||data.status}`),el('p',`承認 ${data.approved_decisions}件 / 拒否 ${data.denied_decisions}件 / 判断待ち ${data.pending_decisions}件`),el('p',`利用者の差し戻し ${data.user_rework_count}回 / 要修正のレビュー報告 ${data.review_needs_changes_reports}件 / タスク再試行 ${data.task_retry_count}回`),el('p','過去のレビュー報告の保存範囲内で集計。受領状態だけでは実利用者本人の確認を証明しません。'));
+  $('effort-summary').replaceChildren(el('p',`受領状態: ${jobStatuses[data.status]||data.status}`),el('p',`承認 ${data.approved_decisions}件 / 拒否 ${data.denied_decisions}件 / 判断待ち ${data.pending_decisions}件`),el('p',`利用者の差し戻し ${data.user_rework_count}回 / 要修正のレビュー報告 ${data.review_needs_changes_reports}件 / タスク再試行 ${data.task_retry_count}回`),el('p','過去のレビュー報告の保存範囲内で集計。受領状態だけでは実利用者本人の確認を証明しません。'));loadQuality(id,generation);
   $('effort-message').textContent=data.record?`保存済み: ${data.record.minutes}分（${data.record.observer==='real_user'?'本人記録':'代理記録'}）。訂正時は累計を入力してください。`:'実作業時間は未測定です。';$('effort-form').hidden=false;
  }catch(e){if(generation===effortGeneration)$('effort-message').textContent='記録を取得できませんでした。再読み込みしてください。 '+e.message;}
 }
@@ -1165,7 +1185,7 @@ $('folder-use').addEventListener('click',()=>{
 $('job-template')?.addEventListener('click',()=>{const goal=$('job-goal');if(goal.value.trim()&&!confirm('入力済みの内容を記入例で置き換えます。よろしいですか？'))return;goal.value='【目的】\n\n【材料】\n\n【完了の条件】\n\n【決まっていない点は標準で】ファイル名・表現の細部はおまかせ。迷ったら元の依頼を優先し、採用した標準を報告に書く。';goal.focus();});
 // Requests for documents get the document tools only through the ledger consultation (kind: documentation).
 const DOCUMENT_REQUEST=/PowerPoint|PPTX|パワポ|スライド|プレゼン|説明資料|報告書|Word|DOCX|Excel|XLSX|PDF|動画|MP4|チラシ|ポスター/i;
-const syncJobKind=()=>{const docs=$('job-kind').value==='documentation';$('job-document').hidden=!docs;$('job-document-format').required=docs;};
+const syncJobKind=()=>{const docs=$('job-kind').value==='documentation';$('job-document').hidden=!docs;$('job-document-format').required=docs;$('job-validation').hidden=docs;};
 $('job-kind').addEventListener('change',syncJobKind);
 const routingBox=document.createElement('details');routingBox.id='job-routing-eval';routingBox.hidden=true;
 routingBox.innerHTML='<summary>分離環境で経路を比較する</summary><p class="hint">架空の単一Pythonファイルだけが対象です。通常サービスでは使えません。</p><label>実行経路<select name="route" id="job-route"><option value="full">通常経路</option><option value="light_eval">軽い経路（計画AIのみ省略）</option></select></label><label>変更してよいPythonファイル<input name="light_scope_file" id="job-light-scope" placeholder="例：calculator.py"></label><label>独立した合格条件<textarea name="light_acceptance" id="job-light-acceptance" rows="3" placeholder="例：既存の単体テストをすべて通し、負数の合計も正しく返す"></textarea></label><p class="hint">軽い経路には自動実行、検証モードA、検証用データの確認が必要です。添付・資料作成は使えません。</p>';
@@ -1249,7 +1269,7 @@ $('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormD
 clearJobIssues();const issues=checkJobForm(e.target,f,docs);if(issues.length){showJobIssues(issues);return;}
 if(!docs&&DOCUMENT_REQUEST.test(String(f.get('title'))+' '+String(f.get('goal')))&&!confirm('資料（PowerPoint・Word・PDFなど）を作る依頼のようです。\n\n「依頼の種類」を「資料作成」にすると、図・表付きの資料を作る道具で進められます。開発・作業の依頼では、資料用の道具は使えません。\n\nこのまま開発・作業の依頼として出しますか？（キャンセルで入力に戻ります）'))return;
 action(async()=>{try{await submitJob(f,docs,e.target);}catch(error){showJobIssues([jobServerIssue(error)]);throw error;}});});
-async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const route=f.get('route')||'full';const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{}) ,...(route==='light_eval'?{route,light_scope_file:f.get('light_scope_file'),light_acceptance:f.get('light_acceptance')}: {})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、同じ依頼を OFF・ON の2件受け付けました。':'依頼を受け付けました。')+(route==='light_eval'?'制作から開始します。':'計画の作成を始めます。')+(created.prepared?.length?' '+created.prepared.join(' '):''));}
+async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const route=f.get('route')||'full';const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,validation_commands:docs?[]:String(f.get('validation_commands')||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{}) ,...(route==='light_eval'?{route,light_scope_file:f.get('light_scope_file'),light_acceptance:f.get('light_acceptance')}: {})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、同じ依頼を OFF・ON の2件受け付けました。':'依頼を受け付けました。')+(route==='light_eval'?'制作から開始します。':'計画の作成を始めます。')+(created.prepared?.length?' '+created.prepared.join(' '):''));}
 $('pause').addEventListener('click',()=>action(()=>api('/api/pause',{paused:!state.paused})));
 $('stop').addEventListener('click',()=>action(async()=>{if(confirm('全ての実行中の依頼を中止し、新規着手を停止しますか？'))await api('/api/stop',{});}));
 $('backup').addEventListener('click',()=>action(async()=>{const r=await api('/api/backup',{});notice('DBのバックアップを保存しました: data/'+r.file+'、data/'+r.handoff_file);}));

@@ -135,7 +135,7 @@ def _set_aside(root, path):
     return str(target.relative_to(root))
 
 
-def document_operation(root, name, args, writable):
+def document_operation(root, name, args, writable, job_id=None):
     path = output_path(root, args.get('path', ''))
     if name == 'read_document':
         if path.suffix in ('.docx','.xlsx'):
@@ -170,6 +170,17 @@ def document_operation(root, name, args, writable):
     if manifest.is_symlink() or manifest.with_suffix('.tmp').is_symlink():
         raise ValueError('資料管理ファイルのリンクは使えません。')
     records = json.loads(manifest.read_text(encoding='utf-8')) if manifest.exists() else {}
+    owned = None
+    own_records = None
+    if job_id is not None:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', str(job_id)):
+            raise ValueError('資料の依頼IDが不正です。')
+        owned = root / ('.saikuru-owned-' + str(job_id) + '.json')
+        if owned.is_symlink() or owned.with_suffix('.tmp').is_symlink():
+            raise ValueError('依頼別の資料管理ファイルのリンクは使えません。')
+        own_records = json.loads(owned.read_text(encoding='utf-8')) if owned.exists() else {}
+        if not isinstance(own_records, dict):
+            raise ValueError('依頼別の資料管理記録が不正です。')
     key = str(path.relative_to(root))
     if path.exists():
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -183,6 +194,11 @@ def document_operation(root, name, args, writable):
     records[key] = digest
     temp = manifest.with_suffix('.tmp')
     temp.write_text(json.dumps(records), encoding='utf-8'); os.replace(temp, manifest)
+    if owned is not None:
+        own_records[key] = digest
+        own_temp = owned.with_suffix('.tmp')
+        own_temp.write_text(json.dumps(own_records), encoding='utf-8')
+        os.replace(own_temp, owned)
     return {'path': key, 'sha256': digest}
 
 def media_environment():
@@ -658,7 +674,7 @@ def main():
                 calls+=1
                 if calls>100: raise ValueError('Tool limit')
                 name=params.get('name');args=params.get('arguments',{})
-                value=(media_environment() if name=='media_environment' else generate_media(output,args,writable,job_id) if name=='generate_media' else generate_office((output,source),args,writable,job_id) if name=='generate_office' else learn_design((output,source),args,writable) if name=='learn_design' else document_operation(output,name,args,writable) if name in ('read_document','write_document') else dict(execute(source,name,args),output_documents=binary_documents(output)) if name=='list_files' else execute(source,name,args))
+                value=(media_environment() if name=='media_environment' else generate_media(output,args,writable,job_id) if name=='generate_media' else generate_office((output,source),args,writable,job_id) if name=='generate_office' else learn_design((output,source),args,writable) if name=='learn_design' else document_operation(output,name,args,writable,job_id) if name in ('read_document','write_document') else dict(execute(source,name,args),output_documents=binary_documents(output)) if name=='list_files' else execute(source,name,args))
                 result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}]}
             else: raise ValueError('Unsupported operation')
             reply={'jsonrpc':'2.0','id':msg['id'],'result':result}

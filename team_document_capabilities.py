@@ -62,6 +62,30 @@ def require_artifacts(job):
         from team_artifact_guard import check_staging
         check_staging(job['project'],job['id'],expected)
         return
+    if expected in {'md', 'html', 'txt', 'svg'}:
+        # Jobs created before the ownership manifest was introduced must keep
+        # their previous acceptance path. New jobs opt in when they are created.
+        if not job.get('document_manifest_required'):
+            return
+        root=Path(job['project']).resolve()
+        manifest=root/('.saikuru-owned-'+job['id']+'.json')
+        if not manifest.is_file() or manifest.is_symlink() or manifest.stat().st_size>1_000_000:
+            raise ValueError('指定された文字資料が未作成です。完了扱いにできません。')
+        try:
+            records=json.loads(manifest.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValueError('文字資料の管理記録を確認できません。') from exc
+        if not isinstance(records,dict):
+            raise ValueError('文字資料の管理記録が不正です。')
+        for name, digest in records.items():
+            if not isinstance(name,str) or not isinstance(digest,str):continue
+            relative=Path(name)
+            if relative.is_absolute() or '..' in relative.parts or relative.suffix.lower()!='.'+expected:continue
+            path=(root/relative).resolve()
+            if path.is_relative_to(root) and path.is_file() and not (root/relative).is_symlink() \
+                    and hashlib.sha256(path.read_bytes()).hexdigest()==digest:
+                return
+        raise ValueError('指定された文字資料が存在しない、または作成後に変更されています。')
     if expected not in BINARY:return
     root=Path(job['project']).resolve();manifest=root/('.saikuru-output-'+job['id']+'.json')
     if not manifest.is_file() or manifest.is_symlink():raise ValueError('指定された成果物が未作成です。完了扱いにできません。')

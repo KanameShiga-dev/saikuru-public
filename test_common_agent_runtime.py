@@ -18,7 +18,10 @@ from team_store import Store
 
 DONE = dict(status='done', summary='fixture verified', checks=['fixture'], question='', questions=[], context_updates=[])
 PLAN = dict(summary='fixture plan', tasks=[dict(title='fixture build', instruction='fixture only', role='builder')],
-            security_review_required=True, questions=[], context_updates=[])
+            security_review_required=True, questions=[], context_updates=[],
+            # Plans for new development jobs must carry a code-test decision; these jobs change no real code.
+            code_test_plan=dict(required=False, reason='fixture only; no real code is changed',
+                                cases=[], command='', existing_tests=[]))
 
 
 class NativeRuntimeTests(unittest.TestCase):

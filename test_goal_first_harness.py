@@ -1,4 +1,6 @@
 """Isolated checks for goal-first completion and pending-check handling."""
+import hashlib
+import json
 import tempfile
 import time
 import unittest
@@ -16,6 +18,9 @@ PLAN = {
     'security_review_required': False,
     'questions': [],
     'context_updates': [],
+    # Plans for new development jobs must carry a code-test decision; these jobs change no real code.
+    'code_test_plan': {'required': False, 'reason': '架空のテスト用の計画。実コードの変更なし。',
+                       'cases': [], 'command': '', 'existing_tests': []},
 }
 
 
@@ -177,6 +182,11 @@ class GoalFirstHarnessTest(unittest.TestCase):
         self.store.update(reviewer['id'], status='succeeded', result={
             'status': 'done', 'summary': '資料内容を確認。', 'checks': ['内容確認済み。'], 'pending_checks': [],
         })
+        # New text-document jobs need a deliverable that 采来 recorded as its own, with a matching hash.
+        document = self.root / 'guide.md'
+        document.write_text('# 架空の資料\n', encoding='utf-8')
+        (self.root / ('.saikuru-owned-' + job['id'] + '.json')).write_text(
+            json.dumps({'guide.md': hashlib.sha256(document.read_bytes()).hexdigest()}), encoding='utf-8')
 
         self.engine.accept_without_fix(job['id'])
         approval = next(a for a in self.store.all('approval') if a['job_id'] == job['id'] and a['status'] == 'pending')

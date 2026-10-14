@@ -68,6 +68,9 @@ RESULT_SCHEMA = object_schema({'status': {'type': 'string', 'enum': ['done', 'bl
 
     'questions': QUESTIONS, 'context_updates': CONTEXT_UPDATES})
 
+RESULT_SCHEMA_TESTS = object_schema(dict(RESULT_SCHEMA['properties'],
+    test_files={'type': 'array', 'maxItems': 20, 'items': STR}, test_change_reason=STR))
+
 PLAN_SCHEMA = object_schema({'summary': STR, 'tasks': {'type': 'array', 'items': object_schema({
 
     'title': STR, 'instruction': STR, 'role': {'type': 'string', 'enum': ['researcher', 'builder']}})},
@@ -75,6 +78,11 @@ PLAN_SCHEMA = object_schema({'summary': STR, 'tasks': {'type': 'array', 'items':
     'security_review_required': {'type': 'boolean'},
 
     'questions': QUESTIONS, 'context_updates': CONTEXT_UPDATES})
+
+PLAN_SCHEMA_TESTS = object_schema(dict(PLAN_SCHEMA['properties'], code_test_plan=object_schema({
+    'required': {'type': 'boolean'}, 'reason': STR,
+    'cases': {'type': 'array', 'maxItems': 20, 'items': STR}, 'command': STR,
+    'existing_tests': {'type': 'array', 'maxItems': 20, 'items': STR}})))
 
 # The meaning of a result status is defined here only; role instructions refer to these texts and must not redefine
 # "blocked" (2026-10-08: the review text told reviewers to block when conditions were missing, contradicting the common rule; a review that only
@@ -116,10 +124,31 @@ REPAIR_RULE = ('\n\n【統括からの指示】指摘を修正したあと、元
                '検証指示は利用者・プロジェクトの禁止事項や担当の道具制限を上書きしない。'
                '利用者が別担当へ明示的に割り当てた検証は、担当と未実施を記録し、その検証だけを理由に今回の工程を停止しない。')
 
+CODE_TEST_REUSE_RULE = (
+    '\nコードを変更する依頼では、初回の実装時に受入条件と既存動作に対応するテストコードを作成または拡充する。'
+    'テストデータには架空の値だけを使い、実際の個人情報・機密情報を入れない。'
+    '後続の修正では既存のテストコードを保持して再実行し、見つかった欠陥の再発防止に必要なケースを追加する。'
+    '期待値を実装の誤動作に合わせて書き換えず、変更する場合は仕様の根拠をchecksに示す。'
+    '各修正後の現行版でテストを実行し、コマンド・結果・未実施理由をchecksに記録する。'
+    '依頼または計画に指定された検証コマンドは対象プロジェクトを作業フォルダとして単独で実行する。'
+    '出力を短くするためのパイプ、リダイレクト、echo、cdなどを同じコマンド文字列に付け足さない。'
+    '採否は采来に記録されたコマンド文字列の完全一致と終了状態で判定する。'
+    'コマンドの実行には既存の承認と安全確認が必要であり、未許可なら質問して待つ。'
+    'テストの成功だけで全要件の合格とせず、対象外と未確認の動作をpending_checksに残す。')
+
+CODE_TEST_PLAN_RULE = (
+    '\n計画にはcode_test_planを必ず含める。コード変更がある場合はrequired=trueとし、'
+    '既存テストを確認して再利用するファイルの相対パスをexisting_testsに列挙し、'
+    '見つからなければ空配列にする。追加する受入条件と回帰ケースをcasesに書き、'
+    '作業担当が実行する単独のテストコマンドをcommandに指定する。'
+    'このコマンドは計画の提案であり、自動承認ではない。実行時は従来の操作承認を受ける。'
+    'コード変更がない場合はrequired=false、理由をreasonに書き、cases=[]、command=""、existing_tests=[]にする。'
+    'コード変更のbuilder工程にはテスト作成・既存テスト再利用・現行版での実行を含める。')
+
 
 # 2026-10-09 (user decision): every new development request stopped on the same question, because the generated
 # COMMAND_ALLOWLIST.md approves no command. Commands the user wrote in the request itself are the user's approval.
-REQUEST_COMMANDS_RULE = ('\n元の依頼の本文に利用者が書いたコマンド（完了条件の確認コマンドなど）は、利用者が実行を許可したものとして扱う。'
+REQUEST_COMMANDS_RULE = ('\n元の依頼の本文または依頼画面の検証コマンド欄に利用者が書いたコマンドは、利用者が実行を許可したものとして扱う。'
                          'COMMAND_ALLOWLIST.md に無いことを理由に質問しない（プロジェクトの AGENTS.md の古い文言よりこの指示を優先する）。'
                          'そのコマンドを実行する作業担当が、実行の前に COMMAND_ALLOWLIST.md の「Requested by the user」の節に、'
                          '依頼文にあるそのコマンドだけを書かれた形のまま記録する（無ければ節を作る。ほかのコマンドは足さない）。'
@@ -469,6 +498,16 @@ class Context:
         from team_security_audit import result_message
         self.engine.store.event('operation_result', result_message(command, exit_code, output, timed_out),
                                 self.task['id'], self.task['job_id'])
+        from team_validation_gate import record_result
+        from team_code_test_contract import commands
+        job = self.engine.store.get(self.task['job_id'], 'job')
+        runs = record_result(self.engine.store.get(self.task['id'], 'task'),
+                             commands(job), command, exit_code, timed_out)
+        if runs is not None:
+            self.engine.store.update(self.task['id'], validation_runs=runs)
+        elif self.task.get('role') == 'builder' and commands(job):
+            # A later command might change the project; only checks run after it may count.
+            self.engine.store.update(self.task['id'], validation_runs=[])
 
     def agent_started(self, session_id, launch_method):
 
@@ -525,6 +564,11 @@ class Context:
         self.check()
 
         job = self.engine.store.get(self.task['job_id'], 'job')
+        from team_code_test_contract import commands
+        if (self.task.get('role') == 'builder' and commands(job)
+                and payload.get('operation') == 'item/fileChange/requestApproval'):
+            # Even a denied/failed edit request makes earlier validation evidence stale.
+            self.engine.store.update(self.task['id'], validation_runs=[])
         route_eval = self.engine.config.get('routing_evaluation') or {}
         if route_eval.get('enabled') is True and Path(self.project).resolve().is_relative_to(Path(route_eval['root']).resolve()):
             operation = payload.get('operation')
@@ -1038,7 +1082,15 @@ class Engine:
 
     def create_job(self, title, goal, project, auto_execute, planner_profile=None, document_source=None, attachment_ids=None, document_format=None,
                    skill_mode='auto', skill_ids=None, evaluation_mode=None, evaluation_confirmed=False, role_profiles=None,
-                   token_reduction=None, comparison_id=None, route='full', light_scope_file=None, light_acceptance=None):
+                   token_reduction=None, comparison_id=None, route='full', light_scope_file=None, light_acceptance=None,
+                   validation_commands=None):
+        from team_validation_gate import validate_commands
+        validation_commands = validate_commands(validation_commands)
+        if validation_commands and document_source:
+            raise ValueError('資料作成ではコマンド検証を指定できません。')
+        if validation_commands:
+            from team_dlp import require_clean_input
+            require_clean_input('\n'.join(validation_commands), False, '検証コマンド')
 
         skill_selection = self._skill_selection(skill_mode, skill_ids)
         if token_reduction not in (None, 'on', 'off') or (comparison_id is not None and not token_reduction):
@@ -1113,8 +1165,11 @@ class Engine:
             job = self.store.put('job', {'id': uid(), 'title': title[:160], 'goal': goal,
 
                 'project': str(Path(project).resolve()), 'auto_execute': bool(auto_execute),
+                'validation_commands': validation_commands,
+                'code_test_contract_version': 1 if not document_source and route == 'full' else 0,
                 'document_source': document_source,
                 'document_format': document_format,
+                'document_manifest_required': bool(document_source and document_format in ('md', 'html', 'txt', 'svg')),
                 'attachment_ids': attachment_ids,
                 'instruction_health': instruction_health,
                 'request_origin': 'new',
@@ -1581,7 +1636,11 @@ class Engine:
         from team_document_capabilities import require_plan
         require_plan(job,result)
 
-        job = self.store.update(job['id'], security_review_required=result.get('security_review_required', False))
+        from team_code_test_contract import snapshot_files, validate_plan
+        test_plan = validate_plan(result['code_test_plan']) if job.get('code_test_contract_version') else None
+        existing = snapshot_files(job['project'], test_plan['existing_tests']) if test_plan and test_plan['existing_tests'] else {}
+        job = self.store.update(job['id'], security_review_required=result.get('security_review_required', False),
+                                **({'code_test_plan': test_plan, 'test_assets': existing} if test_plan is not None else {}))
 
         after = task['id']
 
@@ -1599,9 +1658,24 @@ class Engine:
 
     def _queue_reviews(self, job, after, repair=0):
 
+        from team_code_test_contract import commands
+        if commands(job) and self.store.get(after, 'task')['role'] != 'builder':
+            check = self.new_task(job, '指定された検証コマンドを現行版で実行する',
+                                  '既存のテストを確認・再利用し、必要なテストを追加したうえで、'
+                                  '依頼時または計画時に指定された検証コマンドを現行版に対して実行する。'
+                                  '実行結果を報告し、失敗したらneeds_changesで具体的な修正箇所を示す。'
+                                  'コマンドには既存の操作承認・安全確認を適用する。',
+                                  'builder', after, repair)
+            after = check['id']
+
         review = self.new_task(job, '別担当が成果と検証を確認する',
 
-            '元の依頼の達成状況、変更内容、検証の証拠を読み取り専用でレビューする。' + REVIEW_STATUS_RULE, 'reviewer', after, repair)
+            '元の依頼の達成状況、変更内容、検証の証拠を読み取り専用でレビューする。'
+            + ('コードテスト計画の各条件とテストコードの対応、既存テストの再利用、追加ケース、'
+               '期待値変更の仕様上の根拠、今回の実行記録を確認する。'
+               'テストの終了コードだけで要件の網羅や期待値の正しさを推定しない。'
+               if (job.get('code_test_plan') or {}).get('required') else '')
+            + REVIEW_STATUS_RULE, 'reviewer', after, repair)
 
         self.store.update(review['id'], review_cycle=after)
 
@@ -1833,7 +1907,24 @@ class Engine:
 
             + '\n現在の方針:\n' + '\n\n'.join(shared)
 
-            + '\n\n元の依頼:\n' + job['goal'] + '\n\n今回の担当:\n' + ctx.task['instruction']
+            + '\n\n元の依頼:\n' + job['goal']
+            + (CODE_TEST_PLAN_RULE if ctx.task['role'] == 'planner' and job.get('code_test_contract_version') else '')
+            + ('\n\n利用者が依頼時に指定した検証コマンド（既存の操作承認・安全確認を通すこと）：\n'
+               + '\n'.join(f'{i + 1}. {command}' for i, command in enumerate(job['validation_commands']))
+               + ('\n修正後の現行版で各コマンドを記載どおり実行し、終了コードと結果を報告する。'
+                  '実行できない場合は未実施と報告する。過去の工程の実行結果を流用しない。'
+                  if ctx.task['role'] == 'builder' else
+                  '\n検証コマンドの実行は作業担当が行う。レビュー担当は采来の記録と照合する。')
+               if job.get('validation_commands') else '')
+            + (CODE_TEST_REUSE_RULE if ctx.task['role'] == 'builder' and not job.get('document_source') else '')
+            + ('\n今回のコードテスト計画: ' + json.dumps(job['code_test_plan'], ensure_ascii=False)
+               + '\n前回までに使ったテストファイルとハッシュ: '
+               + json.dumps(job.get('test_assets') or {}, ensure_ascii=False)
+               + '\n作業担当はtest_filesに今回使用したテストファイルのプロジェクト相対パスを全て列挙し、'
+               '既存テストを変更したらtest_change_reasonに仕様の根拠を記す。'
+               'テストは従来の承認経路で実行し、成功後にレビューへ渡す。'
+               if ctx.task['role'] == 'builder' and (job.get('code_test_plan') or {}).get('required') else '')
+            + '\n\n今回の担当:\n' + ctx.task['instruction']
 
             + '\n\n利用者が承認した引き継ぎ範囲:\n' + json.dumps(job.get('handoff_scope', []), ensure_ascii=False)
 
@@ -1918,6 +2009,15 @@ class Engine:
 
                     raise ProviderError('計画に作業内容がありません。')
 
+            if self.store.get(task['job_id']).get('code_test_contract_version'):
+                from team_code_test_contract import snapshot_files, validate_plan
+                try:
+                    plan = validate_plan(result.get('code_test_plan'))
+                    if plan['existing_tests']:
+                        snapshot_files(self.store.get(task['job_id'])['project'], plan['existing_tests'])
+                except ValueError as exc:
+                    raise ProviderError(str(exc), 'format') from exc
+
         else:
 
             if result.get('status') not in ('done', 'blocked', 'needs_changes', 'handoff') or not isinstance(result.get('summary'), str):
@@ -1962,6 +2062,10 @@ class Engine:
             if not isinstance(result.get('checks'), list) or not all(isinstance(x, str) for x in result['checks']):
 
                 raise ProviderError('検証結果の形式が不正です。')
+
+            if task['role'] == 'builder' and (self.store.get(task['job_id']).get('code_test_plan') or {}).get('required'):
+                if not isinstance(result.get('test_files'), list) or not isinstance(result.get('test_change_reason'), str):
+                    raise ProviderError('テストファイルと変更理由の報告形式が不正です。')
 
             # Legacy stored reports can omit the new field. New provider reports
             # must supply it through RESULT_SCHEMA, before this validation step.
@@ -2017,11 +2121,56 @@ class Engine:
                 self.store.event('review_blocked_to_changes', '質問のないレビューの停止を、修正担当への差し戻しとして扱いました。',
                                  task['id'], job['id'])
 
+            if (task['role'] == 'reviewer' and task.get('agent_name') != 'common-security-reviewer'
+                    and result.get('status') == 'done' and
+                    (job.get('validation_commands') or (job.get('code_test_plan') or {}).get('required'))):
+                from team_validation_gate import findings
+                from team_code_test_contract import commands, verify_snapshot
+                cycle = self.store.get(task['review_cycle'], 'task') if task.get('review_cycle') else None
+                missing = findings(commands(job), cycle)
+                if (job.get('code_test_plan') or {}).get('required') and not verify_snapshot(
+                        job['project'], (cycle or {}).get('test_asset_snapshot') or {}):
+                    missing.append('テスト実行後にテストファイルが変更・削除されています。')
+                if missing:
+                    result = dict(result, status='needs_changes',
+                                  summary='（采来による検証ゲート）' + ' '.join(missing)
+                                          + '\n元のレビュー: ' + result['summary'],
+                                  checks=list(result.get('checks') or []) + missing)
+                    self.store.event('validation_gate_failed',
+                                     '指定された検証コマンドの現行工程での成功を確認できず、修正・再レビューへ戻しました。',
+                                     task['id'], job['id'])
+                else:
+                    self.store.event('validation_gate_passed',
+                                     '指定された検証コマンドの終了コード0を現行工程で確認しました。',
+                                     task['id'], job['id'])
+
             # Intermediate builder steps (e.g. a draft before generate_media) must not be gated on the
             # final deliverable; the final check after review still applies.
             production_pending = any(t['job_id'] == job['id'] and t['id'] != task['id'] and t['status'] == 'queued'
                                      and t['role'] == 'builder' and any(name in t.get('instruction', '') for name in ('generate_media', 'generate_office', 'Artifact'))
                                      for t in self.store.all('task'))
+            if (task['role'] == 'builder' and result.get('status') == 'done'
+                    and (job.get('code_test_plan') or {}).get('required')
+                    and any(t['job_id'] == job['id'] and t.get('review_cycle') == task['id']
+                            and t['role'] == 'reviewer' and t['status'] == 'queued'
+                            for t in self.store.all('task'))):
+                from team_code_test_contract import builder_issues
+                issues, snapshot = builder_issues(job, current, result)
+                if snapshot is not None:
+                    self.store.update(task['id'], test_asset_snapshot=snapshot)
+                    self.store.update(job['id'], test_assets=snapshot)
+                    job['test_assets'] = snapshot
+                if issues:
+                    result = dict(result, status='needs_changes',
+                                  summary='（采来によるコードテスト確認）' + ' '.join(issues)
+                                          + '\n作業報告: ' + result['summary'],
+                                  checks=list(result.get('checks') or []) + issues)
+                    self.store.event('code_test_gate_failed',
+                                     'テストファイルまたは現行工程の実行結果を確認できず、修正工程へ戻しました。',
+                                     task['id'], job['id'])
+                else:
+                    self.store.event('code_test_gate_passed',
+                                     'テストファイルと現行工程の実行成功を確認しました。', task['id'], job['id'])
             if task['role']=='builder' and result.get('status')=='done' and job.get('document_format') and not production_pending:
                 from team_document_capabilities import require_artifacts
                 try:
@@ -2111,14 +2260,8 @@ class Engine:
 
             elif task['role'] == 'reviewer':
 
-                # 2026-10-08 (user decision): in a document job a review finding does not stop the job. It is kept in
-                # the review result and shown at acceptance; the user decides whether to send the work back.
-                document_findings = self.config.get('document_review_relaxed', False) and bool(job.get('document_source')) and result['status'] == 'needs_changes'
-                if document_findings:
-                    self.store.event('review_findings_recorded', 'レビュー指摘を記録し、受け入れ画面で利用者が判断します（資料作成では依頼を止めません）。',
-                                     task['id'], job['id'])
-
-                if result['status'] == 'needs_changes' and not document_findings and task['repair'] < self.config['max_repairs']:
+                # A concrete document finding also enters the bounded repair loop.
+                if result['status'] == 'needs_changes' and task['repair'] < self.config['max_repairs']:
 
                     for following in self.store.all('task'):
 
@@ -2134,7 +2277,7 @@ class Engine:
 
                     self._queue_reviews(job, fix['id'], repair)
 
-                elif result['status'] == 'needs_changes' and not document_findings:
+                elif result['status'] == 'needs_changes':
 
                     self.store.update(job['id'], status='blocked')
 
@@ -2197,7 +2340,36 @@ class Engine:
                 repeated = bool(task.get('previous_findings')) and ''.join(result['summary'].split()) == ''.join(task['previous_findings'].split())
                 if repeated:
                     self.store.event('confirmation_repeated', '前回と同じ確認指摘です。再試行ではなく修正工程へ進めます。上限後は利用者に引き継ぎます。', task['id'], job['id'])
-                if task['role'] == 'researcher' and task['repair'] < self.config['max_repairs']:
+                validation_builder = (task['role'] == 'builder' and bool(job.get('validation_commands') or
+                                      (job.get('code_test_plan') or {}).get('required'))
+                                      and any(t['job_id'] == job['id'] and t.get('review_cycle') == task['id']
+                                              and t['role'] == 'reviewer' and t['status'] == 'queued'
+                                              for t in self.store.all('task')))
+                if validation_builder and task['repair'] < self.config['max_repairs']:
+                    for following in self.store.all('task'):
+                        if (following['job_id'] == job['id'] and following.get('review_cycle') == task['id']
+                                and following['status'] == 'queued'):
+                            self.store.update(following['id'], status='cancelled',
+                                              summary='検証指摘の修正後にレビューをやり直します。')
+                    repair = task['repair'] + 1
+                    fix = self.new_task(job, '検証指摘を修正して再実行する',
+                                        result['summary'] + '\n' + '\n'.join(result.get('checks') or []) + REPAIR_RULE,
+                                        'builder', task['id'], repair)
+                    self._queue_reviews(job, fix['id'], repair)
+                    self.store.event('validation_repair',
+                                     '作業担当の検証指摘を修正担当へ戻し、検証とレビューを追加しました。',
+                                     fix['id'], job['id'])
+                elif validation_builder:
+                    for following in self.store.all('task'):
+                        if (following['job_id'] == job['id'] and following.get('review_cycle') == task['id']
+                                and following['status'] == 'queued'):
+                            self.store.update(following['id'], status='cancelled',
+                                              summary='検証指摘が修正上限に達したためレビューを開始しません。')
+                    self.store.update(job['id'], status='blocked')
+                    self.store.event('validation_repair_limit',
+                                     '検証指摘の自動修正上限です。未解決の結果を残して停止しました。',
+                                     task['id'], job['id'])
+                elif task['role'] == 'researcher' and task['repair'] < self.config['max_repairs']:
                     fix = self.new_task(job, '確認指摘を修正する',
                         '元の依頼の許可範囲内で次の指摘を修正してください。範囲外の変更は質問してください。'
                         '\n必須条件の根拠と最新成果物を先に確認し、AIが追加した目安だけを必須条件にしない。\n'
@@ -2349,7 +2521,11 @@ class Engine:
                 'native_instructions_chars':len(ctx.agent_system_instructions),
                 'skill_catalog_chars':len(shared_catalog(definition.name)), 'metric':'characters, not provider tokens'}
             self.store.update(task['id'], agent_run=ctx.agent_run)
-            schema = PLAN_SCHEMA if task['role'] == 'planner' else RESULT_SCHEMA
+            job_for_schema = self.store.get(task['job_id'], 'job')
+            schema = (PLAN_SCHEMA_TESTS if job_for_schema.get('code_test_contract_version') else PLAN_SCHEMA) \
+                if task['role'] == 'planner' else \
+                (RESULT_SCHEMA_TESTS if task['role'] == 'builder' and
+                 (job_for_schema.get('code_test_plan') or {}).get('required') else RESULT_SCHEMA)
             result = ADAPTERS[task['profile']['adapter']]().run(ctx, prompt, schema)
             # 2026-10-09 (user decision): every provider's report passes the same schema gate, so the items do not
             # depend on the model. Claude/Codex enforce the schema in their CLI; Copilot is repaired in its adapter.
@@ -3084,6 +3260,11 @@ class Engine:
         tool = body.get('tool', '')
 
         data = body.get('input') or {}
+        if tool in ('Edit', 'Write') and ctx.task.get('role') == 'builder':
+            job = self.store.get(ctx.task['job_id'], 'job')
+            from team_code_test_contract import commands
+            if commands(job):
+                self.store.update(ctx.task['id'], validation_runs=[])
         # Which bridge asked (recorded with an approval): copilot_work_tools says so; the Claude hook does not.
         source = 'copilot' if body.get('source') == 'copilot' else 'claude'
 

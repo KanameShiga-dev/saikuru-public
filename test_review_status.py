@@ -14,7 +14,10 @@ from team_engine import Engine, REPAIR_RULE, repair_instruction
 from team_store import Store
 
 PLAN = {'summary': '計画', 'tasks': [{'title': '作る', 'instruction': '作ってテストする', 'role': 'builder'}],
-        'security_review_required': False}
+        'security_review_required': False,
+        # Plans for new development jobs must carry a code-test decision; these jobs change no real code.
+        'code_test_plan': {'required': False, 'reason': '架空のテスト用の計画。実コードの変更なし。',
+                           'cases': [], 'command': '', 'existing_tests': []}}
 DONE = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格'], 'pending_checks': [], 'question': ''}
 NO_EVIDENCE = {'status': 'blocked', 'summary': '修正後のテスト結果がないため完了と判定できない。',
                'checks': ['後続確認：現行版でunittestを実行する'], 'pending_checks': ['現行版でunittestを実行する'], 'question': ''}

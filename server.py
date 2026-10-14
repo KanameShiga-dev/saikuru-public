@@ -62,7 +62,12 @@ class App:
         self.config = load_config(directory)
         self.commands = discover()
         self.models = ModelCatalog(self.commands)
-        self.health = environment_status(self.commands)
+        # Determine the credential path before checking CLI sign-in. A stored long-lived
+        # token must not trigger the regular OAuth refresh on service startup.
+        from team_claude_auth import ClaudeAuth
+        from team_config import claude_config_directory
+        self.claude_auth = ClaudeAuth(claude_config_directory(), notify=self.notify_claude_auth)
+        self.health = environment_status(self.commands, check_auth=not self.claude_auth.configured())
         from team_claude_login import ClaudeLogin
         self.claude_login = ClaudeLogin(self)
         self.port = port
@@ -86,9 +91,6 @@ class App:
         from team_notifications import Notifications
         self.notifications = Notifications(self)
         # Claude sign-in (2026-10-12, plans A and C): the long-lived token and the hold after a sign-in failure.
-        from team_claude_auth import ClaudeAuth
-        from team_config import claude_config_directory
-        self.claude_auth = ClaudeAuth(claude_config_directory(), notify=self.notify_claude_auth)
         self.engine.claude_auth = self.claude_auth
         self.engine.claude_logged_in = lambda: self.health.get('claude', {}).get('authenticated')
         self.apply_claude_auth()
@@ -216,6 +218,13 @@ class App:
     def task_detail(self, task_id):
         task = self.store.get(task_id, 'task')
         return {k: task[k] for k in self.SLIM_FIELDS if k in task}
+
+    def quality(self, job_id):
+        """SQAH Phase 3: a read-only QA view of one job. It decides nothing and writes nothing."""
+        from team_quality_view import quality_view
+        job = self.store.get(job_id, 'job')
+        events = [e for e in self.store.events(500) if e.get('job_id') == job_id]
+        return quality_view(job, self.store.for_job('task', job_id), self.store.for_job('approval', job_id), events)
 
     def history_days(self):
         days = self.config.get('history_days', 7)
@@ -387,6 +396,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise PermissionError('画面を再読み込みしてください。')
                 from team_evaluation import snapshot
                 return self.send(200, snapshot(self.app.store, parse_qs(urlparse(self.path).query).get('id', [''])[0]))
+            if path == '/api/quality/job':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                return self.send(200, self.app.quality(parse_qs(urlparse(self.path).query).get('id', [''])[0]))
             if path == '/api/jobs/archive':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -600,7 +613,10 @@ class Handler(BaseHTTPRequestHandler):
                 # 依頼を追加: ledger registration and harness conversion run before planning starts.
                 # Input Guard (Security by Default): secrets are refused; personal data / confidential names need confirmation.
                 from team_dlp import require_clean_input
-                found = require_clean_input(str(body.get('title', '')) + '\n' + str(body.get('goal', '')),
+                from team_validation_gate import validate_commands
+                validation_commands = validate_commands(body.get('validation_commands'))
+                found = require_clean_input(str(body.get('title', '')) + '\n' + str(body.get('goal', ''))
+                                            + '\n' + '\n'.join(validation_commands),
                                             body.get('sensitive_confirmed') is True, '依頼名・依頼内容')
                 route = body.get('route', 'full')
                 if route not in ('full', 'light_eval'):
@@ -652,6 +668,7 @@ class Handler(BaseHTTPRequestHandler):
                                             role_profiles=role_profiles, token_reduction=side, comparison_id=comparison_id,
                                             route=route, light_scope_file=body.get('light_scope_file'),
                                             light_acceptance=body.get('light_acceptance'),
+                                            validation_commands=validation_commands,
                                             **document)
                     self.app.store.event('new_request_harness', ' '.join(prepared), job_id=job['id'])
                     if found['confirm']:

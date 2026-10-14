@@ -88,9 +88,18 @@ class DocumentJobTest(unittest.TestCase):
         self.store.db.close()
         self.temp.cleanup()
 
+    def own_deliverable(self, job):
+        """New text-document jobs need a deliverable 采来 recorded as its own, with a matching hash, to be accepted.
+        The fixture adapters write nothing, so the test provides it as soon as the job exists."""
+        document = Path(self.temp.name) / 'guide.md'
+        document.write_text('# 架空の資料\n', encoding='utf-8')
+        (Path(self.temp.name) / ('.saikuru-owned-' + job['id'] + '.json')).write_text(
+            json.dumps({'guide.md': hashlib.sha256(document.read_bytes()).hexdigest()}), encoding='utf-8')
+
     def test_unchecked_items_do_not_stop_and_no_forced_security_review(self):
         job = self.engine.create_job('資料', '内部資料を作る', self.temp.name, True,
                                      document_source=self.temp.name, document_format='md')
+        self.own_deliverable(job)
         deadline = time.time() + 30
         while self.store.get(job['id'])['status'] not in ('awaiting_acceptance', 'blocked', 'failed') and time.time() < deadline:
             self.engine.tick()
@@ -112,7 +121,11 @@ class DocumentJobTest(unittest.TestCase):
 
 
 class ReviewFindingsTest(DocumentJobTest):
-    def test_review_findings_go_to_acceptance_instead_of_stopping(self):
+    """2026-10-14: a concrete review finding on a document enters the same bounded repair loop as code
+    (it replaces the 2026-10-08 rule that findings went straight to acceptance). At the limit the job stops
+    for the user, who can still send it to acceptance with accept_without_fix."""
+
+    def run_findings_job(self):
         findings = {'status': 'needs_changes', 'summary': '重大度：低。案内文の表現を分けて書くとよい。', 'checks': ['確認：本文'], 'pending_checks': [], 'question': ''}
         class FindingFixture:
             def run(s, ctx, prompt, schema):
@@ -120,19 +133,31 @@ class ReviewFindingsTest(DocumentJobTest):
         ADAPTERS.update(codex=FindingFixture, claude=FindingFixture)
         job = self.engine.create_job('資料', '内部資料を作る', self.temp.name, True,
                                      document_source=self.temp.name, document_format='md')
+        self.own_deliverable(job)
         deadline = time.time() + 30
         while self.store.get(job['id'])['status'] not in ('awaiting_acceptance', 'blocked', 'failed') and time.time() < deadline:
             self.engine.tick()
             time.sleep(.01)
-        self.assertEqual(self.store.get(job['id'])['status'], 'awaiting_acceptance')
-        self.assertFalse(any(t['title'] == 'レビュー指摘を修正する' for t in self.store.all('task')))
-        completion = next(a for a in self.store.all('approval') if a['kind'] == 'completion')
-        self.assertIn('案内文の表現', completion['payload']['review_findings'][0]['summary'])
+        deadline = time.time() + 3
+        while self.engine.active and time.time() < deadline:  # the last reviewer thread finishes after reporting
+            time.sleep(.01)
+        return job
+
+    def test_review_findings_enter_the_bounded_repair_loop_then_stop_for_the_user(self):
+        job = self.run_findings_job()
+        limit = self.engine.config['max_repairs']
+        self.assertEqual(self.store.get(job['id'])['status'], 'blocked')
+        fixes = [t for t in self.store.all('task') if t['title'] == 'レビュー指摘を修正する']
+        self.assertEqual(sorted(t['repair'] for t in fixes), list(range(1, limit + 1)))
+        self.assertEqual(len([t for t in self.store.all('task') if t['role'] == 'reviewer']), limit + 1)
+        self.assertTrue(any(e['type'] == 'repair_limit' for e in self.store.events(100)))
+        # Nothing is offered for acceptance until the user decides.
+        self.assertFalse(any(a['kind'] == 'completion' for a in self.store.all('approval')))
 
 
 class AcceptWithoutFixTest(ReviewFindingsTest):
     def test_stopped_document_job_moves_to_acceptance(self):
-        self.test_review_findings_go_to_acceptance_instead_of_stopping()
+        self.run_findings_job()
         job = self.store.all('job')[0]
         reviewer = [t for t in self.store.all('task') if t['role'] == 'reviewer'][-1]
         # A fix requested from the board failed (e.g. usage limit) and a re-review is still waiting.
