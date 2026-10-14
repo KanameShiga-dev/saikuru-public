@@ -2297,6 +2297,7 @@ class Engine:
                         self.store.event('deliverable_missing',str(exc),task['id'],job['id'])
                         return
                     self.store.update(job['id'], status='awaiting_acceptance')
+                    self._record_document_quality(job)
                     try:
                         # Page images of PPTX/DOCX/PDF deliverables so the user can accept at a glance.
                         from team_preview import start as start_previews
@@ -2779,6 +2780,16 @@ class Engine:
 
 
 
+    def _record_document_quality(self, job):
+        """SQAH shadow record of a document job's Markdown/HTML deliverables. Read-only; it never changes the
+        job, the approval or the screen, and any failure is swallowed so acceptance is never held up."""
+        try:
+            if job.get('document_source'):
+                from team_quality_document import record_job_deliverables
+                record_job_deliverables(self.store.directory / 'quality', job['project'], job['id'])
+        except Exception:
+            pass
+
     def accept_without_fix(self, job_id):
         """2026-10-08 (user decision): a document job stopped on review findings or a failed fix can go straight to the
         acceptance screen. Open fix/re-review steps are cancelled; the findings stay visible, and nothing is marked passed."""
@@ -2837,6 +2848,7 @@ class Engine:
                     })
                     pending_checks.update(check.strip().casefold() for check in checks)
             self.store.update(job_id, status='awaiting_acceptance')
+            self._record_document_quality(self.store.get(job_id, 'job'))
             self.new_approval(latest[-1], 'completion', {
                 'summary': '\n\n'.join(t.get('agent_name', 'reviewer') + ': ' + t['result']['summary'] for t in latest),
                 'checks': [t.get('agent_name', 'reviewer') + ': ' + c for t in latest for c in t['result'].get('checks', [])],

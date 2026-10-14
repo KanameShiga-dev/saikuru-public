@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from team_quality_document import inspect_file, inspect_text, overall, record
+from team_quality_document import inspect_file, inspect_text, overall, record, record_job_deliverables
 
 GOOD_MD = """# 利用案内
 
@@ -61,6 +61,42 @@ class MarkdownTests(unittest.TestCase):
         self.assertEqual(states(result)['DQA-01d'], 'failed')
         ok = inspect_text('t.md', '# t\n[a](https://example.com) [d](mailto:x@example.com)\n', self.base)
         self.assertEqual(states(ok)['DQA-01d'], 'passed')
+
+
+class ParentLinkTests(unittest.TestCase):
+    """A link may climb out of the document's folder, but only to something that exists inside the project."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / 'project'
+        (self.root / 'docs').mkdir(parents=True)
+        (self.root / 'data').mkdir()
+        (self.root / 'data' / 'record.json').write_text('{}', encoding='utf-8')
+        (Path(self.temp.name) / 'outside.md').write_text('# outside\n', encoding='utf-8')
+
+    def link_state(self, target):
+        (self.root / 'docs' / 'doc.md').write_text(f'# 資料\n\n[先]({target})\n', encoding='utf-8')
+        result = inspect_file(self.root, 'docs/doc.md')
+        return {c['id']: c['state'] for c in result['checks']}['DQA-01d']
+
+    def test_an_existing_target_inside_the_project_is_not_broken(self):
+        self.assertEqual(self.link_state('../data/record.json'), 'passed')
+        self.assertEqual(self.link_state('../docs/doc.md'), 'passed')
+
+    def test_a_missing_target_inside_the_project_is_still_broken(self):
+        self.assertEqual(self.link_state('../data/missing.json'), 'failed')
+
+    def test_a_target_outside_the_project_is_broken_even_if_it_exists(self):
+        self.assertEqual(self.link_state('../../outside.md'), 'failed')
+
+    def test_absolute_paths_and_drive_letters_are_broken(self):
+        self.assertEqual(self.link_state((self.root / 'data' / 'record.json').as_posix()), 'failed')
+        self.assertEqual(self.link_state('C:/Windows/win.ini'), 'failed')
+
+    def test_without_a_project_root_the_documents_own_folder_is_the_limit(self):
+        result = inspect_text('doc.md', '# t\n[x](../outside.md)\n', self.root / 'docs')
+        self.assertEqual({c['id']: c['state'] for c in result['checks']}['DQA-01d'], 'failed')
 
 
 class HtmlTests(unittest.TestCase):
@@ -135,6 +171,61 @@ class SafetyTests(unittest.TestCase):
     def test_other_formats_are_inconclusive_not_passed(self):
         result = inspect_text('deck.pptx', 'binary', '.')
         self.assertEqual(overall(result['checks']), 'inconclusive')
+
+
+class JobDeliverableRecordTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.project = Path(self.temp.name) / 'p'
+        self.store = Path(self.temp.name) / 'qa'
+        self.project.mkdir()
+
+    def own(self, names, job='job-1'):
+        (self.project / f'.saikuru-owned-{job}.json').write_text(json.dumps({n: 'x' * 64 for n in names}), encoding='utf-8')
+
+    def lines(self):
+        path = self.store / 'document-qa.jsonl'
+        return [json.loads(l) for l in path.read_text(encoding='utf-8').splitlines()] if path.exists() else []
+
+    def test_records_one_line_per_owned_markdown_or_html_file_and_ignores_other_formats(self):
+        (self.project / 'a.md').write_text('# 案内\nok\n', encoding='utf-8')
+        (self.project / 'b.html').write_text('<h1>案内</h1>', encoding='utf-8')
+        (self.project / 'c.pptx').write_bytes(b'binary')
+        self.own(['a.md', 'b.html', 'c.pptx'])
+        self.assertEqual(record_job_deliverables(self.store, self.project, 'job-1'), 2)
+        self.assertEqual(sorted(l['file'] for l in self.lines()), ['a.md', 'b.html'])
+        self.assertTrue(all(l['job_id'] == 'job-1' and len(l['sha256']) == 64 for l in self.lines()))
+
+    def test_never_raises_and_records_nothing_when_something_is_wrong(self):
+        self.assertEqual(record_job_deliverables(self.store, self.project, 'job-1'), 0)        # no manifest
+        (self.project / '.saikuru-owned-job-1.json').write_text('{broken', encoding='utf-8')
+        self.assertEqual(record_job_deliverables(self.store, self.project, 'job-1'), 0)        # unreadable manifest
+        (self.project / '.saikuru-owned-job-1.json').write_text('[]', encoding='utf-8')
+        self.assertEqual(record_job_deliverables(self.store, self.project, 'job-1'), 0)        # wrong shape
+        self.own(['missing.md', '../escape.md'])
+        self.assertEqual(record_job_deliverables(self.store, self.project, 'job-1'), 0)        # absent / outside files
+        self.assertEqual(record_job_deliverables(self.store, self.project, '../bad id'), 0)    # invalid job id
+        self.assertEqual(self.lines(), [])
+
+    def test_does_not_change_the_project_and_caps_the_number_of_files(self):
+        names = [f'f{n:02d}.md' for n in range(30)]
+        for name in names:
+            (self.project / name).write_text('# t\nok\n', encoding='utf-8')
+        self.own(names)
+        before = {p.name: p.read_bytes() for p in self.project.iterdir()}
+        self.assertEqual(record_job_deliverables(self.store, self.project, 'job-1', limit=20), 20)
+        self.assertEqual({p.name: p.read_bytes() for p in self.project.iterdir()}, before)
+        self.assertFalse(any(self.store.resolve() in p.resolve().parents for p in self.project.rglob('*')))
+
+    def test_a_flagged_document_is_recorded_as_failed_without_copying_the_matched_value(self):
+        secret = 'ghp_' + 'Z' * 24
+        (self.project / 'a.md').write_text(f'# 案内\n鍵 {secret}\n', encoding='utf-8')
+        self.own(['a.md'])
+        record_job_deliverables(self.store, self.project, 'job-1')
+        line = self.lines()[0]
+        self.assertEqual(line['overall'], 'failed')
+        self.assertNotIn(secret, json.dumps(line, ensure_ascii=False))
 
 
 class FileAndRecordTests(unittest.TestCase):

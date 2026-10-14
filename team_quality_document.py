@@ -24,6 +24,7 @@ VOID_TAGS = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link',
 HEADING = re.compile(r'^(#{1,6})\s+(.*?)\s*#*\s*$')
 LINK = re.compile(r'(?<!\!)\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
 FENCE = re.compile(r'^\s*(```|~~~)')
+DRIVE_PATH = re.compile(r'^[A-Za-z]:[\\/]')
 
 
 def _check(check_id, state, detail='', lines=None):
@@ -129,10 +130,18 @@ def _html(text):
             'empty': parser.empty, 'anchors': parser.ids, 'unbalanced': bool(errors), 'error_lines': [e for e in errors if e]}
 
 
-def _link_problems(links, anchors, base):
-    """Relative file links that do not resolve and in-page anchors that do not exist. Remote URLs are not fetched."""
+def _link_problems(links, anchors, base, root=None):
+    """Relative file links that do not resolve and in-page anchors that do not exist. Remote URLs are not fetched.
+
+    A link may climb out of the document's folder (../) as long as the resolved target stays inside `root`
+    (the project folder; defaults to the document's own folder). Absolute paths and targets outside it are broken."""
     broken = []
+    root = Path(root if root is not None else base).resolve()
     for line, target in links:
+        if DRIVE_PATH.match(unquote(target)):
+            # urlparse reads "C:/dir/file" as scheme "c"; a drive path is a local absolute path, not a remote URL.
+            broken.append(line)
+            continue
         parsed = urlparse(target)
         if parsed.scheme or target.startswith(('//', 'mailto:', 'tel:', 'data:', 'javascript:')):
             continue
@@ -141,15 +150,19 @@ def _link_problems(links, anchors, base):
                 broken.append(line)
             continue
         path = Path(unquote(parsed.path))
-        if path.is_absolute() or '..' in path.parts or path.drive:
+        if path.is_absolute() or path.drive:
             broken.append(line)
-        elif not (base / path).exists():
+            continue
+        target_path = (Path(base) / path).resolve()
+        # resolve() also follows links, so a link that leaves the project through a symlink is not accepted.
+        if not target_path.is_relative_to(root) or not target_path.exists():
             broken.append(line)
     return broken
 
 
-def inspect_text(name, text, base, required_headings=None):
-    """Checks for one document. `base` resolves relative links. Returns {'format', 'checks'}."""
+def inspect_text(name, text, base, required_headings=None, root=None):
+    """Checks for one document. `base` resolves relative links; `root` bounds where they may point.
+    Returns {'format', 'checks'}."""
     kind = EXTENSIONS.get(Path(name).suffix.lower())
     if kind is None:
         return {'format': None, 'checks': [_check('DQA-01', 'inconclusive', 'Markdown・HTML 以外は機械検査の対象外')]}
@@ -171,7 +184,7 @@ def inspect_text(name, text, base, required_headings=None):
         missing = [h for h in required_headings if h.strip().casefold() not in have]
         checks.append(_check('DQA-01c', 'failed' if missing else 'passed',
                              f'必須の見出しが{len(missing)}件ありません' if missing else '必須の見出しがそろっている'))
-    broken = _link_problems(parsed['links'], parsed['anchors'], Path(base))
+    broken = _link_problems(parsed['links'], parsed['anchors'], Path(base), root)
     checks.append(_check('DQA-01d', 'failed' if broken else 'passed',
                          '参照先のないリンクがあります（外部URLは確認していません）' if broken
                          else '相対リンクと内部アンカーの参照先がある（外部URLは確認していません）', broken))
@@ -223,7 +236,7 @@ def inspect_file(project, relative, required_headings=None):
     except UnicodeDecodeError:
         return {'file': relative.as_posix(), 'sha256': hashlib.sha256(raw).hexdigest(), 'format': None,
                 'checks': [_check('DQA-01', 'inconclusive', 'UTF-8 として読めないため検査していません')]}
-    result = inspect_text(relative.name, text, path.parent, required_headings)
+    result = inspect_text(relative.name, text, path.parent, required_headings, root=root)
     return {'file': relative.as_posix(), 'sha256': hashlib.sha256(raw).hexdigest(), **result}
 
 
@@ -232,6 +245,35 @@ def overall(checks):
     if 'failed' in states:
         return 'failed'
     return 'passed' if states and all(s == 'passed' for s in states) else 'inconclusive'
+
+
+def record_job_deliverables(store_dir, project, job_id, limit=20):
+    """Inspect the Markdown/HTML deliverables 采来 recorded as this job's own and append one line each.
+
+    Meant to be called when a document job reaches acceptance. It only reads, writes next to (not inside) the
+    project, and NEVER raises or changes a job: any problem simply records less. Returns the lines written."""
+    try:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', str(job_id)):
+            return 0
+        manifest = Path(project) / ('.saikuru-owned-' + str(job_id) + '.json')
+        if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 1_000_000:
+            return 0
+        owned = json.loads(manifest.read_text(encoding='utf-8'))
+        if not isinstance(owned, dict):
+            return 0
+        written = 0
+        for name in sorted(n for n in owned if isinstance(n, str))[:limit]:
+            if Path(name).suffix.lower() not in EXTENSIONS:
+                continue
+            try:
+                result = inspect_file(project, name)
+            except ValueError:
+                continue
+            record(store_dir, job_id, result)
+            written += 1
+        return written
+    except Exception:
+        return 0
 
 
 def record(store_dir, job_id, result):
