@@ -67,7 +67,9 @@ class App:
         from team_claude_auth import ClaudeAuth
         from team_config import claude_config_directory
         self.claude_auth = ClaudeAuth(claude_config_directory(), notify=self.notify_claude_auth)
-        self.health = environment_status(self.commands, check_auth=not self.claude_auth.configured())
+        # 2026-10-15: never `claude auth status` (a CLI start may refresh the shared login); apply_claude_auth reads
+        # the sign-in from the stored token or the login file instead.
+        self.health = environment_status(self.commands, check_auth=False)
         from team_claude_login import ClaudeLogin
         self.claude_login = ClaudeLogin(self)
         self.port = port
@@ -92,8 +94,11 @@ class App:
         self.notifications = Notifications(self)
         # Claude sign-in (2026-10-12, plans A and C): the long-lived token and the hold after a sign-in failure.
         self.engine.claude_auth = self.claude_auth
-        self.engine.claude_logged_in = lambda: self.health.get('claude', {}).get('authenticated')
+        # Read live (not the status cached every minute): a stale "logged out" re-held tasks right after a new login
+        # had released them (2026-10-15 11:06).
+        self.engine.claude_logged_in = self.claude_auth.logged_in
         self.apply_claude_auth()
+        self.claude_auth.check_token()
 
     def notify_claude_auth(self, message):
         """A sign-in problem is told at once when PC notifications are on (not only in business hours: work stops)."""
@@ -111,14 +116,25 @@ class App:
             claude.update(authenticated=True, long_lived_token=True,
                           note='長期の鍵でログイン済み（自動更新なし、有効期限は約1年）。モデル接続は実行時に確認。')
         else:
+            logged_in = self.claude_auth.logged_in()
             claude['long_lived_token'] = False
+            if logged_in is None:
+                claude.pop('authenticated', None)
+                claude['note'] = 'CLI起動済み。ログイン情報のファイルを読めないため、ログイン状態を判定できません。'
+            else:
+                claude['authenticated'] = logged_in
+                claude['note'] = ('通常のログインで動作中（約8時間ごとに自動更新）。長期の鍵を入れると、ログインが消えにくくなります。'
+                                  if logged_in else '未ログイン。長期の鍵を入れるか、Claude にログインし直してください。')
+        problem = self.claude_auth.token_problem()
+        if problem:
+            claude['note'] = problem
         if self.claude_auth.snapshot()['held']:
             claude['note'] = ('ログインが切れたため、Claude の担当の作業を止めています。ログインし直すか、'
                               '長期の鍵を入れ直すと自動で再開します。')
 
     def claude_status(self):
-        """environment_status for Claude, without the login check when a long-lived token is stored."""
-        current = environment_status({'claude': self.commands.get('claude')}, check_auth=not self.claude_auth.configured())
+        """environment_status for Claude (CLI version only); the sign-in comes from apply_claude_auth."""
+        current = environment_status({'claude': self.commands.get('claude')}, check_auth=False)
         self.health.update(current)
         self.apply_claude_auth()
         return current
@@ -143,16 +159,18 @@ class App:
                 or (name == 'claude' and 'authenticated' not in self.health.get(name, {})))}
             if not pending or self.engine.shutdown.wait(10):
                 break
-            current = environment_status(pending, check_auth=not self.claude_auth.configured())
+            current = environment_status(pending, check_auth=False)
             self.health.update(current)
             self.apply_claude_auth()
-            if current.get('claude', {}).get('authenticated'):
+            if self.health.get('claude', {}).get('authenticated'):
                 self.usage.refresh_now('claude')
         while not self.engine.shutdown.wait(60):
             previous = self.health.get('claude', {}).get('authenticated')
             if self.claude_auth.refresh() == 'released':
                 self.store.event('claude_auth', 'Claude Code のログインが戻りました。止めていた Claude の担当の作業を再開します。')
-            current = self.claude_status()
+            self.claude_auth.check_token()
+            self.claude_status()
+            current = {'claude': self.health.get('claude', {})}
             if current.get('claude', {}).get('authenticated') and previous is not True:
                 self.usage.refresh_now('claude')
 
@@ -242,10 +260,24 @@ class App:
         else:
             jobs = self.store.all('job')
             shown = [j for j in jobs if j.get('status') not in self.ENDED_JOB_STATUSES or j.get('updated_at', 0) >= cutoff]
-            ids = {j['id'] for j in shown}
-            ended = {j['id'] for j in shown if j.get('status') in self.ENDED_JOB_STATUSES}
-            tasks = [self.slim_task(t) if t.get('job_id') in ended else t for t in self.store.all('task') if t.get('job_id') in ids]
-            approvals = [a for a in self.store.all('approval') if a.get('job_id') in ids]
+            # A finished job no longer changes: keep its slimmed tasks and approvals until the job itself changes,
+            # and read only the shown jobs' rows (indexed by job_id) instead of decoding every task in the database.
+            ended_cache = getattr(self, '_ended_cache', {})
+            fresh, tasks, approvals = {}, [], []
+            for job in shown:
+                if job.get('status') in self.ENDED_JOB_STATUSES:
+                    ckey = (job['id'], job.get('updated_at'), job.get('status'))
+                    rows = ended_cache.get(ckey)
+                    if rows is None:
+                        rows = ([self.slim_task(t) for t in self.store.for_job('task', job['id'])],
+                                self.store.for_job('approval', job['id']))
+                    fresh[ckey] = rows
+                    tasks.extend(rows[0])
+                    approvals.extend(rows[1])
+                else:
+                    tasks.extend(self.store.for_job('task', job['id']))
+                    approvals.extend(self.store.for_job('approval', job['id']))
+            self._ended_cache = fresh
             jobs_total = len(jobs)
             self._state_cache = (key, (jobs_total, shown, tasks, approvals))
         return {'jobs': shown, 'tasks': tasks,

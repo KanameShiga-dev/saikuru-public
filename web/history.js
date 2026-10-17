@@ -14,7 +14,7 @@ const approvalStates={pending:'未判断',approved:'承認',denied:'却下',expi
 const waitReasons={...approvalKinds,system:'システム停止',repair_limit:'修正上限',task_error:'担当の失敗',other:'その他の停止'};
 const feedTypes=[['approval','確認・承認'],['step','工程の進行'],['stop','再試行・停止'],['other','その他']];
 const eventKind=t=>/approv|scope_transferred|benchmark_permission/.test(t)?'approval':/^(retry|repair_limit|task_error|cancelled|scheduler_error|recovery_advice|conflict_)/.test(t)?'stop':/^(job_created|task_|progress|review_followup|manual_review_repair|model_|shared_document_read|handoff_fact)/.test(t)?'step':'other';
-let state={jobs:[],tasks:[]},projectNames=new Map(),selected='',detailData=null,cursor=null,version=0,loading=false;
+let state={jobs:[],tasks:[]},projectNames=new Map(),selected='',picked=new Set(),detailData=null,cursor=null,version=0,loading=false;
 const shownTypes=new Set(feedTypes.map(t=>t[0]));
 const node=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined&&text!==null)e.textContent=text;if(cls)e.className=cls;return e;};
 const date=t=>t?new Date(t*1000).toLocaleString('ja-JP'):'未記録';
@@ -41,10 +41,12 @@ function renderList(){
   $('status').textContent=list.length+'件の依頼。入口が記録されていない過去の依頼は新規依頼と断定しません。';
   $('jobs').replaceChildren(...list.map(j=>{
     const tasks=state.tasks.filter(t=>t.job_id===j.id);
-    const b=node('button',undefined,'job');b.type='button';b.setAttribute('aria-current',String(j.id===selected));
+    const row=node('div',undefined,'jobrow'),pick=node('input');pick.type='checkbox';pick.checked=picked.has(j.id);pick.setAttribute('aria-label',j.title+'を比較に選ぶ（最大5件）');pick.title='複数選んで待機状況を比べる（最大5件）';
+    pick.onchange=()=>{if(pick.checked){if(picked.size>=5){pick.checked=false;status.textContent='複数選択は5件までです。';return;}picked.add(j.id);}else picked.delete(j.id);renderList();showPicked();};
+    const b=node('button',undefined,'job');b.type='button';b.setAttribute('aria-current',String(picked.size?picked.has(j.id):j.id===selected));
     const top=node('div',undefined,'chips');top.append(chip(j.status),node('span',origins[j.origin.kind]||'入口未記録','tag'));
     b.append(top,node('h2',j.title),node('div',`${projectName(j.document_source||j.origin.project||j.project)}・受付 ${md(j.created_at)} ${hm(j.created_at)}・工程 ${tasks.length}件`,'sub'));
-    b.onclick=()=>{selected=j.id;renderList();detail(j.id,true);};return b;
+    b.onclick=()=>{picked.clear();selected=j.id;renderList();detail(j.id,true);};row.append(pick,b);return row;
   }));
   if(!list.length)$('jobs').append(node('p','条件に一致する依頼がありません。','hint'));
 }
@@ -99,37 +101,46 @@ function stats(tasks,approvals){
   for(const [l,v] of [['工程',tasks.length+'件'],['実行時間の合計',dur(run)],['再試行',retries+'回'],['確認・承認',approvals.length+'件']]){const c=node('div');c.append(node('div',l,'l'),node('div',v,'v'));box.append(c);}
   return box;
 }
-function gantt(job,tasks,waits){
-  const wrap=node('div',undefined,'gantt');
+let multiOrder='job';
+function gantt(job,tasks,waits,range,groups){
+  const byTime=!!groups&&multiOrder==='time',pool=[],put=(lane,key)=>byTime?pool.push([key,lane]):wrap.append(lane);
+  const multi=!!groups;groups=groups||[{job,tasks,waits}];tasks=groups.flatMap(g=>g.tasks);waits={intervals:groups.flatMap(g=>g.waits?.intervals||[])};
+  const wrap=node('div',undefined,'gantt'+(multi?' multi':''));
   if(!tasks.length){wrap.append(node('p','作業記録はありません。','hint'));return wrap;}
-  const times=[job.created_at,...tasks.flatMap(t=>[t.created_at,t.started_at,taskEnd(t)]),...(waits?.intervals||[]).flatMap(i=>[i.opened_at,i.as_of])].filter(Boolean);
-  const min=Math.min(...times),max=Math.max(min+60,...times),span=max-min,multiDay=md(min)!==md(max);
+  const times=[...groups.map(g=>g.job.created_at),...tasks.flatMap(t=>[t.created_at,t.started_at,taskEnd(t)]),...(waits?.intervals||[]).flatMap(i=>[i.opened_at,i.as_of])].filter(Boolean);
+  const min=range?range.min:Math.min(...times),max=range?range.max:Math.max(min+60,...times),span=max-min,multiDay=md(min)!==md(max);
   wrap.setAttribute('role','img');wrap.setAttribute('aria-label','工程の時系列。'+tasks.map(t=>t.title+'：'+(statuses[t.status]||t.status)).join('、')+(waits?.intervals?.length?'。判断待ち '+waits.intervals.length+'区間。詳細の人の判断待ち欄で開始・終了と時間を確認できます。':''));
   const axis=node('div',undefined,'axis'),ticks=node('div',undefined,'ticks');axis.append(node('span'),ticks);
   for(const r of [0,.25,.5,.75,1]){const t=min+r*span,s=node('span',(multiDay?md(t)+' ':'')+hm(t));s.style.left=(r*100)+'%';ticks.append(s);}
   wrap.append(axis);
-  for(const t of tasks){
-    const lane=node('div',undefined,'lane'),name=node('div',undefined,'name'),p=t.profile||{},end=taskEnd(t);
-    name.append(node('strong',t.title),node('small',[roles[t.role]||t.role,[p.adapter,p.model].filter(Boolean).join(' '),'試行'+(t.attempt||1)].filter(Boolean).join('・')),
+  for(const g of groups){
+  if(multi&&!byTime)wrap.append(node('h4',g.job.title,'gjob'));
+  for(const t of g.tasks){
+    const lane=node('div',undefined,'lane role-'+t.role),name=node('div',undefined,'name'),p=t.profile||{},end=taskEnd(t);
+    if(multi)name.append(node('strong',t.title),...(byTime?[node('small',g.job.title)]:[]));else name.append(node('strong',t.title),node('small',[roles[t.role]||t.role,[p.adapter,p.model].filter(Boolean).join(' '),'試行'+(t.attempt||1)].filter(Boolean).join('・')),
       node('small',`${t.started_at?date(t.started_at):'開始前'} 〜 ${t.finished_at?hm(t.finished_at):active(t)?'実行中':'未記録'}（${active(t)?'経過 ':''}${t.started_at&&end?dur(end-t.started_at):'未記録'}）`),
       node('small','トークン：'+usageText(t.consumption)));
     const track=node('div',undefined,'track'),start=t.started_at||t.created_at,stop=end||start;
     const left=Math.min(96,Math.max(0,(start-min)/span*100)),width=Math.min(100-left,Math.max(3,(stop-start)/span*100));
     const k=tone[t.status]||'muted',label=`${icon[k]} ${statuses[t.status]||t.status}${t.started_at&&end?'・'+dur(end-t.started_at):''}`;
     const bar=node('span',width<30?'':label,'bar b-'+k);bar.style.left=left+'%';bar.style.width=width+'%';bar.title='開始: '+date(t.started_at)+' / 終了: '+date(t.finished_at)+(t.summary?'\n'+t.summary:'');
+    const qs=t.created_at,qe=t.started_at||(active(t)||!end?Date.now()/1000:null);
+    if(qs&&qe&&qe-qs>=5){const ql=Math.min(100,Math.max(0,(qs-min)/span*100)),qw=Math.min(100-ql,Math.max(1,(qe-qs)/span*100)),qb=node('span',undefined,'queue-wait');qb.style.left=ql+'%';qb.style.width=qw+'%';qb.title='待機（順番待ち）: '+dur(qe-qs);track.append(qb);if(!multi)name.append(node('small','待機（順番待ち）：'+dur(qe-qs),'queue-note'));}
     track.append(bar);
     if(width<30){const out=node('span',label,'outlabel o-'+k);if(left+width>55)out.style.right=`calc(${100-left}% + 6px)`;else out.style.left=`calc(${left+width}% + 6px)`;track.append(out);}
-    lane.append(name,track);wrap.append(lane);
+    lane.append(name,track);put(lane,t.created_at||t.started_at||0);
   }
-  for(const i of waits?.intervals||[]){
+  for(const i of g.waits?.intervals||[]){
     const lane=node('div',undefined,'lane'),name=node('div',undefined,'name'),track=node('div',undefined,'track');
-    name.append(node('strong',i.category==='system'?'システム停止':'人の判断待ち'),node('small',`${waitReasons[i.reason]||'その他'} ／ 勤務内 ${dur(i.inside_seconds)}・時間外 ${dur(i.outside_seconds)}`));
+    if(multi)name.append(node('strong',i.category==='system'?'システム停止':'人の判断待ち'),...(byTime?[node('small',g.job.title)]:[]));else name.append(node('strong',i.category==='system'?'システム停止':'人の判断待ち'),node('small',`${waitReasons[i.reason]||'その他'} ／ 勤務内 ${dur(i.inside_seconds)}・時間外 ${dur(i.outside_seconds)}`));
     const bar=node('span',undefined,'bar wait-track');bar.style.left=((i.opened_at-min)/span*100)+'%';bar.style.width=((i.as_of-i.opened_at)/span*100)+'%';bar.title=date(i.opened_at)+' 〜 '+(i.open?'継続中':date(i.closed_at));
     for(const [a,b] of i.business_segments||[]){const segment=node('span',undefined,'wait-business');segment.style.left=((a-i.opened_at)/(i.as_of-i.opened_at)*100)+'%';segment.style.width=((b-a)/(i.as_of-i.opened_at)*100)+'%';bar.append(segment);}
-    track.append(bar);lane.append(name,track);wrap.append(lane);
+    track.append(bar);lane.append(name,track);put(lane,i.opened_at||0);
   }
+  }
+  if(byTime)pool.sort((a,b)=>a[0]-b[0]).forEach(x=>wrap.append(x[1]));
   const legend=node('div',undefined,'legend');
-  for(const [k,l] of [['done','担当工程終了'],['run','実行中（ページ更新時点まで）'],['ask','判断・確認待ち'],['stop','失敗・中断']]){const s=node('span',l);s.prepend(node('i',undefined,'sw b-'+k));legend.append(s);}
+  for(const [k,l] of [['done','担当工程終了'],['run','実行中（ページ更新時点まで）'],['ask','判断・確認待ち'],['stop','失敗・中断'],['queue','待機（順番待ち・込み合い）'],['human','人の判断待ち'],['r-planner','計画'],['r-researcher','調査'],['r-builder','実装'],['r-reviewer','レビュー']]){const s=node('span',l);s.prepend(node('i',undefined,'sw b-'+k));legend.append(s);}
   legend.append(node('span','各工程は最新の試行の開始〜終了'));wrap.append(legend);
   return wrap;
 }
@@ -176,6 +187,26 @@ async function detail(id,scroll){
     if(scroll&&matchMedia('(max-width:980px)').matches)$('detail').scrollIntoView({behavior:'smooth',block:'start'});
   }catch(e){if(token===version)$('detail').replaceChildren(node('p',e.message+' 「最新の状態に更新」で再試行できます。','hint'));}
 }
+async function showPicked(){
+  if(!picked.size){if(selected)detail(selected,false);return;}
+  const token=++version,ids=[...picked];
+  $('detail').replaceChildren(node('p','記録を取得しています…','hint'));
+  try{
+    const ds=await Promise.all(ids.map(id=>api('?job_id='+encodeURIComponent(id))));if(token!==version)return;
+    const items=ds.map((d,i)=>({j:d.jobs.find(x=>x.id===ids[i]),tasks:d.tasks.filter(t=>t.job_id===ids[i]).sort((a,b)=>a.created_at-b.created_at),waits:d.waits})).filter(x=>x.j);
+    const all=items.flatMap(x=>[x.j.created_at,...x.tasks.flatMap(t=>[t.created_at,t.started_at,taskEnd(t)]),...(x.waits?.intervals||[]).flatMap(i=>[i.opened_at,i.as_of])]).filter(Boolean);
+    const min=Math.min(...all),range={min,max:Math.max(min+60,...all)},out=[node('h2','選択した作業の比較（'+items.length+'件・共通の時間軸）'),node('p','待機（順番待ち）は紫、人の判断待ちは琥珀色です。チェックを外すと件数が減り、全部外すと通常表示に戻ります。','hint')];
+    const sums=[];
+    for(const x of items){
+      const q=x.tasks.reduce((a,t)=>{const e=t.started_at||(active(t)?Date.now()/1000:null);return a+(t.created_at&&e&&e>t.created_at?e-t.created_at:0);},0),h=(x.waits?.intervals||[]).filter(i=>i.category!=='system').reduce((a,i)=>a+(i.as_of-i.opened_at),0);
+      sums.push(node('li',x.j.title+'：順番待ち '+dur(q)+' ／ 人の判断待ち '+dur(h)+' ／ 実行 '+dur(x.tasks.reduce((a,t)=>{const e=taskEnd(t);return a+(t.started_at&&e?e-t.started_at:0);},0))));
+    }
+    const order=node('div',undefined,'order');order.setAttribute('role','group');order.setAttribute('aria-label','並べ方');
+    for(const [k,l] of [['job','作業ごとにまとめる'],['time','時間順に並べる']]){const b=node('button',l,'order-btn');b.type='button';b.setAttribute('aria-pressed',String(multiOrder===k));b.onclick=()=>{multiOrder=k;showPicked();};order.append(b);}
+    const ul=node('ul',undefined,'sumline');ul.append(...sums);out.push(order,ul,gantt(null,[],null,range,items.map(x=>({job:x.j,tasks:x.tasks,waits:x.waits}))));
+    $('detail').replaceChildren(...out);
+  }catch(e){if(token===version)$('detail').replaceChildren(node('p',e.message+' 「最新の状態に更新」で再試行できます。','hint'));}
+}
 async function load(){
   if(loading)return;loading=true;$('refresh').disabled=true;
   try{
@@ -186,7 +217,7 @@ async function load(){
     $('project').replaceChildren(new Option('すべて',''),...[...projects].sort((a,b)=>projectName(a[1]).localeCompare(projectName(b[1]))).map(([k,p])=>new Option(projectName(p),k)));
     $('project').value=projects.has(old)?old:'';
     const list=filtered();if(!list.some(j=>j.id===selected))selected=list[0]?.id||'';
-    renderList();if(selected)await detail(selected,false);else $('detail').replaceChildren(node('p','表示できる依頼がありません。','hint'));
+    renderList();if(picked.size)await showPicked();else if(selected)await detail(selected,false);else $('detail').replaceChildren(node('p','表示できる依頼がありません。','hint'));
   }catch(e){$('status').textContent=e.message+' 「最新の状態に更新」で再試行できます。';}
   finally{loading=false;$('refresh').disabled=false;}
 }

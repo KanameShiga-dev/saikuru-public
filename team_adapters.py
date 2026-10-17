@@ -227,10 +227,17 @@ class ClaudeAdapter:
         # sign-in error, and the engine then holds Claude tasks (plan C).
         guard = getattr(getattr(ctx, 'engine', None), 'claude_auth', None)
         stored_token = guard is not None and guard.configured()
+        # 2026-10-15: inside 采来 the regular login is judged from its file, not by `claude auth status` (an extra CLI
+        # start that may refresh the shared login while other workers do the same). The status command remains only
+        # when the file cannot be read, or outside 采来's engine.
+        file_state = guard.login_state()['logged_in'] if guard is not None and not stored_token else None
+        if file_state is False:
+            raise ProviderError('Claude Code CLIは未ログイン、または認証期限切れです。長期の鍵を入れるか、Claude にログインし直してください。'
+                                'モデル実行は開始していません。', 'claude_auth')
         # The status check sometimes answers slowly (seen 2026-10-08: >15 s once, 0.7-3.4 s normally). A single slow
         # answer must not fail the task, so wait longer and ask once more before giving up. Logged-out stays fatal.
         authentication = None
-        for attempt in range(0 if stored_token else 2):
+        for attempt in range(0 if stored_token or file_state else 2):
             ctx.check()
             try:
                 authentication = subprocess.run(ctx.command + ['auth', 'status', '--json'], capture_output=True, text=True,
@@ -246,7 +253,7 @@ class ClaudeAdapter:
                 raise ProviderError('Claude Code CLIを起動できず、ログインを確認できません。CLIの導入状態を確認してください。'
                                     'モデル実行は開始していません。', 'claude_auth') from exc
         try:
-            logged_in = stored_token or json.loads(authentication.stdout).get('loggedIn') is True
+            logged_in = stored_token or file_state or json.loads(authentication.stdout).get('loggedIn') is True
         except (ValueError, AttributeError) as exc:
             raise ProviderError('Claude Code CLIのログイン確認の結果を読み取れませんでした。CLIの更新状態を確認してから再試行してください。'
                                 'モデル実行は開始していません。', 'claude_auth') from exc

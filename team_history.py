@@ -45,14 +45,14 @@ def snapshot(app, job_id='', before=0):
         value = {k: job.get(k) for k in fields}
         value['origin'] = origins.get(job['id'], {'kind': job.get('request_origin', 'unrecorded')})
         jobs.append(value)
+    records = {t['id']: t for t in (app.store.for_job('task', job_id) if job_id else app.store.all('task'))}
     tasks = [{k: task.get(k) for k in ('id', 'job_id', 'title', 'role', 'status', 'profile',
               'created_at', 'started_at', 'finished_at', 'updated_at', 'attempt', 'summary')}
-             for task in app.store.all('task') if not job_id or task['job_id'] == job_id]
-    records = {t['id']: t for t in app.store.all('task')}
+             for task in records.values()]
     for task in tasks:
         task['consumption'] = consumption(records[task['id']])
     approvals = [{k: a.get(k) for k in ('id', 'job_id', 'task_id', 'kind', 'status', 'created_at', 'decided_at', 'note')}
-                 for a in app.store.all('approval') if job_id and a['job_id'] == job_id]
+                 for a in (app.store.for_job('approval', job_id) if job_id else [])]
     events = []
     if job_id:
         app.store.get(job_id, 'job')

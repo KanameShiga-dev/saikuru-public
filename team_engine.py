@@ -1913,6 +1913,7 @@ class Engine:
                + '\n'.join(f'{i + 1}. {command}' for i, command in enumerate(job['validation_commands']))
                + ('\n修正後の現行版で各コマンドを記載どおり実行し、終了コードと結果を報告する。'
                   '実行できない場合は未実施と報告する。過去の工程の実行結果を流用しない。'
+                  '検証コマンドは最後に実行し、その実行より後は他のコマンドを実行しない（実行すると記録が無効になる）。'
                   if ctx.task['role'] == 'builder' else
                   '\n検証コマンドの実行は作業担当が行う。レビュー担当は采来の記録と照合する。')
                if job.get('validation_commands') else '')
@@ -1923,6 +1924,8 @@ class Engine:
                + '\n作業担当はtest_filesに今回使用したテストファイルのプロジェクト相対パスを全て列挙し、'
                '既存テストを変更したらtest_change_reasonに仕様の根拠を記す。'
                'テストは従来の承認経路で実行し、成功後にレビューへ渡す。'
+               '計画のテストコマンドは記載どおりに最後に実行し、その実行より後は他のコマンドを一切実行しない'
+               '（後からコマンドを実行すると、采来はテストの実行記録を無効にして未実行と判定する）。'
                if ctx.task['role'] == 'builder' and (job.get('code_test_plan') or {}).get('required') else '')
             + '\n\n今回の担当:\n' + ctx.task['instruction']
 
@@ -2616,6 +2619,15 @@ class Engine:
                                       summary='Claude Code のログインが切れたため待機しています。ログインし直すか、長期の鍵を入れ直すと自動で再開します。')
                     self.store.event('claude_auth_wait', 'Claude Code のログインが切れたため、Claude の担当の作業を止めています。', task['id'], task['job_id'])
                     return
+                # 2026-10-15: a GitHub Copilot sign-in failure is queued for a move to Claude (tick); when that is not
+                # allowed or Claude is not usable either, the tick stops it as before.
+                from team_recovery import COPILOT_AUTH
+                if (not cancelled and not recovery and task['profile'].get('adapter') == 'copilot'
+                        and COPILOT_AUTH.search(str(exc))):
+                    self.store.update(task['id'], status='queued', failure_code='copilot_auth_wait',
+                                      summary='GitHub Copilot のログインが切れたため、Claude への切り替えを確かめています。')
+                    self.store.event('copilot_auth_wait', 'GitHub Copilot のログインが切れました: ' + str(exc)[:300], task['id'], task['job_id'])
+                    return
                 # 2026-10-08: a provider usage limit is waited out instead of failing the job (up to 3 automatic tries).
                 from team_recovery import usage_limit_retry_at
                 retry_at = None if cancelled or recovery else usage_limit_retry_at(exc, now())
@@ -2713,7 +2725,20 @@ class Engine:
 
                 if task.get('retry_at') and now() < task['retry_at']:
 
-                    continue  # waiting for a provider usage limit to reset
+                    # 2026-10-15: a Claude task waiting out a usage limit continues on Copilot when allowed.
+                    if task.get('failure_code') == 'usage_limit_wait':
+                        self._failover(task, job, 'usage_limit', task['retry_at'])
+                    continue  # waiting for a provider usage limit to reset (or started on Copilot next tick)
+
+                if task.get('failure_code') == 'copilot_auth_wait' and task['profile'].get('adapter') == 'copilot':
+                    if not self._failover(task, job, 'copilot_auth'):
+                        # Neither provider can take it: stop, as before (the user accepted this, 2026-10-15).
+                        self.store.update(task['id'], status='failed', failure_code='copilot_auth',
+                                          summary='GitHub Copilot のログインが切れ、Claude にも切り替えられないため停止しました。'
+                                                  'ターミナルで copilot login を実行してから、作業を再試行してください。')
+                        if job['status'] != 'cancelled':
+                            self.store.update(job['id'], status='failed')
+                    continue
 
                 guard = getattr(self, 'claude_auth', None)
                 if guard is not None and task['profile'].get('adapter') == 'claude':
@@ -2722,8 +2747,17 @@ class Engine:
                         if logged_in is False:
                             guard.on_failure('未ログイン')
                         if task.get('failure_code') != 'claude_auth_wait':
-                            self.store.update(task['id'], failure_code='claude_auth_wait',
+                            task = self.store.update(task['id'], failure_code='claude_auth_wait',
                                 summary='Claude Code の認証を待っています。作業ボードでログイン状態を確認してください。認証の復旧後に自動で再開します。')
+                        # 2026-10-15: continue on Copilot when allowed (started on the next tick); otherwise wait.
+                        self._failover(task, job, 'claude_auth')
+                        continue
+                    # 2026-10-15: without a stored token, a Claude start near the access token's expiry refreshes the
+                    # shared login. Two refreshing at once lost it (10-11 19:03 and 10-15 10:38, right after usage-limit
+                    # waits), so only one Claude task starts until that refresh is done.
+                    # A task waiting for the user's approval does not count, so an unanswered approval cannot stall others.
+                    if guard.refresh_window() and any(w['profile'].get('adapter') == 'claude' and w['status'] == 'running'
+                                                      for w in working):
                         continue
 
                 task = self.store.update(task['id'], status='running', attempt=task['attempt'] + 1, started_at=now(), retry_at=None)
@@ -2967,6 +3001,95 @@ class Engine:
 
 
 
+    PROVIDER_NAMES = {'claude': 'Claude', 'copilot': 'GitHub Copilot'}
+    FAILOVER_REASONS = {'claude_auth': 'Claude のログインが切れた', 'copilot_auth': 'GitHub Copilot のログインが切れた',
+                        'usage_limit': '利用上限に達した'}
+
+    def _provider_ready(self, profile, snapshot):
+        """Can a task start on this profile now? Claude: signed in and not held, usage left when measured.
+        Copilot: credits left when measured. (A usage limit that is not measured is found out by trying.)"""
+        from team_usage import recovery_ready
+        adapter = profile.get('adapter')
+        if adapter == 'claude':
+            guard = getattr(self, 'claude_auth', None)
+            if guard is not None and not guard.available(self.claude_logged_in()):
+                return False
+        value = snapshot.get(adapter, {})
+        measured = value.get('status') == 'ok' and not value.get('stale', True)
+        return not measured or recovery_ready(snapshot, profile, 5)
+
+    def _failover_ready(self, policy, snapshot):
+        """Has the provider the task left become usable again (time to switch back)?"""
+        from team_usage import recovery_ready
+        normal = policy['normal_profile']
+        if policy.get('reason') == 'copilot_auth':
+            return False   # a Copilot sign-in is not observable here; the task stays on Claude
+        if policy.get('reason') == 'claude_auth':
+            return self._provider_ready(normal, snapshot)
+        return (recovery_ready(snapshot, normal, policy['minimum_percent'])
+                or bool(policy.get('retry_at')) and now() >= policy['retry_at'])
+
+    def _failover(self, task, job, reason, retry_at=None):
+        """2026-10-15 (user decision): a queued task that cannot run on Claude or GitHub Copilot (reason 'claude_auth',
+        'copilot_auth' or 'usage_limit') continues on the other one, when the project is classed Public or Internal,
+        the other provider is enabled for the role and usable now. Returns True when switched. Otherwise the task keeps
+        waiting (or stops, for a Copilot sign-in) and the user is told once per job why it did not switch. The original
+        profile comes back for tasks not yet started once it can run again (_restore_recovered_models)."""
+        from team_config import FAILOVER_DATA_CLASSES, failover_profile
+        from team_security_templates import project_data_class
+        source = task['profile'].get('adapter')
+        if source not in self.PROVIDER_NAMES or task['id'] in self.active or task['status'] != 'queued':
+            return False
+        target = failover_profile(task['profile'], task['role'], self.config.get('provider_settings'))
+        data_class = project_data_class(job['project'])
+        snapshot = (getattr(self, 'usage_snapshot', None) or (lambda: {}))()
+        reason_text = self.FAILOVER_REASONS[reason]
+        if reason == 'usage_limit':
+            reason_text = self.PROVIDER_NAMES[source] + ' の' + reason_text
+        other = self.PROVIDER_NAMES['copilot' if source == 'claude' else 'claude']
+        previous = task.get('auto_return') or {}
+        why = None
+        if target is None:
+            why = 'この担当（' + task['role'] + '）は ' + other + ' に対応していないか、' + other + ' が設定で無効です'
+        elif data_class not in FAILOVER_DATA_CLASSES:
+            why = ('プロジェクトのデータ分類が「' + (data_class or '不明') + '」のため、別のサービスへは自動で送りません'
+                   '（自動で切り替えるのは公開・社内だけ）')
+        elif not self._provider_ready(target, snapshot):
+            why = other + ' も今は使えません（ログインまたは利用枠）'
+        elif (previous.get('reason') and previous.get('normal_profile', {}).get('adapter') == target['adapter']
+              and not self._failover_ready(previous, snapshot)):
+            why = other + ' から切り替えてきたばかりで、' + other + ' はまだ使えません'   # no ping-pong
+        if why:
+            told = getattr(self, '_failover_told', set())
+            self._failover_told = told
+            if (job['id'], reason, source) not in told:
+                told.add((job['id'], reason, source))
+                self.store.event('model_failover_skipped', reason_text + 'ため、' + other + ' へは切り替えませんでした。理由：'
+                                 + why + '。急ぐ場合は、作業ボードの担当・モデルの切り替えから選んでください。', task['id'], job['id'])
+            return False
+        with self.store.atomic():
+            current = self.store.get(task['id'], 'task')
+            if current['status'] != 'queued' or current['profile'].get('adapter') != source or task['id'] in self.active:
+                return False
+            # Switching back across a previous failover keeps the original profile as the one to return to.
+            original = previous.get('normal_profile') if previous.get('reason') else None
+            normal = copy.deepcopy(original if original and original.get('adapter') != target['adapter'] else current['profile'])
+            policy = {'normal_profile': normal, 'fallback_profile': copy.deepcopy(target),
+                      'minimum_percent': 10, 'reason': reason, 'retry_at': retry_at}
+            history = current.get('model_history', []) + [{'profile': current['profile'], 'at': now(),
+                                                            'attempt': current['attempt'], 'reason': 'failover_' + reason}]
+            self.store.update(task['id'], profile=copy.deepcopy(target), profile_id='failover', model_history=history,
+                              auto_return=policy, retry_at=None, failure_code=None,
+                              summary=reason_text + 'ため、' + other + '（' + target['model'] + '）で続けます。')
+        message = (reason_text + 'ため、' + task['role'] + ' 担当を ' + other + '（' + target['model']
+                   + '）に切り替えて続けます。データ分類：' + data_class + '。'
+                   + self.PROVIDER_NAMES[source] + ' が使えるようになったら、まだ始まっていない担当から元に戻します。')
+        self.store.event('model_failover', message, task['id'], job['id'])
+        guard = getattr(self, 'claude_auth', None)
+        if guard is not None:
+            guard.tell(message)
+        return True
+
     def restore_team_model(self, task_id, include_waiting=False):
 
         with self.store.lock:
@@ -3012,16 +3135,23 @@ class Engine:
                 continue
 
             normal = copy.deepcopy(self.config['profiles'][self.config['roles'][task['role']]])
-
-            if task['profile'] != policy.get('fallback_profile') or not recovery_ready(snapshot, normal, policy['minimum_percent']):
+            profile_id = self.config['roles'][task['role']]
+            reason = policy.get('reason')
+            if reason in self.FAILOVER_REASONS:
+                # 2026-10-15 automatic failover: back to the task's own profile once its provider can run again.
+                normal, profile_id = copy.deepcopy(policy['normal_profile']), 'failover-restored'
+                if task['profile'] != policy.get('fallback_profile') or not self._failover_ready(policy, snapshot):
+                    continue
+            elif task['profile'] != policy.get('fallback_profile') or not recovery_ready(snapshot, normal, policy['minimum_percent']):
 
                 continue
 
             with self.store.atomic():
 
-                history = task.get('model_history', []) + [{'profile': task['profile'], 'at': now(), 'attempt': task['attempt'], 'reason': 'quota_recovered'}]
+                history = task.get('model_history', []) + [{'profile': task['profile'], 'at': now(), 'attempt': task['attempt'],
+                                                            'reason': 'provider_available' if reason in self.FAILOVER_REASONS else 'quota_recovered'}]
 
-                self.store.update(task['id'], profile=normal, profile_id=self.config['roles'][task['role']], auto_return=None, model_history=history)
+                self.store.update(task['id'], profile=normal, profile_id=profile_id, auto_return=None, model_history=history)
 
                 policies = job.get('role_auto_return', {})
 
@@ -3037,7 +3167,11 @@ class Engine:
 
                     self.store.update(job['id'], role_auto_return=policies, role_overrides=overrides)
 
-                self.store.event('model_restored', '利用枠の回復を確認し、チーム設定の通常モデルへ戻しました。作業状態と回答は保持しています。', task['id'], job['id'])
+                self.store.event('model_restored', (self.PROVIDER_NAMES.get(normal.get('adapter'), '元のサービス')
+                                                    + ' が使えるようになったため、元のモデルへ戻しました。'
+                                                    if reason in self.FAILOVER_REASONS else
+                                                    '利用枠の回復を確認し、チーム設定の通常モデルへ戻しました。') + '作業状態と回答は保持しています。',
+                                 task['id'], job['id'])
 
 
 

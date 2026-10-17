@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI利用量の節約ガイド</title>
+<meta name="description" content="Claude Code・GitHub Copilot の利用量が足りなくなる原因と、知っておくこと、行うことをまとめた共有資料です。">
+<style>
+:root {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --surface-2: #f0efeb;
+  --text: #1f2328;
+  --muted: #5b6168;
+  --line: #dcdad4;
+  --accent: #1f5fa8;
+  --accent-soft: #e6eef8;
+  --good: #1d7a4c;
+  --good-soft: #e3f3ea;
+  --warn: #9a5b00;
+  --warn-soft: #fbf0dc;
+  --shadow: 0 1px 2px rgba(0,0,0,.05), 0 2px 8px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15171a;
+    --surface: #1d2024;
+    --surface-2: #24282d;
+    --text: #e8e9eb;
+    --muted: #a3a9b0;
+    --line: #33383e;
+    --accent: #7fb0ea;
+    --accent-soft: #1f2d3e;
+    --good: #6cc79a;
+    --good-soft: #1b3027;
+    --warn: #e2b061;
+    --warn-soft: #362a17;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15171a;
+  --surface: #1d2024;
+  --surface-2: #24282d;
+  --text: #e8e9eb;
+  --muted: #a3a9b0;
+  --line: #33383e;
+  --accent: #7fb0ea;
+  --accent-soft: #1f2d3e;
+  --good: #6cc79a;
+  --good-soft: #1b3027;
+  --warn: #e2b061;
+  --warn-soft: #362a17;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Hiragino Sans", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.75;
+}
+.wrap { max-width: 960px; margin: 0 auto; padding: 32px 16px 64px; }
+header.hero { padding: 8px 0 24px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+.eyebrow { color: var(--accent); font-weight: 700; font-size: 13px; letter-spacing: .08em; margin: 0 0 6px; }
+h1 { font-size: clamp(26px, 4.4vw, 36px); line-height: 1.3; margin: 0 0 12px; }
+.lead { font-size: 17px; color: var(--muted); margin: 0; max-width: 46em; }
+.lead strong { color: var(--text); }
+h2 {
+  font-size: 22px; line-height: 1.4; margin: 48px 0 16px; padding-left: 12px;
+  border-left: 4px solid var(--accent);
+}
+h2 .num { color: var(--accent); margin-right: 6px; }
+h3 { font-size: 18px; margin: 28px 0 10px; }
+p { margin: 0 0 12px; }
+.toc {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 18px; box-shadow: var(--shadow);
+}
+.toc ol { margin: 0; padding-left: 1.4em; columns: 2; column-gap: 32px; }
+.toc a { color: var(--accent); text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 16px 0 8px; }
+.fact {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px; box-shadow: var(--shadow);
+}
+.fact .big { font-size: 30px; font-weight: 800; line-height: 1.2; color: var(--accent); font-variant-numeric: tabular-nums; }
+.fact .label { font-weight: 700; margin: 4px 0 2px; }
+.fact .note { color: var(--muted); font-size: 14px; line-height: 1.6; }
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 15px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+thead th { background: var(--surface-2); font-size: 14px; color: var(--muted); font-weight: 700; white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+td.rank { width: 2.5em; color: var(--accent); font-weight: 800; text-align: center; font-variant-numeric: tabular-nums; }
+td.name { font-weight: 700; width: 30%; }
+.knows { counter-reset: k; list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+.knows li {
+  counter-increment: k; position: relative; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px 14px 12px 52px; box-shadow: var(--shadow);
+}
+.knows li::before {
+  content: counter(k); position: absolute; left: 14px; top: 12px; width: 26px; height: 26px;
+  border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 800;
+  display: grid; place-items: center; font-size: 14px;
+}
+.knows strong { display: block; }
+.formula {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 2px;
+}
+.formula span { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 14px; }
+.formula span.small { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 700; }
+.formula b { color: var(--muted); }
+.callout { border-radius: 10px; padding: 14px 16px; margin: 16px 0; border: 1px solid transparent; }
+.callout.good { background: var(--good-soft); color: var(--text); border-color: color-mix(in srgb, var(--good) 30%, transparent); }
+.callout.warn { background: var(--warn-soft); color: var(--text); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+.callout .t { font-weight: 800; display: block; margin-bottom: 4px; }
+.callout.good .t { color: var(--good); }
+.callout.warn .t { color: var(--warn); }
+.checklist { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.checklist li {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px 10px 40px; position: relative;
+}
+.checklist li::before {
+  content: ""; position: absolute; left: 14px; top: 15px; width: 14px; height: 14px;
+  border: 2px solid var(--good); border-radius: 3px;
+}
+.steps { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.steps li { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px; box-shadow: var(--shadow); }
+.steps .s { font-size: 13px; font-weight: 800; color: var(--accent); letter-spacing: .06em; }
+.steps .h { font-weight: 800; margin: 2px 0 4px; }
+.steps p { font-size: 15px; color: var(--muted); margin: 0; }
+code { font-family: "Cascadia Mono", Consolas, monospace; font-size: .92em; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+@media (max-width: 640px) {
+  .toc ol { columns: 1; }
+  h2 { margin-top: 36px; }
+}
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; }
+  .wrap { max-width: none; padding: 0; }
+  .fact, .table-wrap, .knows li, .steps li, .toc { box-shadow: none; }
+  h2 { break-after: avoid; }
+  tr, li, .fact, .callout { break-inside: avoid; }
+  .table-wrap { overflow: visible; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">ナレッジ共有 ／ Claude Code・GitHub Copilot</p>
+  <h1>AI利用量の節約ガイド</h1>
+  <p class="lead">「トークンが足りない」「利用量を増やしてほしい」という相談の多くは、<strong>枠が小さいことよりも、使い方と環境の作りによって消費が膨らんでいる</strong>ことが原因です。この資料では、原因・知っておくこと・行うことを順にまとめます。</p>
+</header>
+
+<nav class="toc" aria-label="目次">
+  <ol>
+    <li><a href="#facts">先に知っておきたい3つの数字</a></li>
+    <li><a href="#causes">原因：何がトークンを食っているか</a></li>
+    <li><a href="#knowledge">担当者が知っておくこと</a></li>
+    <li><a href="#environment">環境の仕組みとして入れるもの</a></li>
+    <li><a href="#habits">担当者個人の習慣</a></li>
+    <li><a href="#plan">進め方</a></li>
+  </ol>
+</nav>
+
+<section id="facts">
+  <h2><span class="num">0</span>先に知っておきたい3つの数字</h2>
+  <div class="facts">
+    <div class="fact">
+      <div class="big">−78%</div>
+      <div class="label">作業に合ったモデルを選ぶ</div>
+      <div class="note">役割ごとに安いモデルへ替えたところ、クレジットが約8割減りました。成果の品質はほぼ同じでした。</div>
+    </div>
+    <div class="fact">
+      <div class="big">R² ≒ 1.0</div>
+      <div class="label">消費はトークン量に比例する</div>
+      <div class="note">Copilot のクレジットは、送ったトークン量にほぼ比例していました。送る量を減らせば、そのまま枠が増えます。</div>
+    </div>
+    <div class="fact">
+      <div class="big">約 −5%</div>
+      <div class="label">圧縮の工夫は効果が小さい</div>
+      <div class="note">参考情報を画像にして送る方法を試しましたが、効果はわずかで、見出しの多い文書では逆に高くつきました。</div>
+    </div>
+  </div>
+  <div class="callout warn">
+    <span class="t">数字の扱い</span>
+    どれも検証環境（1台）での実測です。参考値として扱い、現場でもう一度測ってください。
+  </div>
+</section>
+
+<section id="causes">
+  <h2><span class="num">1</span>原因：何がトークンを食っているか</h2>
+  <p>影響が大きいと考えられる順に並べています。</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>原因</th><th>何が起きているか</th></tr></thead>
+      <tbody>
+        <tr><td class="rank">1</td><td class="name">長い会話を続けている</td><td>AIは1回やり取りするたびに、<strong>それまでの会話全体を読み直します</strong>。1つの会話で作業を続けるほど、1回あたりの消費が雪だるま式に増えます。</td></tr>
+        <tr><td class="rank">2</td><td class="name">どの作業にも高いモデル・高いエフォートを使っている</td><td>上位のモデルや高いエフォートを、簡単な作業にまで使っています。作業に合ったモデルを選ぶだけで、消費が大きく下がります。</td></tr>
+        <tr><td class="rank">3</td><td class="name">毎回読み込まれる指示ファイルが大きい</td><td>CLAUDE.md・AGENTS.md・copilot-instructions などは<strong>毎回の入力に入ります</strong>。数百行あると、すべてのやり取りにその分が上乗せされます。</td></tr>
+        <tr><td class="rank">4</td><td class="name">道具（MCP・拡張機能）をつなぎすぎている</td><td>つないだ道具の説明文も、毎回の入力に入ります。使わない MCP サーバーも、つないであるだけで消費します。</td></tr>
+        <tr><td class="rank">5</td><td class="name">やり直し・差し戻し・読み直しが多い</td><td>依頼があいまいだと、質問・作り直し・同じファイルの読み直しが増えます。失敗した分も、すべて消費に数えられます。</td></tr>
+        <tr><td class="rank">6</td><td class="name">大きなファイルや出力をまるごと読ませている</td><td>ログ全体、巨大な CSV、PDF をそのまま渡しています。テストやビルドの長い出力も同じです。</td></tr>
+        <tr><td class="rank">7</td><td class="name">AIに何でもさせている</td><td>検索・置換・整形・テストの実行など、普通のコマンドで済む作業までAIにさせています。</td></tr>
+        <tr><td class="rank">8</td><td class="name">同時に何本も動かしている</td><td>複数の会話やエージェントを並べて動かすと、同じ枠を同時に使い、すぐに上限に当たります。</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="knowledge">
+  <h2><span class="num">2</span>担当者が知っておくこと</h2>
+  <ol class="knows">
+    <li><strong>消費はトークン量にほぼ比例する</strong>「送る量を減らす」ことが、そのまま「枠を増やす」ことになります。</li>
+    <li>
+      <strong>1回の入力には、今回の依頼以外のものがたくさん入っている</strong>
+      <div class="formula" aria-label="1回の入力の内訳">
+        <span>指示ファイル</span><b>＋</b><span>道具の説明</span><b>＋</b><span>これまでの会話</span><b>＋</b><span class="small">今回の依頼</span>
+      </div>
+      今回の依頼文は、このうちのごく一部です。
+    </li>
+    <li><strong>モデルごとに単価が違う</strong>Copilot はモデルごとにクレジットの倍率が違います。短い依頼1回の実測では、小さいモデルが約0.06、中位のモデルが約0.5、上位のモデルが約1〜1.4クレジットでした。Claude Code でも、上位のモデルほど速く枠を使います。</li>
+    <li><strong>「会話を続けたほうが賢い」とは限らない</strong>作業の区切りで会話を新しくし、必要なことは<strong>ファイル（引き継ぎメモ）に書いて渡す</strong>ほうが、安くて安定します。</li>
+    <li><strong>圧縮の工夫より「送らない・読ませない・やり直させない」</strong>文章を縮めたり画像にしたりする工夫の効果は小さく、送る量そのものを減らすほうが効きます。</li>
+    <li><strong>失敗とやり直しも消費に入る</strong>依頼の質が、そのまま費用になります。最初に完了条件を書くだけでも、やり直しが減ります。</li>
+  </ol>
+</section>
+
+<section id="environment">
+  <h2><span class="num">3</span>環境の仕組みとして入れるもの</h2>
+  <p>担当者の心がけに頼らず、<strong>最初からそうなっている</strong>状態を作ります。</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>仕組み</th><th>中身</th><th>ねらい</th></tr></thead>
+      <tbody>
+        <tr><td class="name">共通の指示ファイルを短くする</td><td>AGENTS.md を正本にして入口だけを書き、詳しい資料は「必要なときだけ読む」と案内する。CLAUDE.md は <code>@AGENTS.md</code> の1行で読み込む。大きさの目安（Codex は合計32KiB、Claude は200行程度）を点検する。</td><td>毎回の上乗せを減らす。どのAIも同じルールで動く</td></tr>
+        <tr><td class="name">役割ごとの推奨モデルを決めて配る</td><td>調査・定型の修正は安いモデル、設計・難しい不具合だけを上位のモデルにする。エフォートは low・medium を標準にする。</td><td>単価を下げる（実測 −78%）</td></tr>
+        <tr><td class="name">MCP・道具を絞った標準の設定</td><td>プロジェクトごとに、使う MCP だけを有効にした設定ファイルを配る。</td><td>道具の説明の上乗せを減らす</td></tr>
+        <tr><td class="name">作業を区切って引き継ぐ型</td><td>「計画 → 実装 → 確認」で会話を分け、引き継ぎメモ（HANDOFF.md）のひな形で受け渡す。</td><td>長い会話の雪だるまを防ぐ</td></tr>
+        <tr><td class="name">依頼の型（テンプレート）</td><td>目的・範囲・変更しない所・完了条件・確認方法を書いてから頼む。計画は作業1〜6個まで、修正は最大2回など、回数の目安を決める。</td><td>やり直し・差し戻しを減らす</td></tr>
+        <tr><td class="name">読み込みの上限</td><td>大きな出力は末尾だけ渡す。添付はテキストに抽出してから渡す。ファイルは必要な範囲だけ読ませる。</td><td>まるごと読みを防ぐ</td></tr>
+        <tr><td class="name">利用枠の見える化と切り替え</td><td>残りが少なくなったら安いモデルへ切り替え、回復したら戻す。</td><td>月末の枯渇を防ぐ</td></tr>
+        <tr><td class="name">同時に動かす数の目安</td><td>1人が同時に動かす会話・エージェントの数を決める。</td><td>同時消費による上限到達を防ぐ</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="habits">
+  <h2><span class="num">4</span>担当者個人の習慣（今日からできること）</h2>
+  <ul class="checklist">
+    <li>作業が一区切りしたら<strong>新しい会話にする</strong>。続きはメモに書いて渡す。</li>
+    <li>簡単な作業は安いモデルで行い、行き詰まったときだけ上位のモデルにする。</li>
+    <li>ログや大きなファイルは、必要な部分だけを渡す。</li>
+    <li>検索・置換・テストの実行は自分でコマンドを打ち、AIには結果だけを見せる。</li>
+    <li>依頼の最初に、<strong>完了条件と確認方法</strong>を書く。</li>
+    <li>使っていない MCP・拡張機能は外す。</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2><span class="num">5</span>進め方</h2>
+  <ol class="steps">
+    <li><div class="s">STEP 1</div><div class="h">2週間測る</div><p>利用者別・モデル別の消費と、「足りなくなった場面」を集める。</p></li>
+    <li><div class="s">STEP 2</div><div class="h">環境の仕組みを配る</div><p>共通の指示ファイル、推奨モデル表、MCP の標準設定、依頼と引き継ぎのひな形。</p></li>
+    <li><div class="s">STEP 3</div><div class="h">同じ人で前後を比べる</div><p>消費の減り方と、成果の質が落ちていないかを確かめる。</p></li>
+    <li><div class="s">STEP 4</div><div class="h">それでも足りない人だけ枠を増やす</div><p>理由が「仕事の量」だとわかってから判断する。</p></li>
+  </ol>
+  <div class="callout good">
+    <span class="t">ポイント</span>
+    枠を増やす判断は、<strong>使い方を直したあとの数字</strong>で行います。先に枠を増やすと、消費の膨らみがそのまま残ります。
+  </div>
+</section>
+
+<footer>
+  数値は検証環境（1台）での実測にもとづく参考値です。製品の仕様や料金は変わることがあるため、最新の情報は各サービスの公式資料と管理画面で確認してください。
+</footer>
+
+</div>
+</body>
+</html>

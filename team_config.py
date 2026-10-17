@@ -92,6 +92,31 @@ def default_provider_settings():
     return {'enabled': ['codex', 'claude'], 'copilot_monthly_credits': None}
 
 
+# 2026-10-15 (user decision): when Claude or GitHub Copilot cannot run (sign-in lost or usage limit), the task continues
+# on the other one, for projects classed Public or Internal only. The same Claude model family is kept where it can be
+# (Copilot offers Claude models); a Copilot task on another model family goes to Claude Sonnet.
+FAILOVER_DATA_CLASSES = ('Public', 'Internal')
+CLAUDE_TO_COPILOT = {'opus': 'claude-opus-5.5', 'sonnet': 'claude-sonnet-5.5', 'haiku': 'claude-haiku-4.5'}
+
+
+def failover_profile(profile, role, provider_settings):
+    """The profile on the other provider (Claude <-> Copilot) that stands in for this one, or None when there is none
+    (the other provider is disabled, or Copilot cannot take this role)."""
+    enabled = (provider_settings or {}).get('enabled', ())
+    model = str(profile.get('model', '')).casefold()
+    family = next((name for name in CLAUDE_TO_COPILOT if name in model), 'sonnet')
+    effort = profile.get('effort', 'medium')
+    if profile.get('adapter') == 'claude':
+        if role not in COPILOT_ROLES or 'copilot' not in enabled:
+            return None
+        return {'adapter': 'copilot', 'model': CLAUDE_TO_COPILOT[family], 'effort': effort}
+    if profile.get('adapter') == 'copilot':
+        if 'claude' not in enabled:
+            return None
+        return {'adapter': 'claude', 'model': family, 'effort': effort}
+    return None
+
+
 def default_config():
     from team_worktime import DEFAULT
     return {

@@ -84,3 +84,18 @@ body{background:var(--bg);color:var(--text)}
 
 /* Private attachment previews */
 .attachment-gallery{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}.attachment-gallery>div,.attachment-gallery>a{max-width:200px;min-width:0;overflow-wrap:anywhere}.attachment-gallery img{display:block;max-width:100%;width:180px;height:120px;object-fit:contain;border:1px solid var(--line);border-radius:8px}.attachment-gallery p{margin:4px 0;font-size:13px}
+
+/* 作業ボード：工程（役割）ごとにカードを色分けする */
+:root{--role-planner:#2f6fb5;--role-researcher:#7b5ea7;--role-builder:#2e8b57;--role-reviewer:#a86208}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--role-planner:#7fb0ea;--role-researcher:#b9a0e0;--role-builder:#6fd09a;--role-reviewer:#f0b35a}}
+.card{border-top:5px solid var(--role-color,var(--line))}
+.card.role-planner{--role-color:var(--role-planner)}.card.role-researcher{--role-color:var(--role-researcher)}
+.card.role-builder{--role-color:var(--role-builder)}.card.role-reviewer{--role-color:var(--role-reviewer)}
+.card[class*="role-"]{background:color-mix(in srgb,var(--role-color) 9%,var(--surface))}
+.card .role-chip{font-weight:700;color:var(--role-color,inherit)}
+.project .dates{margin:2px 0 6px;font-size:12px;color:var(--muted,#5a6b64)}
+.debug-button{background:#efe9f7;color:#4b2f80;border:1px dashed #8a63c4}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .debug-button{background:#2c2440;color:#d5c4f5;border-color:#a98ae0}}
+.app-tabs a.debug-tab{background:#efe9f7;color:#4b2f80;border:1px dashed #8a63c4}.debug-badge{display:inline-block;margin-left:8px;padding:2px 10px;border-radius:999px;background:#8a63c4;color:#fff;font-size:13px;vertical-align:middle}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .app-tabs a.debug-tab{background:#2c2440;color:#d5c4f5;border-color:#a98ae0}}
+.card .card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.card .job-title{font-size:13px;font-weight:700;color:var(--muted,#5a6b64);overflow-wrap:anywhere}

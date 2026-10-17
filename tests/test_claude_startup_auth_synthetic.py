@@ -1,4 +1,5 @@
-"""Startup must not refresh regular OAuth when a stored token is configured."""
+"""Startup must not refresh regular OAuth: no `claude auth status` at all (2026-10-15). The sign-in shown comes from
+the stored token, or from the login file when no token is stored."""
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -7,14 +8,17 @@ import server
 
 
 class ClaudeStartupAuthTests(unittest.TestCase):
-    def test_initial_auth_probe_depends_on_stored_token(self):
-        for configured, expected_check_auth in ((True, False), (False, True)):
-            with self.subTest(configured=configured), tempfile.TemporaryDirectory() as directory:
+    def test_initial_auth_probe_never_starts_the_status_command(self):
+        for configured, file_login in ((True, None), (False, True), (False, False)):
+            with self.subTest(configured=configured, file_login=file_login), tempfile.TemporaryDirectory() as directory:
                 calls = []
 
                 class FakeAuth:
                     def __init__(self, *args, **kwargs): pass
                     def configured(self): return configured
+                    def logged_in(self): return True if configured else file_login
+                    def token_problem(self): return None
+                    def check_token(self): return None
                     def snapshot(self): return {'held': False}
 
                 def fake_status(commands, check_auth=True):
@@ -26,8 +30,8 @@ class ClaudeStartupAuthTests(unittest.TestCase):
                      patch.object(server, 'environment_status', side_effect=fake_status):
                     app = server.App(directory, 0)
                     try:
-                        self.assertEqual(calls, [expected_check_auth])
-                        self.assertEqual(app.health['claude'].get('authenticated'), True if configured else None)
+                        self.assertEqual(calls, [False])
+                        self.assertEqual(app.health['claude'].get('authenticated'), True if configured else file_login)
                     finally:
                         app.engine.shutdown.set()
                         app.consultations.shutdown()

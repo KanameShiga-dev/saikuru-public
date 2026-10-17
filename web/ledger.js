@@ -236,6 +236,8 @@ function render(){
  const q=$('search').value.toLowerCase(),category=$('category').value,showRetired=$('show-retired').checked,instructionFilter=$('instruction-filter').value;
  const hidden=showRetired?0:state.projects.filter(isRetiredProject).length;
  const items=state.projects.filter(p=>(showRetired||!isRetiredProject(p))&&(!category||p.category===category)&&matchesInstructions(p,instructionFilter)&&JSON.stringify([p.name,p.path,p.purpose,p.observation.technology]).toLowerCase().includes(q));
+ const order=$('sort-order')?.value||'new',seen=p=>String(p.first_seen||''),edited=p=>BigInt(/^\d+$/.test(p.manual_updated_at||'')?p.manual_updated_at:0),cmp={new:(a,b)=>seen(b).localeCompare(seen(a)),old:(a,b)=>seen(a).localeCompare(seen(b)),edited:(a,b)=>(edited(b)>edited(a)?1:edited(b)<edited(a)?-1:seen(b).localeCompare(seen(a))),name:(a,b)=>String(a.name||a.path).localeCompare(String(b.name||b.path),'ja'),path:(a,b)=>a.path.localeCompare(b.path)};
+ items.sort(cmp[order]);
  $('count').textContent=`${items.length}件表示 ／ 台帳 ${state.projects.length}件（資料・候補を含む）${hidden?` ／ アーカイブ・削除 ${hidden}件は非表示`:''}`;
  $('list').replaceChildren();
 
@@ -243,6 +245,8 @@ function render(){
   const card=node('article',undefined,'project'),button=node('button',p.name);button.type='button';button.dataset.projectId=p.id;
   if(selected?.id===p.id&&!$('editor').hidden){card.classList.add('selected');button.setAttribute('aria-current','true');}
   card.append(button,node('p',p.path,'path'));
+  const editedMs=/^\d{16,}$/.test(p.manual_updated_at||'')?Number(BigInt(p.manual_updated_at)/1000000n):0,short=v=>String(v||'').slice(0,16).replace(/^\d{4}-/,''),editedText=editedMs?new Date(editedMs).toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).replace(/\//g,'-'):'';
+  card.append(node('p',`登録 ${short(p.first_seen)||'不明'} ／ 更新 ${editedText||(p.observation.checked_at?short(p.observation.checked_at)+'（調査）':'なし')}`,'dates'));
   const badges=node('div');
   for(const b of [p.category,p.status,p.worker_allowed?'AI作業対象に登録済み':'AI作業の許可なし'])badges.append(node('span',b,'badge'));
   card.append(badges,node('p',`目的：${p.purpose}`),node('p',`技術構成：${p.observation.technology.join(' / ')||'未確認'}`));
@@ -290,7 +294,7 @@ function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').
 $('edit-form').addEventListener('input',updateSectionIndicators);
 $('edit-form').addEventListener('change',updateSectionIndicators);
 $('edit-form').addEventListener('submit',async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const fields=Object.fromEntries(new FormData(e.target));await api('/api/ledger/update',{id:selected.id,fields,expected_updated_at:selected.manual_updated_at});await load();const fresh=state.projects.find(p=>p.id===selected.id);if(fresh)openProjectDetails(fresh);message('台帳を保存しました。変更前のDBと編集履歴も保持しています。');$('save-message').textContent='保存しました。';}catch(err){$('save-message').textContent=err.message;selectLedgerTab('basic');$('management-section').open=true;}finally{button.disabled=false;}});
-$('show-retired').checked=false;$('close').onclick=hideEditor;$('search').oninput=render;$('category').onchange=render;$('instruction-filter').onchange=render;$('show-retired').onchange=render;
+$('show-retired').checked=false;$('close').onclick=hideEditor;$('search').oninput=render;$('category').onchange=render;$('instruction-filter').onchange=render;$('sort-order').value=localStorage.getItem('ledger-sort')||'new';$('sort-order').onchange=()=>{localStorage.setItem('ledger-sort',$('sort-order').value);render();};$('show-retired').onchange=render;
 $('scan').onclick=async()=>{if(busy)return;busy=true;$('scan').disabled=true;message('C:\\AI_Work を調査しています。プロジェクトのコードは実行しません。');try{const r=await api('/api/ledger/scan',{});await load();message(`再調査して登録しました。候補 ${r.discovered}件、取得エラー ${r.errors.length}件。`);}catch(e){message(e.message,true);}finally{busy=false;$('scan').disabled=false;}};
 $('backup').onclick=async()=>{try{const r=await api('/api/ledger/backup',{});message(`バックアップ：data/${r.backup}`);}catch(e){message(e.message,true);}};
 $('export').onclick=async()=>{try{const data=await api('/api/ledger/export'),url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=node('a');a.href=url;a.download='project-ledger.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('現在の台帳をJSONで書き出しました。');}catch(e){message(e.message,true);}};

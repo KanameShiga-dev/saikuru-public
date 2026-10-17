@@ -13,7 +13,7 @@ import sys
 import warnings
 from ctypes import wintypes
 
-from team_claude_auth import TARGET, _Credential, read_stored_token
+from team_claude_auth import TARGET, _Credential, read_stored_token, stored_token_state
 
 CRED_TYPE_GENERIC = 1
 CRED_PERSIST_LOCAL_MACHINE = 2
@@ -67,8 +67,14 @@ def main():
         return 1
     store(token)
     stored = read_stored_token()
-    print('保存しました。' if stored == token else '保存の確認に失敗しました。もう一度実行してください。')
-    return 0 if stored == token else 1
+    # 2026-10-15: a copy that roams with the domain profile was replaced by an old empty one. Accept only this PC's copy.
+    local = stored_token_state().get('persist') == CRED_PERSIST_LOCAL_MACHINE
+    if stored == token and local:
+        print('保存しました（この PC だけに保存、保存先 ' + TARGET + '）。')
+        return 0
+    print('保存の確認に失敗しました。もう一度実行してください。' if stored != token else
+          '保存しましたが、会社のネットワークで同期される形になっています。管理者にご相談ください。')
+    return 1
 
 
 if __name__ == '__main__':

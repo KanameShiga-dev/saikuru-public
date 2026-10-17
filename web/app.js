@@ -64,6 +64,11 @@ async function recoverSession() {
   return sessionRecovery;
 }
 async function api(path, data, retried=false) {
+  if(data===undefined||retried)return apiCall(path,data,retried);
+  showBusy('送信しています…');
+  try{return await apiCall(path,data,retried);}finally{hideBusy();blockNext=true;}
+}
+async function apiCall(path, data, retried=false) {
   const response=await fetch(path,data===undefined?{credentials:'same-origin',cache:'no-store'}:{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Agent-Team-UI':'1'},body:JSON.stringify(data)});
   const result=await response.json();
   // These exact errors are returned before any operation is performed. Never retry
@@ -283,15 +288,15 @@ function render() {
       }
     }
     for(const task of tasks){
-      const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card'+(index===2?' attention':''));
+      const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card role-'+task.role+(index===2?' attention':''));
       const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatuses[job.status]):pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
-      card.append(badge,el('strong',task.title));
+      const head=el('div',undefined,'card-head');head.append(badge);if(job?.title)head.append(el('span',job.title,'job-title'));card.append(head,el('strong',task.title));
       const wait=waitingReason(task);if(wait)card.append(el('p',wait,'summary'));
       if(task.next_action)card.append(el('p',task.next_action,'summary'));
       const reason=stopReason(task);
       if(reason)card.append(el('p',reason.title,'summary'));
       else if(task.summary)card.append(el('p',task.summary,'summary'));
-      const meta=el('div',undefined,'meta');meta.append(el('span',`${roles[task.role]} · ${task.profile.adapter}`),el('span',job?.title||''));card.append(meta);
+      const meta=el('div',undefined,'meta');meta.append(el('span',`${roles[task.role]} · ${task.profile.adapter}`,'role-chip'));card.append(meta);
       if(task.common_agents?.length){const run=task.agent_run,labels={starting:'起動中',running:'実行中',completed:'実行完了',failed:'失敗',cancelled:'中止',held:'送る前に保留（秘密情報の確認）'};
         card.append(el('p','共通Agent: '+task.common_agents.join('、')+' · '+(run?labels[run.status]||run.status:task.agent_name?'起動待ち':'旧方式の役割指示'),'hint'));}
       if(index===2&&!pending(task.id).some(a=>a.payload.questions?.length)){
@@ -551,7 +556,7 @@ function questionForm(approval){
       answers[q.id]={option_id:option.id,text};
     }
     submit.disabled=true;message.textContent='回答を送信しています…';
-    try{const attachment_ids=fileDraft?await fileDraft.widget.upload(api):[];await api('/api/decide',{id:approval.id,allow:true,answers,attachment_ids,...(checklist?{review_checklist:{approved:checklist.approved,instruction:checklist.instruction}}:{})});answerDrafts.delete(approval.id);fileDraft?.widget.clear();answerFiles.delete(approval.id);await refresh();}
+    try{const attachment_ids=fileDraft?await fileDraft.widget.upload(api):[];await api('/api/decide',{id:approval.id,allow:true,answers,attachment_ids,...(checklist?{review_checklist:{approved:checklist.approved,instruction:checklist.instruction}}:{})});answerDrafts.delete(approval.id);fileDraft?.widget.clear();answerFiles.delete(approval.id);$('detail-dialog').close();await refresh();}
     catch(error){message.textContent=error.message;}
     finally{submit.disabled=false;}
   });
@@ -967,7 +972,33 @@ function renderDetail(task,version) {
 }
 // 2026-10-08 カードを開くたびに折りたたみを初期状態（停止理由を開く）から始める。以前の開閉を引き継ぐと、停止後も閉じたままになっていた。
 function openTask(id){selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
-async function refresh(){try{state=await api('/api/state');mergeTaskDetails();render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
+// 取得・送信を待つあいだは、操作を受け付けない「処理中」の表示を出す（定期更新は表示しない）。
+let busyCount=0,busyDialog=null,busyTimer=null,refreshing=null,blockNext=true;
+function showBusy(text){
+  if(!busyDialog){
+    busyDialog=document.createElement('dialog');busyDialog.setAttribute('aria-live','polite');
+    busyDialog.style.cssText='width:min(380px,90vw);text-align:center;padding:26px';
+    busyDialog.innerHTML='<p style="margin:0;font-weight:700;color:inherit" class="busy-text"></p><p style="margin:10px 0 0;font-size:13px">しばらくお待ちください。完了するまで操作できません。<span class="busy-sec"></span></p>';
+    busyDialog.addEventListener('cancel',e=>e.preventDefault());document.body.append(busyDialog);
+  }
+  busyDialog.querySelector('.busy-text').textContent=text;
+  if(busyCount++===0){
+    const started=Date.now(),sec=busyDialog.querySelector('.busy-sec');sec.textContent='';
+    busyTimer=setInterval(()=>{sec.textContent=' （'+Math.floor((Date.now()-started)/1000)+'秒）';},1000);
+    if(!busyDialog.open)busyDialog.showModal();
+  }
+}
+function hideBusy(){if(busyCount>0&&--busyCount===0){clearInterval(busyTimer);if(busyDialog.open)busyDialog.close();}}
+function refresh(){
+  if(refreshing){
+    if(!blockNext)return refreshing;
+    blockNext=false;showBusy('最新の状態を取得しています…');return refreshing.finally(hideBusy);
+  }
+  const block=blockNext;blockNext=false;if(block)showBusy('最新の状態を取得しています…');
+  refreshing=loadState().finally(()=>{refreshing=null;if(block)hideBusy();});
+  return refreshing;
+}
+async function loadState(){try{state=await api('/api/state');mergeTaskDetails();render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
 const decisionNotificationObjects=new Map(),decisionPopupObjects=new Map();
 let seenDecisions=new Set();
 try{seenDecisions=new Set(JSON.parse(localStorage.getItem('agent-team-decision-seen')||'[]'));}catch(error){}
@@ -1111,7 +1142,6 @@ $('service-notification-test').addEventListener('click',()=>action(async()=>{
 $('filter').addEventListener('change',render);
 $('menu-models').addEventListener('click',openModelPanel);
 $('menu-context-optimization').addEventListener('click',()=>{location.href='/context-optimization';});
-$('menu-mobile').addEventListener('click',()=>{const m=$('mobile-access');if(m.hidden){notice('スマホ接続の情報はまだ読み込まれていません。少し待ってから再度開いてください。');return;}m.open=true;m.scrollIntoView({behavior:'smooth',block:'start'});});
 document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.close).close()));
 let jobInstructionSequence=0;
 async function checkJobInstructionSize(){

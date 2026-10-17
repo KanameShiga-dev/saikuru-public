@@ -202,3 +202,18 @@ FILES = {
     'audit/README.md': AUDIT_README,
     '.claude/settings.json': CLAUDE_SETTINGS,
 }
+
+DATA_CLASSES = ('Public', 'Internal', 'Confidential', 'Restricted')
+
+
+def project_data_class(project):
+    """The project's default class from its DATA_CLASSIFICATION.md ("Project default: **Internal**"), or None when the
+    file is missing or unreadable (callers then treat the project as Confidential, as the policy says)."""
+    import re
+    from pathlib import Path
+    try:
+        text = (Path(project) / 'DATA_CLASSIFICATION.md').read_text(encoding='utf-8-sig')[:20000]
+    except (OSError, ValueError):
+        return None
+    match = re.search(r'Project default:\s*\*\*(Public|Internal|Confidential|Restricted)\*\*', text, re.I)
+    return match.group(1).capitalize() if match else None

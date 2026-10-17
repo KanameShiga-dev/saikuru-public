@@ -86,6 +86,19 @@ main{max-width:1400px;margin:0 auto;padding:20px 4vw 48px}
 .wait-summary,.wait-detail{padding:16px;border:1px solid var(--line);border-radius:12px;margin:16px 0;background:var(--surface)}
 .wait-row{border-top:1px solid var(--line);padding:12px 0}
 .wait-track{height:12px;position:relative;background:repeating-linear-gradient(135deg,var(--surface) 0 4px,var(--line) 4px 6px);overflow:hidden;border-radius:4px}
-.wait-business{position:absolute;height:100%;background:var(--green)}
+.wait-business{position:absolute;height:100%;background:var(--amber-line)}
+.wait-track{background:repeating-linear-gradient(135deg,var(--amber-bg) 0 4px,var(--amber-line) 4px 6px)}
+.queue-wait{position:absolute;top:9px;height:14px;border-radius:4px;background:repeating-linear-gradient(135deg,#efe9f7 0 4px,#8a63c4 4px 6px);border:1px solid #8a63c4}
+.queue-note{color:#6b46a8;font-weight:700}
+.legend .sw.b-queue{background:#8a63c4}.legend .sw.b-human{background:var(--amber-line)}
+@media (prefers-color-scheme:dark){.queue-wait{background:repeating-linear-gradient(135deg,#2c2440 0 4px,#a98ae0 4px 6px);border-color:#a98ae0}.queue-note{color:#c9b3f0}}
 .bar.wait-track{position:absolute;height:26px;padding:0;border:0}
 .wait-summary{overflow:auto}.wait-summary table{border-collapse:collapse;width:100%}.wait-summary th,.wait-summary td{padding:8px;text-align:left;border-bottom:1px solid var(--line)}
+
+.jobrow{position:relative;flex-shrink:0}.jobrow>input{position:absolute;top:12px;right:12px;width:20px;height:20px;z-index:1;cursor:pointer}
+.gantt .lane[class*="role-"] .name{border-left:5px solid var(--role-color,var(--line));padding-left:8px;background:color-mix(in srgb,var(--role-color) 9%,var(--surface))}
+.gantt .lane.role-planner{--role-color:var(--role-planner)}.gantt .lane.role-researcher{--role-color:var(--role-researcher)}.gantt .lane.role-builder{--role-color:var(--role-builder)}.gantt .lane.role-reviewer{--role-color:var(--role-reviewer)}
+.gantt .gjob{margin:14px 0 4px;font-size:var(--fs-m);border-bottom:2px solid var(--line-strong);padding-bottom:2px}
+.sumline{margin:6px 0 12px;padding-left:18px;font-size:var(--fs-s,14px)}
+.legend .sw.b-r-planner{background:var(--role-planner)}.legend .sw.b-r-researcher{background:var(--role-researcher)}.legend .sw.b-r-builder{background:var(--role-builder)}.legend .sw.b-r-reviewer{background:var(--role-reviewer)}.order{display:flex;gap:8px;margin:8px 0}.order-btn{padding:6px 12px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);font-weight:700}.order-btn[aria-pressed="true"]{background:var(--green);color:var(--on-accent);border-color:var(--green)}
+.gantt .name small{display:block}

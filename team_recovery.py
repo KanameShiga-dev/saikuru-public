@@ -6,7 +6,13 @@ import time
 from pathlib import Path
 
 
-USAGE_LIMIT = re.compile(r"hit your [a-z0-9 -]*limit|usage limit|quota exceeded|rate[ _-]?limit", re.I)
+USAGE_LIMIT = re.compile(r"hit your [a-z0-9 -]*limit|usage limit|quota exceeded|rate[ _-]?limit"
+                         # 2026-10-15: GitHub Copilot running out of premium requests / AI credits
+                         r"|exceeded your [a-z ]*(?:allowance|quota|limit)|(?:premium requests?|ai credits?) (?:limit|allowance|exhausted)"
+                         r"|(?:insufficient|no remaining|out of) (?:ai )?credits", re.I)
+# 2026-10-15: a GitHub Copilot sign-in failure (moves the task to Claude when allowed, see Engine._failover).
+COPILOT_AUTH = re.compile(r"not (?:logged|signed) in|copilot login|authentication (?:failed|required)|unauthori[sz]ed"
+                          r"|\b401\b|re-?authenticate|(?:oauth )?token (?:has )?(?:expired|is invalid|invalid)", re.I)
 RESET_AT = re.compile(r'resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?', re.I)
 
 
