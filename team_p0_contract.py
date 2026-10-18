@@ -108,6 +108,29 @@ def current_artifacts(job):
     return True, ''
 
 
+def p0_artifact_text(job, relative):
+    """Read only a current, registered, small UTF-8 text deliverable."""
+    if job.get('p0_contract_version') != 1 or not isinstance(relative, str):
+        raise ValueError('開発依頼の登録済み成果物を選択してください。')
+    record = next((item for item in job.get('p0_artifacts') or []
+                   if isinstance(item, dict) and item.get('path') == relative), None)
+    if record is None:
+        raise ValueError('登録済みの成果物を選択してください。')
+    from consultation_read_tools import safe_path
+    path = safe_path(Path(job['project']).resolve(), relative)
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != record.get('sha256'):
+        raise ValueError('成果物が登録後に変更されています。')
+    try:
+        content = raw.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise ValueError('UTF-8のテキストファイルだけ表示できます。') from exc
+    from team_dlp import scan_input
+    if any(scan_input(content).values()):
+        raise ValueError('機密情報を含む可能性があるため画面には表示できません。')
+    return {'path': relative, 'content': content, 'truncated': False}
+
+
 def progress(job, tasks, approvals):
     """A user-facing projection from persisted work, never an independent ledger."""
     contract = job.get('goal_contract') or {}
@@ -137,20 +160,15 @@ def progress(job, tasks, approvals):
     latest_completion = next((approval for approval in reversed(approvals)
                               if approval.get('job_id') == job.get('id')
                               and approval.get('kind') == 'completion'
-                              and approval.get('status') == 'pending'), None)
-    latest_receipt = next((approval for approval in reversed(approvals)
-                           if approval.get('job_id') == job.get('id')
-                           and approval.get('kind') == 'completion'), None)
+                              and approval.get('status') == 'pending'
+                              and approval.get('intended_role') == 'end_user'), None)
     actions = []
     if job.get('status') not in ('cancelled', 'accepted', 'accepted_with_pending_checks'):
         actions.append('cancel_job')
     if latest_completion:
         actions.append('review_completion')
-    if (latest_receipt and latest_receipt.get('payload', {}).get('pending_items')
-            and ((job.get('status') == 'awaiting_acceptance'
-                  and latest_receipt.get('status') == 'pending')
-                 or (job.get('status') == 'accepted_with_pending_checks'
-                     and latest_receipt.get('status') == 'approved'))):
+    if (latest_completion and job.get('status') == 'awaiting_acceptance'
+            and latest_completion.get('payload', {}).get('pending_items')):
         actions.append('record_completion_evidence')
     if job.get('status') in ('accepted', 'accepted_with_pending_checks'):
         unmet = []
@@ -176,12 +194,15 @@ def progress(job, tasks, approvals):
         'remaining': remaining + ([] if job.get('status') in ('accepted', 'accepted_with_pending_checks')
                                  else ['利用者による完成物の確認']),
         'next_action': next_action,
-        'completion_status': contract.get('completion_status', 'in_progress'),
+        'completion_status': ('accepted' if job.get('status') in ('accepted', 'accepted_with_pending_checks')
+                              else 'awaiting_user_acceptance' if job.get('status') == 'awaiting_acceptance'
+                              else 'in_progress'),
         'unmet_acceptance_criteria': unmet,
         'available_actions': actions,
         'deliverable_access': [
             {'path': item['path'], 'method': 'project_relative_file',
-             'launch_status': 'unverified'}
+             'launch_status': 'unverified',
+             'launch_hint': '起動手順は未登録です。成果物の内容を確認し、起動と操作は別途検証してください。'}
             for item in job.get('p0_artifacts') or []
             if isinstance(item, dict) and isinstance(item.get('path'), str)],
     }

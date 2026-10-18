@@ -443,6 +443,13 @@ class Handler(BaseHTTPRequestHandler):
                 from consultation_read_tools import safe_path
                 artifact=safe_path(Path(job['project']).resolve(),relative)
                 return self.send(200,{'path':relative,'content':artifact.read_text(encoding='utf-8')})
+            if path == '/api/job/p0-artifact':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                job = self.app.store.get((query.get('job_id') or [''])[0], 'job')
+                from team_p0_contract import p0_artifact_text
+                return self.send(200, p0_artifact_text(job, (query.get('path') or [''])[0]))
             if path == '/api/tasks/detail':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -590,7 +597,7 @@ class Handler(BaseHTTPRequestHandler):
         except PermissionError as exc:
             self.send(403, {'error': str(exc)})
         except ValueError as exc:
-            if path in ('/api/attachments/image', '/api/attachments/meta', '/api/ledger/consultation/models'):
+            if path in ('/api/attachments/image', '/api/attachments/meta', '/api/ledger/consultation/models', '/api/job/p0-artifact'):
                 self.send(400, {'error': str(exc)[:300]})
             else:
                 self.send(500, {'error': 'ファイルを読み込めませんでした。'})

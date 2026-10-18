@@ -51,7 +51,8 @@
           {
             "path": "app/index.html",
             "method": "project_relative_file",
-            "launch_status": "unverified"
+            "launch_status": "unverified",
+            "launch_hint": "起動手順は未登録です。成果物の内容を確認し、起動と操作は別途検証してください。"
           }
         ]
       }
@@ -352,7 +353,7 @@
         ],
         "non_goals": [],
         "constraints": [],
-        "completion_status": "in_progress"
+        "completion_status": "awaiting_user_acceptance"
       },
       "p0_artifacts": [
         {
@@ -369,7 +370,7 @@
           "利用者による完成物の確認"
         ],
         "next_action": "完成物を起動・操作し、残る受入条件を確認する",
-        "completion_status": "in_progress",
+        "completion_status": "awaiting_user_acceptance",
         "unmet_acceptance_criteria": [
           "架空の画面を起動して操作する"
         ],
@@ -382,7 +383,8 @@
           {
             "path": "app/index.html",
             "method": "project_relative_file",
-            "launch_status": "unverified"
+            "launch_status": "unverified",
+            "launch_hint": "起動手順は未登録です。成果物の内容を確認し、起動と操作は別途検証してください。"
           }
         ]
       }
@@ -426,7 +428,8 @@
           {
             "path": "app/index.html",
             "method": "project_relative_file",
-            "launch_status": "unverified"
+            "launch_status": "unverified",
+            "launch_hint": "起動手順は未登録です。成果物の内容を確認し、起動と操作は別途検証してください。"
           }
         ]
       }
