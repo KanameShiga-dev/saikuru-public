@@ -12,7 +12,19 @@ python -X utf8 tests/ui/p0/api_fixture_server.py --port 0
 
 表示された `http://127.0.0.1:<port>/` をブラウザーで開く。`/api/state` は実際の `App.state()`、`App.redact_state()`、`team_p0_contract.progress()` を通る。入力は `tests/fixtures/p0/state.json` の架空11状態で、Providerは無効、作業エンジンは停止、POSTはすべて405で拒否する。一時DBは終了時に削除される。終了は起動したターミナルで Ctrl+C。
 
-このランタイムで確認できるのは標準画面の表示、状態分類、詳細への移動、登録済みの架空テキスト成果物の読み取りまで。`GET /api/job/p0-artifact?job_id=synthetic-receipt-job&path=app/index.html` は架空のHTML本文を返す。依頼登録、承認送信、Provider実行、完成物の起動、正式受領はここでは確認できない。これらを通したL4確認は、別の隔離ランタイムで行う。
+この読み取り専用モードで確認できるのは標準画面の表示、状態分類、詳細への移動、登録済みの架空テキスト成果物の読み取りまで。`GET /api/job/p0-artifact?job_id=synthetic-receipt-job&path=app/index.html` は架空のHTML本文を返す。依頼登録、承認送信、Provider実行、完成物の起動、正式受領はここでは確認できない。架空データでの判断・受領操作は、次の操作確認専用モードを使う。
+
+## 架空データで判断・受領の操作を確認する
+
+同じ統合ブランチのルートで、操作確認専用モードを起動する。
+
+```powershell
+python -X utf8 tests/ui/p0/api_fixture_server.py --port 0 --allow-fixture-actions
+```
+
+このモードも `127.0.0.1` の一時DBと架空の11状態だけを使う。Providerは無効、作業エンジンは停止したまま。実APIの認証・入力検証を通して、`/api/decide`、`/api/completion/evidence`、`/api/jobs/review-confirmation`、`/api/jobs/formal-acceptance`、`/api/jobs/rework`、`/api/cancel` のPOSTだけを受け付ける。それ以外のPOSTは405。終了時に一時DBは削除され、毎回初期状態から始まる。画面で「正式受領」を操作しても、架空の依頼についての記録に限られる。
+
+依頼登録、添付、実Provider実行、成果物の起動はこのモードでは確認できない。完了承認の `pending_items` が残る限り正式受領できず、画面から架空の確認根拠を記録して初めて次の段階へ進む。これは実成果物の起動や利用者本人による受領の証拠ではない。操作確認の結果と未確認の経路を `docs/p0/UI_ACCEPTANCE.md` に分けて記録する。
 
 ## Codex確認結果
 
@@ -21,7 +33,7 @@ python -X utf8 tests/ui/p0/api_fixture_server.py --port 0
 - 安全停止の詳細は標準画面で「いまの状況」と中止操作を表示した。
 - 成果物確認待ちの詳細で、未確認の起動・操作条件と証拠入力欄を表示した。起動・操作の実施証拠ではない。
 - L3統合後、成果物確認待ちの進み具合が「あなたの確認待ち（受領前です）」になり、完了承認へのボタン3種が表示された。
-- 登録済みの架空 `app/index.html` を `/api/job/p0-artifact` で読み、本文と `truncated: false` を確認した。UIから本文を開く操作は未接続。
+- 登録済みの架空 `app/index.html` を `/api/job/p0-artifact` で読み、本文と `truncated: false` を確認した。Claude の `24b9ba6` を `77b86ce` として取り込み、UI の「内容を読む」から同 API を開く実 API 確認結果は `docs/p0/UI_ACCEPTANCE.md` の3.2節に記録した。本文は文字として表示し、起動・操作の確認とは扱わない。
 - ブラウザーのコンソールエラーは0件。最初の架空入力では `task.profile` 欠損で描画が止まったため、画面確認ランタイムに実APIのタスク形状を補う処理を追加した。
 
 ## 固定SHAテストの扱い

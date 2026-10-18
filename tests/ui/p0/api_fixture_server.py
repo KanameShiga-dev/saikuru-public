@@ -41,10 +41,24 @@ class ReadOnlyHandler(Handler):
         return super().do_GET()
 
 
-def make_server(port, base):
+class FixtureActionHandler(ReadOnlyHandler):
+    """Exercise existing user-decision APIs against the disposable fictional DB only."""
+
+    ALLOWED_POSTS = {'/api/decide', '/api/completion/evidence',
+                     '/api/jobs/review-confirmation', '/api/jobs/formal-acceptance',
+                     '/api/jobs/rework', '/api/cancel'}
+
+    def do_POST(self):
+        if urlparse(self.path).path not in self.ALLOWED_POSTS:
+            return self.send(405, {'error': '架空データの確認用です。この操作は受け付けません。'})
+        return Handler.do_POST(self)
+
+
+def make_server(port, base, allow_fixture_actions=False):
     project = base / 'project'
     project.mkdir()
-    server = ThreadingHTTPServer(('127.0.0.1', port), ReadOnlyHandler)
+    handler = FixtureActionHandler if allow_fixture_actions else ReadOnlyHandler
+    server = ThreadingHTTPServer(('127.0.0.1', port), handler)
     app = App.__new__(App)
     try:
         app.data_lock = DataLock(base / 'runtime')
@@ -101,9 +115,11 @@ def make_server(port, base):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=0)
+    parser.add_argument('--allow-fixture-actions', action='store_true',
+                        help='Allow selected real user-decision APIs against disposable fictional data only')
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='saikuru-p0-ui-api-') as folder:
-        server = make_server(args.port, Path(folder))
+        server = make_server(args.port, Path(folder), args.allow_fixture_actions)
         print(server.app.origin, flush=True)
         try:
             server.serve_forever()
