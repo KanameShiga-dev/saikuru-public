@@ -480,6 +480,14 @@ class ClaudeAdapter:
                                       + ('有' if isinstance(msg.get('structured_output'), dict) else '無')
                                       + '、結果の長さ=' + str(len(str(msg.get('result') or '')))
                                       + '、最終本文の長さ=' + str(len(last_assistant_text)) + '）。')
+                            denied = msg.get('permission_denials')
+                            ctx.event('終了情報（内容は含まない）: subtype=' + str(msg.get('subtype'))[:40]
+                                      + ' stop_reason=' + str(msg.get('stop_reason'))[:40]
+                                      + ' terminal_reason=' + str(msg.get('terminal_reason'))[:40]
+                                      + ' num_turns=' + str(msg.get('num_turns'))[:10]
+                                      + ' 拒否された道具='
+                                      + (','.join(str(d.get('tool_name', '?'))[:30] for d in denied[:8] if isinstance(d, dict))
+                                         if isinstance(denied, list) and denied else 'なし'))
                         raise
         finally:
             if process is not None:
