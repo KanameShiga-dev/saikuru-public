@@ -6,25 +6,54 @@
       "goal": "架空の商品を商品IDで検索できるWebシステムを作る",
       "status": "running",
       "p0_contract_version": 1,
-      "p0_artifacts": [{"path": "app/index.html", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}],
+      "p0_artifacts": [
+        {
+          "path": "app/index.html",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
       "goal_contract": {
         "original_request": "架空の商品を商品IDで検索できるWebシステムを作る",
         "primary_goal": "商品IDから商品名と価格を調べられる",
-        "deliverables": ["商品データ", "検索画面"],
-        "acceptance_criteria": ["商品IDで検索できる", "存在しないIDには該当なしと表示する"],
+        "deliverables": [
+          "商品データ",
+          "検索画面"
+        ],
+        "acceptance_criteria": [
+          "商品IDで検索できる",
+          "存在しないIDには該当なしと表示する"
+        ],
         "non_goals": [],
-        "constraints": ["架空データのみ"],
+        "constraints": [
+          "架空データのみ"
+        ],
         "completion_status": "in_progress"
       },
       "p0_progress": {
-        "completed": ["商品データの登録"],
+        "completed": [
+          "商品データの登録"
+        ],
         "current": "検索画面の作成",
-        "remaining": ["画面の動作確認", "利用者による完成物の確認"],
+        "remaining": [
+          "画面の動作確認",
+          "利用者による完成物の確認"
+        ],
         "next_action": "検索画面の作成",
         "completion_status": "in_progress",
-        "unmet_acceptance_criteria": ["商品IDで検索できる", "存在しないIDには該当なしと表示する"],
-        "available_actions": ["cancel_job"],
-        "deliverable_access": [{"path": "app/index.html", "method": "project_relative_file", "launch_status": "unverified"}]
+        "unmet_acceptance_criteria": [
+          "商品IDで検索できる",
+          "存在しないIDには該当なしと表示する"
+        ],
+        "available_actions": [
+          "cancel_job"
+        ],
+        "deliverable_access": [
+          {
+            "path": "app/index.html",
+            "method": "project_relative_file",
+            "launch_status": "unverified"
+          }
+        ]
       }
     },
     {
@@ -36,10 +65,16 @@
       "goal_contract": {
         "original_request": "架空の一覧画面を作る",
         "primary_goal": "架空の一覧画面を作る",
-        "deliverables": ["一覧画面"],
-        "acceptance_criteria": ["一覧画面が動く"],
+        "deliverables": [
+          "一覧画面"
+        ],
+        "acceptance_criteria": [
+          "一覧画面が動く"
+        ],
         "non_goals": [],
-        "constraints": ["架空データのみ"],
+        "constraints": [
+          "架空データのみ"
+        ],
         "completion_status": "in_progress"
       },
       "p0_interruption": {
@@ -53,21 +88,582 @@
       "p0_progress": {
         "completed": [],
         "current": "保守対応待ち",
-        "remaining": ["動作確認", "利用者による完成物の確認"],
+        "remaining": [
+          "動作確認",
+          "利用者による完成物の確認"
+        ],
         "next_action": "保守担当が開発エンジンを復旧する",
         "completion_status": "in_progress",
-        "unmet_acceptance_criteria": ["一覧画面が動く"],
-        "available_actions": ["cancel_job"],
+        "unmet_acceptance_criteria": [
+          "一覧画面が動く"
+        ],
+        "available_actions": [
+          "cancel_job"
+        ],
         "deliverable_access": []
       }
+    },
+    {
+      "id": "synthetic-intake-job",
+      "title": "架空の依頼（受付）",
+      "goal": "架空の受付画面を作る",
+      "status": "planning",
+      "p0_contract_version": 1,
+      "goal_contract": {
+        "original_request": "架空の受付画面を作る",
+        "primary_goal": "架空の受付画面を作る",
+        "deliverables": [
+          "受付画面"
+        ],
+        "acceptance_criteria": [
+          "受付画面を操作できる"
+        ],
+        "non_goals": [],
+        "constraints": [],
+        "completion_status": "in_progress"
+      },
+      "p0_progress": {
+        "completed": [],
+        "current": "受付画面を作る",
+        "remaining": [
+          "利用者による完成物の確認"
+        ],
+        "next_action": "受付画面を作る",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": [
+          "受付画面を操作できる"
+        ],
+        "available_actions": [
+          "cancel_job"
+        ],
+        "deliverable_access": []
+      }
+    },
+    {
+      "id": "synthetic-g2-job",
+      "title": "架空の依頼（計画作成承認待ち）",
+      "goal": "架空の計画作成承認待ち画面を作る",
+      "status": "awaiting_approval",
+      "p0_contract_version": 1,
+      "goal_contract": {
+        "original_request": "架空の計画作成承認待ち画面を作る",
+        "primary_goal": "架空の計画作成承認待ち画面を作る",
+        "deliverables": [
+          "計画作成承認待ち画面"
+        ],
+        "acceptance_criteria": [
+          "計画作成承認待ち画面を操作できる"
+        ],
+        "non_goals": [],
+        "constraints": [],
+        "completion_status": "in_progress"
+      },
+      "g2_gate_version": 1,
+      "g2_status": "pending",
+      "p0_progress": {
+        "completed": [],
+        "current": "計画作成承認待ち画面を作る",
+        "remaining": [
+          "利用者による完成物の確認"
+        ],
+        "next_action": "開発計画またはAI利用条件を確認する",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": [
+          "計画作成承認待ち画面を操作できる"
+        ],
+        "available_actions": [
+          "cancel_job"
+        ],
+        "deliverable_access": []
+      }
+    },
+    {
+      "id": "synthetic-g3-job",
+      "title": "架空の依頼（計画承認待ち）",
+      "goal": "架空の計画承認待ち画面を作る",
+      "status": "awaiting_approval",
+      "p0_contract_version": 1,
+      "goal_contract": {
+        "original_request": "架空の計画承認待ち画面を作る",
+        "primary_goal": "架空の計画承認待ち画面を作る",
+        "deliverables": [
+          "計画承認待ち画面"
+        ],
+        "acceptance_criteria": [
+          "計画承認待ち画面を操作できる"
+        ],
+        "non_goals": [],
+        "constraints": [],
+        "completion_status": "in_progress"
+      },
+      "p0_progress": {
+        "completed": [],
+        "current": "計画承認待ち画面を作る",
+        "remaining": [
+          "利用者による完成物の確認"
+        ],
+        "next_action": "開発計画またはAI利用条件を確認する",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": [
+          "計画承認待ち画面を操作できる"
+        ],
+        "available_actions": [
+          "cancel_job"
+        ],
+        "deliverable_access": []
+      }
+    },
+    {
+      "id": "synthetic-retrying-job",
+      "title": "架空の依頼（自動復旧中）",
+      "goal": "架空の自動復旧中画面を作る",
+      "status": "running",
+      "p0_contract_version": 1,
+      "goal_contract": {
+        "original_request": "架空の自動復旧中画面を作る",
+        "primary_goal": "架空の自動復旧中画面を作る",
+        "deliverables": [
+          "自動復旧中画面"
+        ],
+        "acceptance_criteria": [
+          "自動復旧中画面を操作できる"
+        ],
+        "non_goals": [],
+        "constraints": [],
+        "completion_status": "in_progress"
+      },
+      "p0_interruption": {
+        "recovery_status": "retrying",
+        "attempt_count": 1,
+        "error_category": "MAINTENANCE_REQUIRED",
+        "interrupted_task_id": "synthetic-retrying-task",
+        "resume_target": "synthetic-retrying-task"
+      },
+      "p0_progress": {
+        "completed": [],
+        "current": "自動復旧中画面を作る",
+        "remaining": [
+          "利用者による完成物の確認"
+        ],
+        "next_action": "自動復旧中画面を作る",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": [
+          "自動復旧中画面を操作できる"
+        ],
+        "available_actions": [
+          "cancel_job"
+        ],
+        "deliverable_access": []
+      }
+    },
+    {
+      "id": "synthetic-safety-job",
+      "title": "架空の依頼（安全停止）",
+      "goal": "架空の安全停止画面を作る",
+      "status": "blocked",
+      "p0_contract_version": 1,
+      "goal_contract": {
+        "original_request": "架空の安全停止画面を作る",
+        "primary_goal": "架空の安全停止画面を作る",
+        "deliverables": [
+          "安全停止画面"
+        ],
+        "acceptance_criteria": [
+          "安全停止画面を操作できる"
+        ],
+        "non_goals": [],
+        "constraints": [],
+        "completion_status": "in_progress"
+      },
+      "p0_interruption": {
+        "recovery_status": "safety_blocked",
+        "attempt_count": 1,
+        "error_category": "SAFETY_BLOCKED",
+        "interrupted_task_id": "synthetic-safety-task",
+        "resume_target": "synthetic-safety-task"
+      },
+      "p0_progress": {
+        "completed": [],
+        "current": "安全停止画面を作る",
+        "remaining": [
+          "利用者による完成物の確認"
+        ],
+        "next_action": "安全上の問題を確認する",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": [
+          "安全停止画面を操作できる"
+        ],
+        "available_actions": [
+          "cancel_job"
+        ],
+        "deliverable_access": []
+      }
+    },
+    {
+      "id": "synthetic-question-job",
+      "title": "架空の依頼（仕様確認待ち）",
+      "goal": "架空の仕様確認待ち画面を作る",
+      "status": "blocked",
+      "p0_contract_version": 1,
+      "goal_contract": {
+        "original_request": "架空の仕様確認待ち画面を作る",
+        "primary_goal": "架空の仕様確認待ち画面を作る",
+        "deliverables": [
+          "仕様確認待ち画面"
+        ],
+        "acceptance_criteria": [
+          "仕様確認待ち画面を操作できる"
+        ],
+        "non_goals": [],
+        "constraints": [],
+        "completion_status": "in_progress"
+      },
+      "p0_progress": {
+        "completed": [],
+        "current": "仕様確認待ち画面を作る",
+        "remaining": [
+          "利用者による完成物の確認"
+        ],
+        "next_action": "仕様確認待ち画面を作る",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": [
+          "仕様確認待ち画面を操作できる"
+        ],
+        "available_actions": [
+          "cancel_job"
+        ],
+        "deliverable_access": []
+      }
+    },
+    {
+      "id": "synthetic-receipt-job",
+      "title": "架空の依頼（成果物確認待ち）",
+      "goal": "架空の成果物確認待ち画面を作る",
+      "status": "awaiting_acceptance",
+      "p0_contract_version": 1,
+      "goal_contract": {
+        "original_request": "架空の成果物確認待ち画面を作る",
+        "primary_goal": "架空の成果物確認待ち画面を作る",
+        "deliverables": [
+          "成果物確認待ち画面"
+        ],
+        "acceptance_criteria": [
+          "成果物確認待ち画面を操作できる"
+        ],
+        "non_goals": [],
+        "constraints": [],
+        "completion_status": "in_progress"
+      },
+      "p0_artifacts": [
+        {
+          "path": "app/index.html",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "p0_progress": {
+        "completed": [
+          "成果物確認待ち画面を作る"
+        ],
+        "current": "完成物の確認待ち",
+        "remaining": [
+          "利用者による完成物の確認"
+        ],
+        "next_action": "完成物を起動・操作し、残る受入条件を確認する",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": [
+          "架空の画面を起動して操作する"
+        ],
+        "available_actions": [
+          "cancel_job",
+          "review_completion",
+          "record_completion_evidence"
+        ],
+        "deliverable_access": [
+          {
+            "path": "app/index.html",
+            "method": "project_relative_file",
+            "launch_status": "unverified"
+          }
+        ]
+      }
+    },
+    {
+      "id": "synthetic-accepted-job",
+      "title": "架空の依頼（正式受領済み）",
+      "goal": "架空の正式受領済み画面を作る",
+      "status": "accepted",
+      "p0_contract_version": 1,
+      "goal_contract": {
+        "original_request": "架空の正式受領済み画面を作る",
+        "primary_goal": "架空の正式受領済み画面を作る",
+        "deliverables": [
+          "正式受領済み画面"
+        ],
+        "acceptance_criteria": [
+          "正式受領済み画面を操作できる"
+        ],
+        "non_goals": [],
+        "constraints": [],
+        "completion_status": "accepted"
+      },
+      "p0_artifacts": [
+        {
+          "path": "app/index.html",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "p0_progress": {
+        "completed": [
+          "正式受領済み画面を作る"
+        ],
+        "current": "次の作業を待機中",
+        "remaining": [],
+        "next_action": "受領済み",
+        "completion_status": "accepted",
+        "unmet_acceptance_criteria": [],
+        "available_actions": [],
+        "deliverable_access": [
+          {
+            "path": "app/index.html",
+            "method": "project_relative_file",
+            "launch_status": "unverified"
+          }
+        ]
+      }
+    },
+    {
+      "id": "synthetic-legacy-job",
+      "title": "架空の旧形式依頼",
+      "goal": "旧形式の画面を作る",
+      "status": "blocked"
     }
   ],
   "tasks": [
-    {"id": "synthetic-task-1", "job_id": "synthetic-p0-job", "title": "商品データの登録", "status": "succeeded", "role": "builder", "result": {"status": "done"}},
-    {"id": "synthetic-task-3", "job_id": "synthetic-p0-job", "title": "検索画面の作成", "status": "queued", "role": "builder", "after": "synthetic-task-1"},
-    {"id": "synthetic-task-4", "job_id": "synthetic-p0-job", "title": "画面の動作確認", "status": "queued", "role": "reviewer", "after": "synthetic-task-3"},
-    {"id": "synthetic-task-2", "job_id": "synthetic-maintenance-job", "title": "保守対応待ち", "status": "failed", "role": "builder", "after": null, "attempt": 1, "instruction": "", "result": null, "agent_name": null, "common_agents": [], "profile": {"adapter": "", "model": "", "effort": ""}, "summary": "開発エンジンの確認が必要です。途中成果は保存されています。"},
-    {"id": "synthetic-task-5", "job_id": "synthetic-maintenance-job", "title": "動作確認", "status": "queued", "role": "reviewer", "after": "synthetic-task-2"}
+    {
+      "id": "synthetic-task-1",
+      "job_id": "synthetic-p0-job",
+      "title": "商品データの登録",
+      "status": "succeeded",
+      "role": "builder",
+      "result": {
+        "status": "done"
+      }
+    },
+    {
+      "id": "synthetic-task-3",
+      "job_id": "synthetic-p0-job",
+      "title": "検索画面の作成",
+      "status": "queued",
+      "role": "builder",
+      "after": "synthetic-task-1"
+    },
+    {
+      "id": "synthetic-task-4",
+      "job_id": "synthetic-p0-job",
+      "title": "画面の動作確認",
+      "status": "queued",
+      "role": "reviewer",
+      "after": "synthetic-task-3"
+    },
+    {
+      "id": "synthetic-task-2",
+      "job_id": "synthetic-maintenance-job",
+      "title": "保守対応待ち",
+      "status": "failed",
+      "role": "builder",
+      "after": null,
+      "attempt": 1,
+      "instruction": "",
+      "result": null,
+      "agent_name": null,
+      "common_agents": [],
+      "profile": {
+        "adapter": "",
+        "model": "",
+        "effort": ""
+      },
+      "summary": "開発エンジンの確認が必要です。途中成果は保存されています。"
+    },
+    {
+      "id": "synthetic-task-5",
+      "job_id": "synthetic-maintenance-job",
+      "title": "動作確認",
+      "status": "queued",
+      "role": "reviewer",
+      "after": "synthetic-task-2"
+    },
+    {
+      "id": "synthetic-intake-task",
+      "job_id": "synthetic-intake-job",
+      "title": "受付画面を作る",
+      "status": "queued",
+      "role": "planner",
+      "after": null,
+      "attempt": 1
+    },
+    {
+      "id": "synthetic-g2-task",
+      "job_id": "synthetic-g2-job",
+      "title": "計画作成承認待ち画面を作る",
+      "status": "awaiting_approval",
+      "role": "planner",
+      "after": null,
+      "attempt": 1
+    },
+    {
+      "id": "synthetic-g3-task",
+      "job_id": "synthetic-g3-job",
+      "title": "計画承認待ち画面を作る",
+      "status": "awaiting_approval",
+      "role": "planner",
+      "after": null,
+      "attempt": 1
+    },
+    {
+      "id": "synthetic-retrying-task",
+      "job_id": "synthetic-retrying-job",
+      "title": "自動復旧中画面を作る",
+      "status": "interrupted",
+      "role": "builder",
+      "after": null,
+      "attempt": 1
+    },
+    {
+      "id": "synthetic-safety-task",
+      "job_id": "synthetic-safety-job",
+      "title": "安全停止画面を作る",
+      "status": "failed",
+      "role": "builder",
+      "after": null,
+      "attempt": 1
+    },
+    {
+      "id": "synthetic-question-task",
+      "job_id": "synthetic-question-job",
+      "title": "仕様確認待ち画面を作る",
+      "status": "awaiting_approval",
+      "role": "builder",
+      "after": null,
+      "attempt": 1
+    },
+    {
+      "id": "synthetic-receipt-task",
+      "job_id": "synthetic-receipt-job",
+      "title": "成果物確認待ち画面を作る",
+      "status": "succeeded",
+      "role": "builder",
+      "after": null,
+      "attempt": 1,
+      "result": {
+        "status": "done"
+      }
+    },
+    {
+      "id": "synthetic-accepted-task",
+      "job_id": "synthetic-accepted-job",
+      "title": "正式受領済み画面を作る",
+      "status": "succeeded",
+      "role": "builder",
+      "after": null,
+      "attempt": 1,
+      "result": {
+        "status": "done"
+      }
+    },
+    {
+      "id": "synthetic-legacy-task",
+      "job_id": "synthetic-legacy-job",
+      "title": "旧形式の画面を作る",
+      "status": "blocked",
+      "role": "builder",
+      "after": null,
+      "attempt": 1
+    }
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "id": "synthetic-g2-approval",
+      "job_id": "synthetic-g2-job",
+      "task_id": "synthetic-g2-task",
+      "kind": "ai_start",
+      "status": "pending",
+      "category": "RISK",
+      "intended_role": "authorized_person",
+      "business_summary": "架空の計画作成承認待ちを確認してください。",
+      "requires_explicit_consent": true,
+      "payload": {
+        "summary": "架空の計画作成承認待ちを確認してください。"
+      }
+    },
+    {
+      "id": "synthetic-g3-approval",
+      "job_id": "synthetic-g3-job",
+      "task_id": "synthetic-g3-task",
+      "kind": "plan",
+      "status": "pending",
+      "category": "ACCEPTANCE",
+      "intended_role": "end_user",
+      "business_summary": "架空の計画承認待ちを確認してください。",
+      "requires_explicit_consent": true,
+      "payload": {
+        "summary": "架空の計画承認待ちを確認してください。"
+      }
+    },
+    {
+      "id": "synthetic-question-approval",
+      "job_id": "synthetic-question-job",
+      "task_id": "synthetic-question-task",
+      "kind": "question",
+      "status": "pending",
+      "category": "BUSINESS",
+      "intended_role": "end_user",
+      "business_summary": "架空の仕様確認待ちを確認してください。",
+      "requires_explicit_consent": true,
+      "payload": {
+        "summary": "架空の仕様確認待ちを確認してください。",
+        "questions": [
+          {
+            "id": "scope",
+            "text": "表示する項目はどちらですか？",
+            "options": [
+              {
+                "id": "a",
+                "label": "商品名",
+                "input_required": false,
+                "input_label": ""
+              },
+              {
+                "id": "b",
+                "label": "商品名と価格",
+                "input_required": false,
+                "input_label": ""
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "synthetic-receipt-approval",
+      "job_id": "synthetic-receipt-job",
+      "task_id": "synthetic-receipt-task",
+      "kind": "completion",
+      "status": "pending",
+      "category": "ACCEPTANCE",
+      "intended_role": "end_user",
+      "business_summary": "架空の成果物確認待ちを確認してください。",
+      "requires_explicit_consent": true,
+      "payload": {
+        "summary": "架空の成果物確認待ちを確認してください。",
+        "pending_items": [
+          {
+            "title": "起動と操作",
+            "checks": [
+              "架空の画面を起動して操作する"
+            ]
+          }
+        ]
+      }
+    }
+  ]
 }

@@ -19,7 +19,11 @@ class P0ContractTests(unittest.TestCase):
     def test_shared_fixture_matches_server_progress(self):
         fixture = json.loads((Path(__file__).parent / 'fixtures' / 'p0' / 'state.json').read_text(encoding='utf-8'))
         for job in fixture['jobs']:
-            self.assertEqual(progress(job, fixture['tasks'], fixture['approvals']), job['p0_progress'])
+            if job.get('p0_contract_version') == 1:
+                self.assertEqual(progress(job, fixture['tasks'], fixture['approvals']), job['p0_progress'])
+            else:
+                self.assertNotIn('p0_progress', job)
+        self.assertEqual(len(fixture['jobs']), 11)
 
     def test_progress_actions_are_hints_from_current_receipt(self):
         job = {'id': 'fictional-job', 'status': 'awaiting_acceptance',
