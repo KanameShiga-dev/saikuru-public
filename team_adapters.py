@@ -113,6 +113,28 @@ def decode_result(text):
     return value
 
 
+def decode_claude_result(message, schema):
+    """Recover a complete report when Claude omits structured_output.
+
+    The CLI can put its JSON report in result, sometimes inside a code fence or
+    short explanation. Only a full schema match is accepted; prose and partial
+    objects must never be promoted to a successful task result.
+    """
+    output = message.get('structured_output')
+    if isinstance(output, dict) and not schema_errors(output, schema):
+        return output
+    try:
+        result = copilot_answer(message.get('result', ''), schema)
+    except ProviderError as exc:
+        raise ProviderError('Claudeの完了報告をJSONとして回収できませんでした。作業の成果は保持しています。',
+                            'format') from exc
+    errors = schema_errors(result, schema)
+    if errors:
+        raise ProviderError('Claudeの完了報告に必要な項目がありません（' + '、'.join(errors[:8])[:400]
+                            + '）。作業の成果は保持しています。', 'format')
+    return result
+
+
 class CodexAdapter:
     def run(self, ctx, prompt, schema):
         from team_egress_guard import require_safe_egress
@@ -398,8 +420,7 @@ class ClaudeAdapter:
                         raise ProviderError('Claude共通Agentの起動確認を受け取れませんでした。')
                     if msg.get('is_error') or msg.get('subtype') != 'success':
                         raise ProviderError('Claude Code: ' + str(msg.get('result') or msg.get('errors') or msg.get('subtype'))[:1500])
-                    output = msg.get('structured_output')
-                    return output if isinstance(output, dict) else decode_result(msg.get('result', ''))
+                    return decode_claude_result(msg, schema)
         finally:
             if process is not None:
                 process.close()
