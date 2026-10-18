@@ -414,6 +414,19 @@ function progressCard(job){
   row.append(head);
   const body=el('div',undefined,'job-row-body');
   body.append(el('p',`作るもの：${goal.primary_goal||job.goal||'未設定'}`,'summary'));
+  if(job.p0_contract_version!==1){
+    // 従来形式の依頼：完成の契約や受入条件は持たない。担当の作業の状態だけを、事実として並べる。
+    const works=(state.tasks||[]).filter(t=>t.job_id===job.id&&t.status!=='cancelled');
+    const finished=works.filter(t=>['succeeded','handed_off'].includes(t.status)).map(t=>t.title);
+    const rest=works.filter(t=>!['succeeded','handed_off'].includes(t.status)).map(t=>`${t.title}（${statuses[t.status]||t.status}）`);
+    const lists=el('div',undefined,'progress-lists');
+    lists.append(progressList('完了した作業',finished,'✓','done'),progressList('残りの作業',rest,'○','todo'));
+    body.append(lists,el('p','従来形式の依頼です。完成の判定や成果物の確認は、各作業の画面で行います。','hint'));
+    row.append(body);
+    row.open=openJobRows.has(job.id);
+    row.addEventListener('toggle',()=>{if(row.open)openJobRows.add(job.id);else openJobRows.delete(job.id);});
+    return row;
+  }
   if(goal.deliverables?.length)body.append(el('p',`成果物（予定）：${goal.deliverables.join('、')}`,'hint'));
   body.append(el('p',`現在の工程：${progress.current||'確認中'}`));
   if(progress.next_action)body.append(el('p',`次の動作：${progress.next_action}`));
@@ -437,7 +450,7 @@ function progressCard(job){
 }
 function renderJobProgress(){
   const section=$('job-progress'),list=$('job-progress-list');if(!section||!list)return;
-  const jobs=state.jobs.filter(j=>j.p0_contract_version===1&&!['cancelled','accepted','accepted_with_pending_checks'].includes(j.status));
+  const jobs=state.jobs.filter(j=>!['cancelled','accepted','accepted_with_pending_checks'].includes(j.status));
   section.hidden=!jobs.length;list.replaceChildren(...jobs.map(progressCard));
 }
 function render() {
