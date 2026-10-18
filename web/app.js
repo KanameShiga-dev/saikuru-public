@@ -1061,8 +1061,10 @@ function renderDetail(task,version) {
   if(['queued','failed','interrupted','blocked'].includes(task.status)&&!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status))body.append(button('担当・モデルを切り替える',()=>openModelSwitch(task.id)));
   for(const a of endedJob(task)?[]:pendingUser(task.id)){
     const summary=a.business_summary?el('p',a.business_summary,'business-summary'):null;
-    if(a.payload.questions?.length){if(summary)body.append(summary);body.append(questionForm(a));continue;}
-    const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
+    // 利用者の判断欄の目印。折りたたみの枠に包まれた後でも、復旧中の表示が判断欄を隠さないために使う。
+    if(summary)summary.dataset.userDecision='1';
+    if(a.payload.questions?.length){if(summary)body.append(summary);const form=questionForm(a);form.dataset.userDecision='1';body.append(form);continue;}
+    const box=el('section',undefined,'approval-box');box.dataset.userDecision='1';box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
     if(summary)box.append(summary);
     if(a.kind==='ai_start')box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途、開発計画の確認・承認が必要です。モデル利用量が発生します。','notice'));
     if(a.kind==='tool'&&a.payload?.guard)box.append(el('p','送信の防御：'+a.payload.guard.label+'。'+a.payload.guard.note+' 送信先・送る内容・依頼に必要かを確認してから許可してください。','notice'));
@@ -1148,7 +1150,7 @@ function renderDetail(task,version) {
     const hasUserDecision=pendingUser(task.id).length>0;
     for(const node of [...body.children]){
       if(node.id==='cancel-job'||node.querySelector?.('#cancel-job')||node.querySelector?.('h3')?.textContent==='この依頼の成果物'||
-         (hasUserDecision&&(node.classList.contains('approval-box')||node.classList.contains('business-summary'))))continue;
+         (hasUserDecision&&(node.matches?.('[data-user-decision]')||node.querySelector?.('[data-user-decision]'))))continue;
       node.classList.add('tech-only');
     }
     const detail=hasUserDecision?'操作の確認待ちがあります。下の承認欄をご確認ください。':phase.detail;
