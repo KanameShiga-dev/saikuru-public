@@ -292,10 +292,9 @@ const PROGRESS_ACTIONS={
 const openedArtifacts=new Map();
 function deliverableRow(job,item){
   const row=el('div',undefined,'deliverable-row'),key=job.id+'|'+item.path;
-  const line=el('p');line.append(el('code',item.path||'（場所不明）'),document.createTextNode('　起動・操作の確認：未検証'));
+  const line=el('p');line.append(el('code',item.path||'（場所不明）'),document.createTextNode('　'),el('span','起動・操作は未検証','badge unverified'));
   if(item.launch_status&&item.launch_status!=='unverified')line.append(el('small',`（サーバーの値：${item.launch_status}）`,'tech-only'));
   row.append(line);
-  if(item.launch_hint)row.append(el('p',item.launch_hint,'hint'));
   if(!item.path)return row;
   const shown=openedArtifacts.get(key);
   const label=shown?(shown.error?'再読み込み':'内容を閉じる'):'内容を読む';
@@ -314,32 +313,63 @@ function deliverableRow(job,item){
   }
   return row;
 }
+// 依頼の一覧は1件1行（名前・状態・進捗）。詳細は開いたときだけ出す。開閉は再描画をまたいで保持する。
+const openJobRows=new Set();
+function jobCounts(job){
+  const progress=job.p0_progress||{};
+  if(Array.isArray(progress.completed)||Array.isArray(progress.remaining)){
+    const done=(progress.completed||[]).length,total=done+(progress.current?1:0)+(progress.remaining||[]).length;
+    if(total>0)return {done,total};
+  }
+  const tasks=(state.tasks||[]).filter(t=>t.job_id===job.id&&t.status!=='cancelled');
+  return tasks.length?{done:tasks.filter(t=>['succeeded','handed_off'].includes(t.status)).length,total:tasks.length}:null;
+}
+function needsUserDecision(job){return (state.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a));}
+function deliverableGroup(job,access){
+  const group=el('details',undefined,'job-deliverables');
+  group.append(el('summary',`成果物（${access.length}件）`));
+  group.open=openJobRows.has(job.id+'|deliverables');
+  group.addEventListener('toggle',()=>{const key=job.id+'|deliverables';if(group.open)openJobRows.add(key);else openJobRows.delete(key);});
+  if(!access.length){group.append(el('p','登録された成果物はまだありません。','hint'));return group;}
+  group.append(el('p','起動・操作の確認は、まだどれも行われていません。内容を読めても、動作確認の代わりにはなりません。起動用のURLも未提供です。','hint'));
+  for(const item of access)group.append(deliverableRow(job,item));
+  return group;
+}
 function progressCard(job){
-  const progress=job.p0_progress||{},goal=job.goal_contract||{},card=el('article',undefined,'job-progress-card');
-  const head=el('div',undefined,'card-head');head.append(el('h3',job.title),el('span',jobStatusLabel(job),'badge'));card.append(head);
-  card.append(el('p',`作るもの：${goal.primary_goal||job.goal||'未設定'}`,'summary'));
-  if(goal.deliverables?.length)card.append(el('p',`成果物（予定）：${goal.deliverables.join('、')}`,'hint'));
-  card.append(el('p',`現在の工程：${progress.current||'確認中'}`));
-  if(progress.next_action)card.append(el('p',`次の動作：${progress.next_action}`));
+  const progress=job.p0_progress||{},goal=job.goal_contract||{},counts=jobCounts(job);
+  const row=el('details',undefined,'job-row');row.dataset.jobId=job.id;
+  const head=el('summary',undefined,'job-row-head');head.dataset.focusKey='jobrow:'+job.id;
+  const decision=needsUserDecision(job);
+  head.append(el('h3',job.title,'job-row-title'),el('span',decision?'あなたの判断が必要':jobStatusLabel(job),'badge'+(decision?' approval':'')));
+  if(counts){
+    const meter=el('span',undefined,'job-row-progress');
+    meter.append(el('span',`${counts.total}工程中 ${counts.done}件完了`,'job-row-count'));
+    const bar=el('progress');bar.max=counts.total;bar.value=counts.done;bar.setAttribute('aria-label',`${job.title}：${counts.total}工程中${counts.done}件完了`);meter.append(bar);
+    head.append(meter);
+  }
+  row.append(head);
+  const body=el('div',undefined,'job-row-body');
+  body.append(el('p',`作るもの：${goal.primary_goal||job.goal||'未設定'}`,'summary'));
+  if(goal.deliverables?.length)body.append(el('p',`成果物（予定）：${goal.deliverables.join('、')}`,'hint'));
+  body.append(el('p',`現在の工程：${progress.current||'確認中'}`));
+  if(progress.next_action)body.append(el('p',`次の動作：${progress.next_action}`));
   const lists=el('div',undefined,'progress-lists');
   lists.append(progressList('完成済み',progress.completed||[],'✓'),progressList('残り',progress.remaining||[],'○'));
-  card.append(lists);
+  body.append(lists);
   const unmet=progress.unmet_acceptance_criteria||[];
-  card.append(progressList('未達の受入条件',unmet,'×',unmet.length?'unmet':''));
+  body.append(progressList('まだ確認できていない受入条件',unmet,'○',unmet.length?'unmet':''));
   const status=COMPLETION_LABELS[progress.completion_status]||'状態を確認中（完成とは扱いません）';
-  card.append(el('p',`完成の状況：${status}`,'completion-status'));
-  const access=Array.isArray(progress.deliverable_access)?progress.deliverable_access:[];
-  const box=el('div',undefined,'progress-group deliverables');box.append(el('h4','完成物の確認'));
-  if(!access.length)box.append(el('p','登録された成果物はまだありません。','hint'));
-  for(const item of access)box.append(deliverableRow(job,item));
-  box.append(el('p','起動用のURLはまだ提供されていません。起動と操作の確認は未実施です。内容の表示は、起動や動作確認の代わりにはなりません。','hint'));
-  card.append(box);
+  body.append(el('p',`完成の状況：${status}`,'completion-status'));
+  body.append(deliverableGroup(job,Array.isArray(progress.deliverable_access)?progress.deliverable_access:[]));
   const actions=el('div',undefined,'actions');
   for(const name of Array.isArray(progress.available_actions)?progress.available_actions:[]){
     const entry=PROGRESS_ACTIONS[name];if(entry){const b=button(entry[0],()=>entry[1](job),name==='cancel_job'?'danger':'primary');b.setAttribute('aria-label',`${entry[0]}（${job.title}）`);b.dataset.focusKey='progress:'+job.id+':'+name;actions.append(b);}
   }
-  if(actions.children.length)card.append(actions);
-  return card;
+  if(actions.children.length)body.append(actions);
+  row.append(body);
+  row.open=openJobRows.has(job.id);
+  row.addEventListener('toggle',()=>{if(row.open)openJobRows.add(job.id);else openJobRows.delete(job.id);});
+  return row;
 }
 function renderJobProgress(){
   const section=$('job-progress'),list=$('job-progress-list');if(!section||!list)return;
