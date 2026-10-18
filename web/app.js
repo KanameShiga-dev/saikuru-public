@@ -316,8 +316,8 @@ function toolApprovalView(a){
   if(payload.cwd)rows.push(['実行する場所',String(payload.cwd)+(insideApprovedRoots(payload.cwd)?'（作業範囲の中）':'（作業範囲の外：要確認）')]);
   if(bash){
     const hosts=[...new Set(commandUrls(command).map(urlHost))];
-    rows.push(['通信先',hosts.length?(hosts.every(isLoopbackHost)?'自分のPC内だけ（外部には出ません）':'外部：'+hosts.filter(h=>!isLoopbackHost(h)).join('、')):
-      payload.guard?.category==='network'?'通信を伴う可能性があります（通信先はコマンドの文字列から読み取れません）':'コマンドの文字列に、通信先の記載はありません']);
+    rows.push(['文字列に記載された通信先',hosts.length?(hosts.every(isLoopbackHost)?'自分のPC内の宛先が記載されています（実際の通信先は実行時の挙動で異なる場合があります）':'外部宛先が記載されています：'+hosts.filter(h=>!isLoopbackHost(h)).join('、')):
+      payload.guard?.category==='network'?'通信を伴う可能性があります（通信先はコマンドの文字列から読み取れません）':'コマンドの文字列に通信先の記載はありません（実行時通信の有無は別途確認が必要です）']);
     const risky=command.match(RISKY_WORDS);
     rows.push(['削除・上書き',risky?`削除・上書きを示す語が含まれています：${risky[0].trim()}（内容を確認してください）`:'削除・上書きを示す語は、コマンドの文字列に見つかりません']);
   }
