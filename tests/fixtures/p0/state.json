@@ -6,6 +6,7 @@
       "goal": "架空の商品を商品IDで検索できるWebシステムを作る",
       "status": "running",
       "p0_contract_version": 1,
+      "p0_artifacts": [{"path": "app/index.html", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}],
       "goal_contract": {
         "original_request": "架空の商品を商品IDで検索できるWebシステムを作る",
         "primary_goal": "商品IDから商品名と価格を調べられる",
@@ -21,7 +22,9 @@
         "remaining": ["画面の動作確認", "利用者による完成物の確認"],
         "next_action": "検索画面の作成",
         "completion_status": "in_progress",
-        "unmet_acceptance_criteria": ["商品IDで検索できる", "存在しないIDには該当なしと表示する"]
+        "unmet_acceptance_criteria": ["商品IDで検索できる", "存在しないIDには該当なしと表示する"],
+        "available_actions": ["cancel_job"],
+        "deliverable_access": [{"path": "app/index.html", "method": "project_relative_file", "launch_status": "unverified"}]
       }
     },
     {
@@ -53,7 +56,9 @@
         "remaining": ["動作確認", "利用者による完成物の確認"],
         "next_action": "保守担当が開発エンジンを復旧する",
         "completion_status": "in_progress",
-        "unmet_acceptance_criteria": ["一覧画面が動く"]
+        "unmet_acceptance_criteria": ["一覧画面が動く"],
+        "available_actions": ["cancel_job"],
+        "deliverable_access": []
       }
     }
   ],

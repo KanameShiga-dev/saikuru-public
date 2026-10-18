@@ -21,6 +21,18 @@ class P0ContractTests(unittest.TestCase):
         for job in fixture['jobs']:
             self.assertEqual(progress(job, fixture['tasks'], fixture['approvals']), job['p0_progress'])
 
+    def test_progress_actions_are_hints_from_current_receipt(self):
+        job = {'id': 'fictional-job', 'status': 'awaiting_acceptance',
+               'p0_artifacts': [{'path': 'app/index.html', 'sha256': 'fictional'}]}
+        receipt = {'job_id': job['id'], 'kind': 'completion', 'status': 'pending',
+                   'payload': {'pending_items': [{'checks': ['Open the fictional app']}]}}
+        projected = progress(job, [], [receipt])
+        self.assertEqual(projected['available_actions'],
+                         ['cancel_job', 'review_completion', 'record_completion_evidence'])
+        self.assertEqual(projected['deliverable_access'], [
+            {'path': 'app/index.html', 'method': 'project_relative_file',
+             'launch_status': 'unverified'}])
+
     def test_original_request_cannot_change_after_registration(self):
         with tempfile.TemporaryDirectory() as folder:
             store = Store(folder)
@@ -164,6 +176,8 @@ class P0ApiTests(unittest.TestCase):
         status, public = self.request('/api/state')
         self.assertEqual(status, 200)
         public_approval = next(item for item in public['approvals'] if item['id'] == approval['id'])
+        self.assertEqual((public_approval['category'], public_approval['intended_role']),
+                         ('MAINTENANCE', 'maintainer'))
         self.assertNotIn('TEMP/TMP', json.dumps(public_approval, ensure_ascii=False))
         self.assertNotIn('TEMP/TMP', json.dumps(public['tasks'], ensure_ascii=False))
         status, detail = self.request('/api/tasks/detail?id=' + task['id'])
