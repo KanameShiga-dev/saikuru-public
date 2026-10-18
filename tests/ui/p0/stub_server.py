@@ -14,10 +14,17 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[3]
 WEB = ROOT / 'web'
 DEFAULT_STATE = ROOT / 'tests' / 'fixtures' / 'p0' / 'state.json'
+
+# 架空の成果物（本文の表示の確認用）。script を含むのは、表示しても実行されないことの確認のため。
+ARTIFACTS = {
+    'app/index.html': '<!doctype html>\n<title>架空の商品検索</title>\n<script>document.title = "実行されたら失敗";</script>\n<p>商品IDを入力してください。</p>\n',
+    'data/products.json': '[{"id": "P0001", "name": "架空の商品A", "price": 100}]\n',
+}
 
 FILL_TASK = {'attempt': 0, 'summary': '', 'result': None, 'after': None, 'instruction': '（架空）',
              'profile': {'adapter': 'codex', 'model': 'synthetic-model', 'effort': 'medium'}}
@@ -63,6 +70,12 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split('?', 1)[0]
         if path == '/api/state':
             return self.send_json(self.state)
+        if path == '/api/job/p0-artifact':
+            query = parse_qs(urlparse(self.path).query)
+            wanted = (query.get('path') or [''])[0]
+            if wanted not in ARTIFACTS:
+                return self.send_json({'error': '登録されていない成果物です。'}, 404)
+            return self.send_json({'path': wanted, 'content': ARTIFACTS[wanted], 'truncated': False})
         if path == '/api/jobs/previews':
             return self.send_json({'files': []})
         if path.startswith('/api/'):

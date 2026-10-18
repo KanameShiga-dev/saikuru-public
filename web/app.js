@@ -283,6 +283,32 @@ const PROGRESS_ACTIONS={
   record_completion_evidence:['確認結果を記録する',openCompletion],
   cancel_job:['この依頼を中止する…',openCancel]
 };
+// P0 L3：登録済みの成果物（テキスト）を、読み取り専用で表示する。内容は信頼できない入力として textContent だけで表示し、実行・描画しない。
+// 起動・操作の確認は引き続き「未検証」。表示した内容は、開いた時点のもの（再描画をまたいで保持し、閉じて開き直すと最新になる）。
+const openedArtifacts=new Map();
+function deliverableRow(job,item){
+  const row=el('div',undefined,'deliverable-row'),key=job.id+'|'+item.path;
+  const line=el('p');line.append(el('code',item.path||'（場所不明）'),document.createTextNode('　起動・操作の確認：未検証'));
+  if(item.launch_status&&item.launch_status!=='unverified')line.append(el('small',`（サーバーの値：${item.launch_status}）`,'tech-only'));
+  row.append(line);
+  if(item.launch_hint)row.append(el('p',item.launch_hint,'hint'));
+  if(!item.path)return row;
+  const shown=openedArtifacts.get(key);
+  const label=shown?(shown.error?'再読み込み':'内容を閉じる'):'内容を読む';
+  row.append(button(label,async()=>{
+    if(shown&&!shown.error){openedArtifacts.delete(key);return;}
+    try{
+      const result=await api('/api/job/p0-artifact?job_id='+encodeURIComponent(job.id)+'&path='+encodeURIComponent(item.path));
+      openedArtifacts.set(key,{content:String(result.content??''),truncated:result.truncated===true});
+    }catch(error){openedArtifacts.set(key,{error:'内容を読み込めませんでした：'+error.message});}
+  },'secondary'));
+  if(shown?.error)row.append(el('p',shown.error,'form-error'));
+  else if(shown){
+    const text=el('pre',shown.content,'artifact-text');text.tabIndex=0;text.setAttribute('aria-label',`${item.path} の内容（読み取り専用の表示）`);
+    row.append(text,el('p','表示した時点の内容です。更新された場合は、閉じて開き直してください。'+(shown.truncated?'内容が長いため、一部のみ表示しています。':''),'hint'));
+  }
+  return row;
+}
 function progressCard(job){
   const progress=job.p0_progress||{},goal=job.goal_contract||{},card=el('article',undefined,'job-progress-card');
   const head=el('div',undefined,'card-head');head.append(el('h3',job.title),el('span',jobStatusLabel(job),'badge'));card.append(head);
@@ -300,12 +326,8 @@ function progressCard(job){
   const access=Array.isArray(progress.deliverable_access)?progress.deliverable_access:[];
   const box=el('div',undefined,'progress-group deliverables');box.append(el('h4','完成物の確認'));
   if(!access.length)box.append(el('p','登録された成果物はまだありません。','hint'));
-  for(const item of access){
-    const row=el('p');row.append(el('code',item.path||'（場所不明）'),document.createTextNode('　起動・操作の確認：未検証'));
-    if(item.launch_status&&item.launch_status!=='unverified'){const raw=el('small',`（サーバーの値：${item.launch_status}）`,'tech-only');row.append(raw);}
-    box.append(row);
-  }
-  box.append(el('p','起動用のURLはまだ提供されていません。起動と操作の確認は未実施です。成果物の本文はこの画面からは読めません。','hint'));
+  for(const item of access)box.append(deliverableRow(job,item));
+  box.append(el('p','起動用のURLはまだ提供されていません。起動と操作の確認は未実施です。内容の表示は、起動や動作確認の代わりにはなりません。','hint'));
   card.append(box);
   const actions=el('div',undefined,'actions');
   for(const name of Array.isArray(progress.available_actions)?progress.available_actions:[]){

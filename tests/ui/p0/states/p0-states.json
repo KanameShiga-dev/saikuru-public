@@ -45,7 +45,8 @@
           {
             "path": "app/index.html",
             "method": "project_relative_file",
-            "launch_status": "unverified"
+            "launch_status": "unverified",
+            "launch_hint": "起動手順は未登録です。成果物の内容を確認し、起動と操作は別途検証してください。"
           }
         ]
       }
@@ -239,12 +240,14 @@
           {
             "path": "app/index.html",
             "method": "project_relative_file",
-            "launch_status": "unverified"
+            "launch_status": "unverified",
+            "launch_hint": "起動手順は未登録です。成果物の内容を確認し、起動と操作は別途検証してください。"
           },
           {
             "path": "data/products.json",
             "method": "project_relative_file",
-            "launch_status": "unverified"
+            "launch_status": "unverified",
+            "launch_hint": "起動手順は未登録です。成果物の内容を確認し、起動と操作は別途検証してください。"
           }
         ]
       }
@@ -273,6 +276,12 @@
             "path": "app/index.html",
             "method": "project_relative_file",
             "launch_status": "verified-by-someone"
+          },
+          {
+            "path": "data/missing.txt",
+            "method": "project_relative_file",
+            "launch_status": "unverified",
+            "launch_hint": "起動手順は未登録です。成果物の内容を確認し、起動と操作は別途検証してください。"
           }
         ]
       }

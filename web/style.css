@@ -155,3 +155,6 @@ body:not([data-view="technical"]) .tech-only{display:none !important}
 .progress-group.unmet{border-left:4px solid #b3261e;padding-left:10px}
 .completion-status{font-weight:700}
 .business-summary{font-weight:700;margin:8px 0}
+.deliverable-row{margin:6px 0}
+.artifact-text{max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#f6f8fa;border:1px solid #cdd5df;border-radius:6px;padding:10px;margin:6px 0}
+.artifact-text:focus-visible{outline:3px solid #3b6fd4;outline-offset:2px}
