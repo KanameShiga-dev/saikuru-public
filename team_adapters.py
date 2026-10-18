@@ -120,6 +120,20 @@ def report_format_instruction(schema, include_schema=False):
                    '必須項目をすべて含め、値がない文字列は空文字、配列は空配列、'
                    '真偽値は事実に合わせて true または false にしてください。'
                    '未確認のことを完了とせず、前置き・説明文・コードブロックは付けないでください。')
+    properties = schema.get('properties') or {}
+    if 'tasks' in properties:
+        instruction += (' summaryには計画の目的と範囲を、tasksには後続が実行できる担当種別・作業内容を記してください。'
+                        '未確定事項はquestionsに、引き継ぐ事実はcontext_updatesに根拠とともに記してください。')
+    elif 'status' in properties:
+        instruction += (' statusは実際の結果、summaryは実施内容と到達点、checksは確認項目ごとの結果と根拠、'
+                        'pending_checksは必要だが未確認の項目を記してください。'
+                        'stage_completeは担当工程が完了した場合だけtrueにしてください。'
+                        '停止や差し戻しにはblocking_reasonsで必須条件と支障を示し、'
+                        '判断が必要ならquestionまたはquestionsに具体的に記してください。')
+        if 'artifacts' in properties:
+            instruction += ' artifactsには作成・変更した成果物の相対パスを記してください。'
+        if 'test_files' in properties:
+            instruction += ' test_filesとtest_change_reasonにはテストの場所と変更理由を記してください。'
     return instruction + ('\nJSONスキーマ:\n' + json.dumps(schema, ensure_ascii=False)
                           if include_schema else '')
 

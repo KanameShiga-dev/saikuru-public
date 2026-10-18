@@ -2684,6 +2684,14 @@ class Engine:
         self._record_progress_warnings(task, result)
 
         review_job = self.store.get(task['job_id'], 'job')
+        if review_job.get('p0_contract_version') == 1:
+            if not str(result.get('summary') or '').strip():
+                raise ProviderError('担当の報告に実施内容と到達点がありません。', 'format')
+            if task['role'] != 'planner' and result.get('status') == 'done':
+                checks = result.get('checks')
+                if result.get('stage_complete') is not True or not isinstance(checks, list) or not checks \
+                        or any(not isinstance(check, str) or not check.strip() for check in checks):
+                    raise ProviderError('完了報告には工程完了と、確認項目ごとの結果が必要です。', 'format')
         if task['role'] == 'reviewer' and review_job.get('p0_contract_version') == 1:
             reasons = result.get('blocking_reasons') or []
             allowed = (set((review_job.get('goal_contract') or {}).get('deliverables') or []) |
