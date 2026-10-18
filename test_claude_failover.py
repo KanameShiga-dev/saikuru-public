@@ -51,6 +51,9 @@ class FailoverTests(unittest.TestCase):
         self.snapshot = {}
         self.engine.usage_snapshot = lambda: self.snapshot
         self.job = self.engine.create_job('p1', 'local goal', str(self.project), False)
+        # New full-route development jobs are P0 jobs, which never fail over (the provider choice stays with the user).
+        # The tests below cover every other job; test_p0_job_never_fails_over covers the P0 rule.
+        self.store.update(self.job['id'], p0_contract_version=None)
         for t in self.store.all('task'):
             self.store.update(t['id'], status='cancelled')
         self.store.update(self.job['id'], status='running')
@@ -76,6 +79,16 @@ class FailoverTests(unittest.TestCase):
         self.assertEqual(current['auto_return']['normal_profile']['adapter'], 'claude')
         self.assertTrue(any(e['type'] == 'model_failover' for e in self._all_events()))
         self.assertEqual(len(self.told), 1)
+
+    def test_p0_job_never_fails_over(self):
+        self.classify('Public')
+        self.store.update(self.job['id'], p0_contract_version=1)
+        job = self.store.get(self.job['id'])
+        task = self.task()
+        for reason in ('claude_auth', 'usage_limit'):
+            self.assertFalse(self.engine._failover(task, job, reason, time.time() + 3600))
+        self.assertEqual(self.store.get(task['id'])['profile']['adapter'], 'claude')
+        self.assertFalse(any(e['type'] == 'model_failover' for e in self._all_events()))
 
     def test_public_project_switches(self):
         self.classify('Public')
