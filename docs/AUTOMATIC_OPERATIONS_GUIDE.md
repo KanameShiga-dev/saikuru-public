@@ -35,6 +35,16 @@
 
 この設定はOS権限やCLIサンドボックスを拡張しない。ProviderやOS側で拒否される操作を実行可能にする設定でもない。一方、采来側の通常承認を省く範囲は広いため、専用隔離プロセス以外で有効にしない。
 
+### 削除・破壊操作に関する注意
+
+現行の `team_outbound_guard.classify()` には削除・破壊操作の分類規則がない。`rm -rf`、PowerShellの `Remove-Item -Recurse -Force` とその `rm` / `rmdir` / `del` / `erase` / `rd` エイリアス、`del /s /q`、`rmdir /s /q`、`git reset --hard`、`git clean -fdx`、Pythonの `shutil.rmtree` 等は `classify()` が未検出（`None`）を返す。その要求が通常のBash承認経路に入ると、`automatic_operations=true` では個別の人の承認なしに通る可能性がある。
+
+このリスクは文字列パターンの追加だけでは解消しない。`python cleanup.py` のようなスクリプト実行、別名・関数・変数展開、動的実行、難読化されたコマンド、`find -delete`、`git restore`、削除と同等の上書き等は静的なコマンド分類を迂回し得る。Codex native command approvalは別経路で強制的に人の承認へ回るが、Claude等の `tool_request()` 経由のBashには同じ強制が常に適用されるわけではない。`job.auto_execute=true` による通常の `Write` / `Edit` の直接許可も、このコマンド分類とは別の経路である。
+
+2026-10-19の読み取り確認では、本番として使われる `data/config.json` の保存値は `automatic_operations=true`、`approved_roots` は5件だった。同時点で8790番は待受けていなかったため、これはファイルに保存された設定値の記録であり、稼働中プロセスの実効設定を確認した結果ではない。設定値やサービス状態は利用時に改めて確認する。
+
+`delete: manual` を追加する案は既知の直接コマンドを人の確認へ回す第一段階として有効だが、削除全般を防ぐ保証にはならない。強い保証が必要なら、Bashの許可リスト化またはOS側の隔離と併用する。削除分類規則はこの文書更新時点で未実装である。
+
 ## `automatic_operations=false` でも直接許可される範囲
 
 ### 読み取りtool
