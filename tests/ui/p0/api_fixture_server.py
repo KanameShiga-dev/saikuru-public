@@ -1,10 +1,11 @@
-"""Serve the integrated UI through the real P0 state API with fictional data.
+"""Serve the integrated UI through real P0 APIs with disposable fictional data.
 
-All providers are disabled. The runtime is temporary, and every POST is denied.
-Use this for display and navigation checks, not for approval or execution tests.
+Providers and the work engine stay disabled. POST is denied by default; the
+explicit action mode permits selected user-decision APIs against the temp DB.
 """
 
 import argparse
+import hashlib
 import json
 import secrets
 import sys
@@ -22,6 +23,60 @@ from team_config import default_config
 from team_engine import Engine
 from team_p0_contract import artifact_records
 from team_store import Store
+
+
+def prepare_action_fixture(app, project):
+    """Turn display-only examples into valid, isolated decision paths."""
+    store, engine = app.store, app.engine
+
+    # The real G2 gate binds approval, version and fingerprint to a readable scope.
+    (project / 'SCOPE.md').write_text('Fictional project for isolated UI checks only.\n', encoding='utf-8')
+    store.update('synthetic-g2-task', status='queued')
+    engine._request_g2('synthetic-g2-job', 'synthetic-g2-task', '架空の操作確認用')
+
+    # A G3 decision must have a completed planner result with concrete work.
+    plan = {
+        'summary': '架空の検索画面を作る計画',
+        'security_review_required': False,
+        'goal_contract': {
+            'primary_goal': '架空の検索画面を作る',
+            'deliverables': ['app/index.html'],
+            'acceptance_criteria': ['架空のIDを入力して結果を確認できる'],
+            'non_goals': [], 'constraints': ['架空データのみ'],
+        },
+        'tasks': [{'title': '架空の検索画面を作る',
+                   'instruction': '架空データだけを使って検索画面を作る',
+                   'role': 'builder',
+                   'goal_links': ['app/index.html', '架空のIDを入力して結果を確認できる']}],
+        'code_test_plan': {'required': True, 'reason': '画面の作成',
+                           'cases': ['未知のIDは結果なし'],
+                           'command': 'python -B -X utf8 -m unittest test_lookup',
+                           'existing_tests': []},
+    }
+    store.update('synthetic-g3-task', status='succeeded', result=plan)
+    store.update('synthetic-g3-approval', status='superseded')
+    engine.new_approval(store.get('synthetic-g3-task', 'task'), 'plan', plan)
+
+    # A question pauses the task; its approval belongs to that exact attempt.
+    question_task = store.update('synthetic-question-task', status='blocked')
+    question = store.get('synthetic-question-approval', 'approval')
+    question_payload = json.dumps(question['payload'], ensure_ascii=False, sort_keys=True)
+    store.update(question['id'], attempt=question_task['attempt'],
+                 digest=hashlib.sha256(question_payload.encode('utf-8')).hexdigest())
+
+    # Receipt requires completed normal and security reviews plus a signed payload.
+    receipt_job = store.get('synthetic-receipt-job', 'job')
+    for name, agent in [('通常レビュー', None), ('安全確認', 'common-security-reviewer')]:
+        reviewer = engine.new_task(receipt_job, name, '架空の成果物を確認する',
+                                   'reviewer', 'synthetic-receipt-task', agent_name=agent)
+        store.update(reviewer['id'], status='succeeded',
+                     result={'status': 'done', 'summary': '架空の確認用レビューが完了',
+                             'checks': [], 'pending_checks': []})
+    receipt_task = store.get('synthetic-receipt-task', 'task')
+    receipt = store.get('synthetic-receipt-approval', 'approval')
+    payload_text = json.dumps(receipt['payload'], ensure_ascii=False, sort_keys=True)
+    store.update(receipt['id'], attempt=receipt_task['attempt'],
+                 digest=hashlib.sha256(payload_text.encode('utf-8')).hexdigest())
 
 
 class ReadOnlyHandler(Handler):
@@ -99,6 +154,8 @@ def make_server(port, base, allow_fixture_actions=False):
             app.store.put('task', row)
         for approval in fixture['approvals']:
             app.store.put('approval', approval)
+        if allow_fixture_actions:
+            prepare_action_fixture(app, project)
         server.app = app
         return server
     except BaseException:

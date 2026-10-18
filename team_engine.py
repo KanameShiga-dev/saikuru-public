@@ -1721,6 +1721,12 @@ class Engine:
 
                 raise ValueError('正式受領は承認操作と分離しました。受領確認欄から明示的に実行してください。')
 
+            if (approval['kind'] == 'completion' and not allow
+                    and job.get('p0_contract_version') == 1
+                    and not str(note or '').strip()):
+
+                raise ValueError('差し戻しの理由を入力してください。')
+
             if approval['attempt'] != task['attempt'] or (approval['kind'] == 'tool' and now() > approval['expires_at']):
 
                 self.store.update(approval_id, status='expired')
