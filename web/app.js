@@ -338,6 +338,8 @@ function deliverableGroup(job,access){
 function progressCard(job){
   const progress=job.p0_progress||{},goal=job.goal_contract||{},counts=jobCounts(job);
   const row=el('details',undefined,'job-row');row.dataset.jobId=job.id;
+  // 色は状態ごとに分ける。色だけに頼らず、状態の文字も必ず出す。
+  row.dataset.state=needsUserDecision(job)?'decision':p0Phase(job)?.key||job.status||'unknown';
   const head=el('summary',undefined,'job-row-head');head.dataset.focusKey='jobrow:'+job.id;
   const decision=needsUserDecision(job);
   head.append(el('h3',job.title,'job-row-title'),el('span',decision?'あなたの判断が必要':jobStatusLabel(job),'badge'+(decision?' approval':'')));
@@ -354,7 +356,7 @@ function progressCard(job){
   body.append(el('p',`現在の工程：${progress.current||'確認中'}`));
   if(progress.next_action)body.append(el('p',`次の動作：${progress.next_action}`));
   const lists=el('div',undefined,'progress-lists');
-  lists.append(progressList('完成済み',progress.completed||[],'✓'),progressList('残り',progress.remaining||[],'○'));
+  lists.append(progressList('完成済み',progress.completed||[],'✓','done'),progressList('残り',progress.remaining||[],'○','todo'));
   body.append(lists);
   const unmet=progress.unmet_acceptance_criteria||[];
   body.append(progressList('まだ確認できていない受入条件',unmet,'○',unmet.length?'unmet':''));
