@@ -22,9 +22,11 @@ python -X utf8 tests/ui/p0/api_fixture_server.py --port 0
 python -X utf8 tests/ui/p0/api_fixture_server.py --port 0 --allow-fixture-actions
 ```
 
-このモードも `127.0.0.1` の一時DBと架空の11状態だけを使う。Providerは無効、作業エンジンは停止したまま。実APIの認証・入力検証を通して、`/api/decide`、`/api/completion/evidence`、`/api/jobs/review-confirmation`、`/api/jobs/formal-acceptance`、`/api/jobs/rework`、`/api/cancel` のPOSTだけを受け付ける。それ以外のPOSTは405。表示用fixtureから、操作用のG2/G3承認、質問の停止状態、完了レビューと承認ダイジェストを実エンジンの形で作り直す。終了時に一時DBは削除され、毎回初期状態から始まる。画面で「正式受領」を操作しても、架空の依頼についての記録に限られる。
+このモードは `127.0.0.1` の一時DB、架空の11状態、`C:/AI_Work/studyWork` 内に作る一時的な架空プロジェクトだけを使う。Providerは無効、作業エンジンは停止したまま。実APIの認証・入力検証を通して、`/api/jobs`、`/api/decide`、`/api/completion/evidence`、`/api/jobs/review-confirmation`、`/api/jobs/formal-acceptance`、`/api/jobs/rework`、`/api/cancel` のPOSTだけを受け付ける。それ以外のPOSTは405。表示用fixtureから、操作用のG2/G3承認、質問の停止状態、完了レビューと承認ダイジェストを実エンジンの形で作り直す。通常終了時に一時データを削除し、毎回初期状態から始まる。画面で「正式受領」を操作しても、架空の依頼についての記録に限られる。
 
-依頼登録、添付、実Provider実行、成果物の起動はこのモードでは確認できない。完了承認の `pending_items` が残る限り正式受領できず、画面から架空の確認根拠を記録して初めて次の段階へ進む。これは実成果物の起動や利用者本人による受領の証拠ではない。操作確認の結果と未確認の経路を `docs/p0/UI_ACCEPTANCE.md` に分けて記録する。
+架空の新規依頼の登録と、その計画作成開始の承認は確認できる。画面で登録するときは、このランタイムが用意した一時プロジェクトを選ぶ。作業エンジンが停止しているため、新規依頼の計画本文は生成されず、その依頼のG3承認までは進まない。G3承認は別の事前投入済みfixtureで確認する。添付、実Provider実行、成果物の起動は確認できない。完了承認の `pending_items` が残る限り正式受領できず、画面から架空の確認根拠を記録して初めて次の段階へ進む。これは実成果物の起動や利用者本人による受領の証拠ではない。操作確認の結果と未確認の経路を `docs/p0/UI_ACCEPTANCE.md` に分けて記録する。
+
+APIからの事前確認では、架空依頼の `/api/jobs` 登録後に `awaiting_approval` とG2の `pending` を確認し、G2承認後に依頼が `planning` になった。標準UIでの登録画面とキーボード操作は未確認。
 
 P0の完了承認を差し戻す場合は理由の入力が必要。理由を記録すると、同じ依頼に修正担当と通常・安全レビュー担当を追加し、依頼は `running` に戻る。実エンジンは停止しているため担当は自動実行されない。
 

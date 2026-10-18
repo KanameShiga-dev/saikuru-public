@@ -19,8 +19,10 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from server import App, DataLock, Handler
+from team_attachments import Attachments
 from team_config import default_config
 from team_engine import Engine
+from team_ledger import ROOT as LEDGER_ROOT
 from team_p0_contract import artifact_records
 from team_store import Store
 
@@ -90,7 +92,7 @@ class ReadOnlyHandler(Handler):
         allowed = {'/', '/health', '/app.js', '/style.css', '/theme.css',
                    '/shell.js', '/attachments.js', '/skill-picker.js',
                    '/api/state', '/api/notifications', '/api/tasks/detail',
-                   '/api/job/p0-artifact'}
+                   '/api/job/p0-artifact', '/api/instruction-health', '/api/skills'}
         if urlparse(self.path).path not in allowed:
             return self.send(403, {'error': '架空データの画面確認用です。'})
         return super().do_GET()
@@ -101,7 +103,7 @@ class FixtureActionHandler(ReadOnlyHandler):
 
     ALLOWED_POSTS = {'/api/decide', '/api/completion/evidence',
                      '/api/jobs/review-confirmation', '/api/jobs/formal-acceptance',
-                     '/api/jobs/rework', '/api/cancel'}
+                     '/api/jobs/rework', '/api/cancel', '/api/jobs'}
 
     def do_POST(self):
         if urlparse(self.path).path not in self.ALLOWED_POSTS:
@@ -121,6 +123,7 @@ def make_server(port, base, allow_fixture_actions=False):
         app.config = default_config()
         app.config['approved_roots'] = [str(project.resolve())]
         app.config['provider_settings']['enabled'] = []
+        app.config['decision']['provider'] = 'disabled'
         app.port = server.server_port
         app.origin = f'http://127.0.0.1:{app.port}'
         app.cookie = secrets.token_urlsafe(32)
@@ -128,6 +131,7 @@ def make_server(port, base, allow_fixture_actions=False):
         app.mobile = app.mobile_error = None
         app.engine = Engine(app.store, app.config, {}, app.origin)
         app.engine.paused = True
+        app.attachments = Attachments(app.store)
         for name in ('usage', 'cli_update', 'claude_update', 'copilot_update', 'notifications'):
             setattr(app, name, SimpleNamespace(snapshot=lambda: {}))
         fixture = json.loads((ROOT / 'tests/fixtures/p0/state.json').read_text(encoding='utf-8'))
@@ -173,9 +177,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=0)
     parser.add_argument('--allow-fixture-actions', action='store_true',
-                        help='Allow selected real user-decision APIs against disposable fictional data only')
+                        help='Allow selected real job and decision APIs against disposable fictional data only')
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix='saikuru-p0-ui-api-') as folder:
+    temp_parent = None
+    if args.allow_fixture_actions:
+        temp_parent = ROOT.parent.resolve()
+        if not temp_parent.is_relative_to(LEDGER_ROOT.resolve()):
+            raise ValueError('操作確認モードは C:/AI_Work 内の統合作業領域から起動してください。')
+    with tempfile.TemporaryDirectory(prefix='saikuru-p0-ui-api-', dir=temp_parent) as folder:
         server = make_server(args.port, Path(folder), args.allow_fixture_actions)
         print(server.app.origin, flush=True)
         try:
