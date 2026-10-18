@@ -3355,8 +3355,8 @@ class Engine:
                     self.store.event('g2_execution_consumed', '承認済みの計画生成1回を消費しました。',
                                      task['id'], task['job_id'], {'revision': current_job['g2_revision'],
                                      'attempt': task['attempt']})
-            # 2026-10-09 (user decision): every provider's report passes the same schema gate, so the items do not
-            # depend on the model. Claude/Codex enforce the schema in their CLI; Copilot is repaired in its adapter.
+            # Every provider's report passes this schema gate, regardless of its CLI's native output controls or
+            # adapter-level JSON recovery. A syntactically readable report is not enough to mark a task complete.
             from team_adapters import schema_errors
             report_errors = schema_errors(result, schema)
             if report_errors:
