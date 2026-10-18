@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 
 from eval.development_readiness.reacceptance_fixture import close, make_fixture
 from team_p0_contract import artifact_records, current_artifacts, initial, validate_plan
-from team_recovery import p0_interruption, retry_local_read
+from team_recovery import p0_failure_category, p0_interruption, retry_local_read
 from team_store import Store
 
 
@@ -85,6 +85,33 @@ class P0ContractTests(unittest.TestCase):
         self.assertEqual(second['attempt_count'], 2)
         self.assertEqual(second['resume_target'], task['id'])
 
+    def test_pre_provider_secret_refusal_is_a_safety_stop(self):
+        self.assertEqual(p0_failure_category('prompt_secret'), 'SAFETY_BLOCKED')
+        self.assertEqual(p0_failure_category('reference_secret'), 'SAFETY_BLOCKED')
+        self.assertEqual(p0_failure_category('startup'), 'MAINTENANCE_REQUIRED')
+
+    def test_goal_and_recovery_count_survive_store_reopen(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(folder)
+            goal = 'Build fictional lookup'
+            job = store.put('job', {'id': 'fictional', 'goal': goal, 'status': 'blocked',
+                                    'p0_contract_version': 1, 'goal_contract': initial(goal)})
+            task = store.put('task', {'id': 'fictional-task', 'job_id': job['id'],
+                                      'role': 'builder', 'status': 'failed',
+                                      'profile': {'adapter': 'codex'}})
+            first = p0_interruption(task, None, 'startup')
+            store.update(job['id'], p0_interruption=p0_interruption(task, first, 'startup'))
+            store.db.close()
+            reopened = Store(folder)
+            try:
+                restored = reopened.get(job['id'], 'job')
+                self.assertEqual(restored['goal'], goal)
+                self.assertEqual(restored['p0_interruption']['attempt_count'], 2)
+                self.assertEqual(restored['p0_interruption']['resume_target'], task['id'])
+                self.assertEqual(reopened.get(task['id'], 'task')['status'], 'failed')
+            finally:
+                reopened.db.close()
+
 
 class P0ApiTests(unittest.TestCase):
     def setUp(self):
@@ -157,6 +184,58 @@ class P0ApiTests(unittest.TestCase):
         self.assertNotIn('synthetic-technical-detail',
                          json.dumps(public, ensure_ascii=False))
         self.assertEqual(public['jobs'][0]['p0_progress']['current'], '保守対応待ち')
+
+    def test_unrelated_optimization_becomes_nonblocking_backlog(self):
+        store = self.server.app.store
+        job = store.all('job')[0]
+        store.update(job['id'], p0_contract_version=1,
+                     goal_contract=initial(job['goal']))
+        task = store.for_job('task', job['id'])[0]
+        result = {'status': 'needs_changes', 'stage_complete': True,
+                  'warnings': ['架空検索の完了と無関係な内部最適化案'],
+                  'blocking_reasons': [], 'questions': [], 'pending_checks': [],
+                  'question': ''}
+        self.server.app.engine._record_progress_warnings(task, result)
+        self.assertEqual(result['status'], 'done')
+        updated = store.get(job['id'], 'job')
+        self.assertEqual(updated['goal'], job['goal'])
+        self.assertEqual(len(updated['warning_issues']), 1)
+        self.assertFalse(updated['warning_issues'][0]['blocking'])
+
+    def test_safety_hold_preserves_task_and_does_not_claim_completion(self):
+        store = self.server.app.store
+        job = store.all('job')[0]
+        task = store.for_job('task', job['id'])[0]
+        store.update(job['id'], p0_contract_version=1,
+                     goal_contract=initial(job['goal']))
+        store.update(task['id'], status='blocked')
+        self.server.app.engine._hold_p0_task(task, 'reference_secret', 'SAFETY_BLOCKED')
+        held = store.get(job['id'], 'job')
+        self.assertEqual(held['status'], 'blocked')
+        self.assertEqual(held['p0_interruption']['recovery_status'], 'safety_blocked')
+        self.assertEqual(held['p0_interruption']['resume_target'], task['id'])
+        self.assertEqual(store.get(task['id'], 'task')['status'], 'blocked')
+
+    def test_reviewer_repair_keeps_requirement_link(self):
+        store = self.server.app.store
+        job = store.all('job')[0]
+        contract = initial(job['goal'])
+        contract['deliverables'] = ['lookup.py']
+        contract['acceptance_criteria'] = ['Unknown ID shows no result']
+        store.update(job['id'], p0_contract_version=1,
+                     goal_contract=contract, status='running')
+        reviewer = next(task for task in store.for_job('task', job['id'])
+                        if task.get('agent_name') == 'reviewer')
+        store.update(reviewer['id'], goal_links=['lookup.py'], goal_id=job['id'])
+        result = {'status': 'needs_changes', 'summary': 'Unknown ID is not handled',
+                  'checks': ['Unknown ID shows no result'], 'pending_checks': [],
+                  'blocking_reasons': [{'requirement': 'Unknown ID shows no result',
+                                        'impact': 'The required response is missing'}],
+                  'questions': [], 'question': ''}
+        self.server.app.engine._finish(reviewer, result)
+        repair = next(task for task in store.for_job('task', job['id'])
+                      if task['role'] == 'builder' and task.get('after') == reviewer['id'])
+        self.assertEqual(repair['goal_links'], ['Unknown ID shows no result'])
 
     def test_pending_acceptance_cannot_be_formally_accepted(self):
         job = self.server.app.store.all('job')[0]

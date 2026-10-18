@@ -1147,6 +1147,11 @@ class Engine:
         task['common_agents'] = [task['agent_name']]
 
         task['auto_return'] = copy.deepcopy(job.get('role_auto_return', {}).get(role))
+        if job.get('p0_contract_version') == 1 and after:
+            parent = self.store.get(after, 'task')
+            if parent.get('job_id') == job['id'] and parent.get('goal_links'):
+                task['goal_links'] = list(parent['goal_links'])
+                task['goal_id'] = job['id']
 
         return self.store.put('task', task)
 
@@ -3043,6 +3048,9 @@ class Engine:
                     fix = self.new_task(job, 'レビュー指摘を修正する', repair_instruction(result),
 
                                         'builder', task['id'], repair)
+                    if job.get('p0_contract_version') == 1 and result.get('blocking_reasons'):
+                        self.store.update(fix['id'], goal_links=list(dict.fromkeys(
+                            row['requirement'] for row in result['blocking_reasons'])), goal_id=job['id'])
 
                     self._queue_reviews(job, fix['id'], repair)
 
@@ -3259,6 +3267,8 @@ class Engine:
                                       summary='HANDOFF.md の控えに秘密情報らしき文字列があるため、モデルへ送る前に止めました。')
                     self.store.update(task['job_id'], status='blocked')
                     self.new_approval(task, 'question', guard_question(blocked))
+                    if self.store.get(task['job_id'], 'job').get('p0_contract_version') == 1:
+                        self._hold_p0_task(task, 'reference_secret', 'SAFETY_BLOCKED')
                 self.store.event('reference_guard', 'HANDOFF.md の控えに秘密情報らしき文字列（'
                                  + str(sum(len(b['findings']) for b in blocked)) + 'か所）。送らずに利用者の判断を待ちます。',
                                  task['id'], task['job_id'])
@@ -3483,9 +3493,8 @@ class Engine:
                     self.store.update(task['job_id'], status='interrupted' if cancelled else 'failed')
 
                 if p0_development and not cancelled:
-                    category = ('SAFETY_BLOCKED' if failure_code in
-                                ('reference_secret', 'egress_blocked', 'permission_denied', 'security')
-                                else 'MAINTENANCE_REQUIRED')
+                    from team_recovery import p0_failure_category
+                    category = p0_failure_category(failure_code)
                     self._hold_p0_task(task, failure_code, category)
 
                 self.store.event('task_error', str(exc)[:1800], task['id'], task['job_id'])

@@ -29,6 +29,13 @@ def retry_local_read(operation, max_retries=2):
             time.sleep(.05 * (attempt + 1))
 
 
+def p0_failure_category(code):
+    """Keep pre-provider DLP refusals distinct from repairable engine failures."""
+    return ('SAFETY_BLOCKED' if code in
+            ('reference_secret', 'prompt_secret', 'egress_blocked',
+             'permission_denied', 'security') else 'MAINTENANCE_REQUIRED')
+
+
 def p0_interruption(task, previous, code, category='MAINTENANCE_REQUIRED'):
     """Record bounded, non-sensitive failure metadata for resuming the same task."""
     code = str(code or 'execution')[:80]

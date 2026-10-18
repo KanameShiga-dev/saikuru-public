@@ -33,7 +33,6 @@ class P0IntegrationTests(unittest.TestCase):
             'project': str(root), 'status': 'awaiting_approval', 'auto_execute': False,
             'validation_commands': [], 'code_test_contract_version': 1})
         planner = engine.new_task(job, 'Plan', 'Plan fictional lookup', 'planner')
-        store.update(planner['id'], status='succeeded', result={'status': 'done'})
         plan = {'summary': 'Create a fictional lookup', 'security_review_required': False,
             'goal_contract': {'primary_goal': 'Search fictional items',
                               'deliverables': ['lookup.py'],
@@ -44,13 +43,19 @@ class P0IntegrationTests(unittest.TestCase):
             'code_test_plan': {'required': True, 'reason': 'New code',
                                'cases': ['Unknown ID shows no result'],
                                'command': COMMAND, 'existing_tests': []}}
-        engine._expand_plan(planner, plan)
+        store.update(planner['id'], status='succeeded', result=plan)
+        g3 = engine.new_approval(planner, 'plan', plan)
+        self.assertEqual(store.get(job['id'])['status'], 'awaiting_approval')
+        engine.decide(g3['id'], True, 'Fictional plan approved')
+        self.assertEqual(store.get(g3['id'], 'approval')['status'], 'approved')
         tasks = store.for_job('task', job['id'])
         builder = next(task for task in tasks if task['role'] == 'builder')
         reviews = [task for task in tasks if task['role'] == 'reviewer']
         self.assertEqual(store.get(job['id'])['goal_contract']['original_request'], goal)
         self.assertEqual(store.get(builder['id'])['goal_links'],
                          ['lookup.py', 'Unknown ID shows no result'])
+        self.assertTrue(all(store.get(task['id'])['goal_links'] ==
+                            ['lookup.py', 'Unknown ID shows no result'] for task in reviews))
 
         (root / 'lookup.py').write_text(
             'def lookup(item_id):\n    return "No result" if item_id != "A001" else "Fictional item"\n',
