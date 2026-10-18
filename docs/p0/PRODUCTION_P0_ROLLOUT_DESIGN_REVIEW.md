@@ -41,7 +41,7 @@ G2はジョブ作成時に `g2_gate_version=1` を設定して `_request_g2()` �
 
 - 既存の G2/G3 と通常レビューは残る。
 - P0の目標契約、細かな進捗表示、P0固有の停止・復旧・成果物の確認条件は、その設定で作った依頼には適用されない。
-- 非P0の既存復旧挙動（対応Providerへの切替や利用量上限後の再試行を含む）が使われる。モデル選択・Effortは依頼者の選択を尊重し、利用量の予測で依頼を自動拒否しない。
+- 非P0の既存復旧挙動が使われ、認証切れや実際に返った利用量上限を契機に Provider を自動切替する経路が有効になる。利用量予測で依頼を自動拒否する処理ではない。一方、利用者はモデル/Effortを自分で選ぶ方針なので、自動Provider切替を本番で許容するかは別途明示する。現時点ではこの切替を利用者のモデル選択と同一視しない。
 - 設定変更後に作った依頼だけに効く。設定変更前の依頼は変更されない。
 
 ### 案Dの受入条件
@@ -69,6 +69,20 @@ G2はジョブ作成時に `g2_gate_version=1` を設定して `_request_g2()` �
 | UI・診断 | P0進捗射影、成果物本文API、P0 interruption の診断フィールド秘匿 | P0進捗・成果物表示とP0固有の診断射影は付かない。新規ジョブをP0 UI前提で扱わない |
 
 これは完全なファイル単位の依存表ではなく、設定の意味を確定するための動作分類である。実装前に `rg p0_contract_version` の全分岐を再確認し、テストに各分岐の期待値を結び付ける。秘密情報参照ガード自体は別の保護として実行されるが、P0固有の `safety_blocked` interruption は作成されなくなる。
+
+### P0オフ時に実装で再確認する分岐とテスト
+
+| 分岐 | コード位置 | 既存テスト | P0オフ受入時に必要な確認 |
+|---|---|---|---|
+| 設定既定・型・新規ジョブへの反映 | `team_config.py:121-196`; `team_engine.py:1268-1323` | `tests/test_p0_switch.py` の既定ON、OFF、キー無し、非bool拒否 | 4ケースは追加済み。OFFテストには `g2_gate_version` の確認があるが、pending G2 approvalの実在確認を追加する |
+| G2の作成・一回限り消費・再承認 | `team_engine.py:1290,1323,1477-1612,3589-3633` | `tests/test_g1_g2_gate.py::test_g1_registers_durable_pending_gate_and_tick_does_not_dispatch`; `test_g2_is_single_use_and_g3_remains_required_even_when_auto_execute_true`; `tests/test_g1_g2_adversarial.py` の再起動・再試行・スコープ変更群 | P0 false の新規依頼をG2未承認のままdispatchさせず、承認後も指紋変更で再承認させる |
+| G3計画承認 | `team_engine.py:3062` | `tests/test_g1_g2_gate.py::test_g2_is_single_use_and_g3_remains_required_even_when_auto_execute_true` | false設定の新規依頼でもplanner成功後に pending `plan` approvalを作り、承認まで後続担当をdispatchしない |
+| 認証・利用量の失敗分岐、再試行、Provider自動切替 | `team_engine.py:3456,3493,3502,3510,3535,3673-3707,3992-4049,4095-4108` | 現在 `rg` でこの経路の専用合成テストを確認できない。P0停止側は `tests/test_p0_core.py` の `test_safety_hold_preserves_task_and_does_not_claim_completion` がある | false時に実際の認証/利用量失敗を合成し、どこまで自動待機・切替・再試行するかを確認する。ただし自動Provider切替は利用者のモデル選択方針との整合を先に決める |
+| 秘密情報参照ガード | `team_engine.py:3303-3310` | `tests/test_p0_core.py::test_pre_provider_secret_refusal_is_a_safety_stop` | P0 falseでもProvider呼出し前の拒否と承認要求が残り、P0固有interruptionだけが無いことを確認する |
+| 再試行/モデル変更APIの保守認証 | `server.py:814-822,843-846` | 現在 `rg` でP0/non-P0の両方を直接比較するAPIテストを確認できない | P0のmaintenance_requiredは資格情報なしで拒否し、P0 falseの新規ジョブは通常UI認証で従来操作できることを確認する |
+| P0計画・成果物・完了契約 | `team_engine.py:1392,2129-2178,2314-2330,2610-2620,2708-2718,2788,2853,2979-2987,3133,3352-3358`; `team_p0_contract.py:113` | `tests/test_p0_core.py`, `tests/test_p0_integration.py`, `tests/test_formal_acceptance_workflow.py`, `tests/test_code_test_contract_synthetic.py` | P0 falseでP0専用条件を要求しない一方、共通レビュー/正式受領と独立したコードテスト契約が残ることを確認する |
+
+表中の「追加確認」は未実行。既存のP0テストは多くが既定ONの経路を扱い、P0オフの失敗回復・認可境界は現在の追加4件だけでは網羅しない。
 
 ### 現在の2コミットと監査記録
 
