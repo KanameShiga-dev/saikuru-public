@@ -247,6 +247,12 @@ class Context:
 
         self.started = now()
 
+        # Seconds spent waiting for a person's decision. The run-time limit counts working time only (2026-10-18:
+        # a task waiting for approvals was stopped by the 30-minute limit although nothing was running).
+        self.waited = 0.0
+
+        self.wait_began = None
+
         self.token = secrets.token_urlsafe(32)
 
         self.endpoint = engine.endpoint
@@ -606,7 +612,11 @@ class Context:
 
             raise Cancelled('利用者またはサービス停止により中断しました。')
 
-        if now() - self.started > self.engine.config['task_timeout_seconds']:
+        began = self.wait_began
+
+        working = now() - self.started - self.waited - ((now() - began) if began else 0)
+
+        if working > self.engine.config['task_timeout_seconds']:
 
             raise ProviderError('実行時間の上限に達しました。変更を確認してから再試行してください。')
 
@@ -725,6 +735,8 @@ class Context:
 
         self.engine.store.update(self.task['id'], status='awaiting_approval')
 
+        self.wait_began = now()
+
         try:
 
             while True:
@@ -748,6 +760,10 @@ class Context:
                 self.cancel.wait(.25)
 
         finally:
+
+            self.waited += now() - self.wait_began
+
+            self.wait_began = None
 
             with self.engine.store.lock:
 
