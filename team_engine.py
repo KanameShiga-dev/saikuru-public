@@ -83,6 +83,10 @@ RESULT_SCHEMA['required'] = list(RESULT_SCHEMA['properties'])
 
 RESULT_SCHEMA_TESTS = object_schema(dict(RESULT_SCHEMA['properties'],
     test_files={'type': 'array', 'maxItems': 20, 'items': STR}, test_change_reason=STR))
+RESULT_SCHEMA_P0_BUILDER = object_schema(dict(RESULT_SCHEMA['properties'],
+    artifacts={'type': 'array', 'maxItems': 20, 'items': STR}))
+RESULT_SCHEMA_P0_BUILDER_TESTS = object_schema(dict(RESULT_SCHEMA_TESTS['properties'],
+    artifacts={'type': 'array', 'maxItems': 20, 'items': STR}))
 
 PLAN_SCHEMA = object_schema({'summary': STR, 'tasks': {'type': 'array', 'items': object_schema({
 
@@ -99,6 +103,23 @@ PLAN_SCHEMA_TESTS = object_schema(dict(PLAN_SCHEMA['properties'], code_test_plan
     'required': {'type': 'boolean'}, 'reason': STR,
     'cases': {'type': 'array', 'maxItems': 20, 'items': STR}, 'command': STR,
     'existing_tests': {'type': 'array', 'maxItems': 20, 'items': STR}})))
+
+P0_CONTRACT_SCHEMA = object_schema({
+    'primary_goal': STR,
+    'deliverables': {'type': 'array', 'minItems': 1, 'maxItems': 20, 'items': STR},
+    'acceptance_criteria': {'type': 'array', 'minItems': 1, 'maxItems': 20, 'items': STR},
+    'non_goals': {'type': 'array', 'maxItems': 20, 'items': STR},
+    'constraints': {'type': 'array', 'maxItems': 20, 'items': STR},
+})
+P0_TASK_SCHEMA = object_schema({
+    'title': STR, 'instruction': STR,
+    'role': {'type': 'string', 'enum': ['researcher', 'builder']},
+    'goal_links': {'type': 'array', 'minItems': 1, 'maxItems': 20, 'items': STR},
+})
+PLAN_SCHEMA_P0 = object_schema(dict(PLAN_SCHEMA['properties'],
+    tasks={'type': 'array', 'items': P0_TASK_SCHEMA}, goal_contract=P0_CONTRACT_SCHEMA))
+PLAN_SCHEMA_P0_TESTS = object_schema(dict(PLAN_SCHEMA_P0['properties'],
+    code_test_plan=PLAN_SCHEMA_TESTS['properties']['code_test_plan']))
 
 # The meaning of a result status is defined here only; role instructions refer to these texts and must not redefine
 # "blocked" (2026-10-08: the review text told reviewers to block when conditions were missing, contradicting the common rule; a review that only
@@ -1093,6 +1114,19 @@ class Engine:
 
 
 
+    def _hold_p0_task(self, task, code, category='MAINTENANCE_REQUIRED'):
+        """Preserve a failed P0 task and its original resume target."""
+        job = self.store.get(task['job_id'], 'job')
+        if job.get('p0_contract_version') != 1:
+            return
+        from team_recovery import p0_interruption
+        interruption = p0_interruption(task, job.get('p0_interruption'), code, category)
+        self.store.update(job['id'], status='blocked', p0_interruption=interruption)
+        self.store.event('p0_maintenance_required' if category != 'SAFETY_BLOCKED' else 'p0_safety_blocked',
+                         '途中成果を保持し、元の工程を停止しました。', task['id'], job['id'],
+                         {'failure_signature': interruption['failure_signature'],
+                          'attempt_count': interruption['attempt_count'], 'category': category})
+
     def new_task(self, job, title, instruction, role, after=None, repair=0, agent_name=None):
 
         profile_id = self.config['roles'][role]
@@ -1204,6 +1238,8 @@ class Engine:
         instruction_health = inspect_instructions(Path(project), instruction_boundary, deep=True)
         from team_limited_routing import classify_intake
         intake = classify_intake(title, goal, self.config.get('decision', {}))
+        from team_p0_contract import initial as initial_p0_contract
+        p0_development = not document_source and route == 'full'
 
         with self.store.atomic():
 
@@ -1225,7 +1261,9 @@ class Engine:
                 'registration_actor': registration_actor or 'unknown',
 
                 'route': route, 'status': 'awaiting_approval', 'created_at': now(),
-                'g2_gate_version': 1, 'g2_status': 'pending', 'g2_revision': 0})
+                'g2_gate_version': 1, 'g2_status': 'pending', 'g2_revision': 0,
+                **({'p0_contract_version': 1, 'goal_contract': initial_p0_contract(goal)}
+                   if p0_development else {})})
 
             self.store.update(job['id'], intake_classification=intake, skill_selection=skill_selection, evaluation=evaluation)
             job['evaluation'] = evaluation
@@ -1325,13 +1363,22 @@ class Engine:
 
             raise ProviderError('承認対象が大きすぎるため停止しました。内容を小分けにしてください。')
 
+        p0_job = self.store.get(task['job_id'], 'job').get('p0_contract_version') == 1
+        metadata = {}
+        if p0_job:
+            from team_questions import decision_metadata
+            category, intended_role, business_summary = decision_metadata(kind, payload)
+            metadata = {'category': category, 'intended_role': intended_role,
+                        'business_summary': business_summary,
+                        'requires_explicit_consent': True}
         approval = {'id': uid(), 'task_id': task['id'], 'job_id': task['job_id'],
 
                     'attempt': task['attempt'], 'kind': kind, 'payload': payload,
 
                     'digest': hashlib.sha256(payload_text.encode()).hexdigest(), 'status': 'pending',
 
-                    'created_at': now(), 'expires_at': now() + self.config['approval_timeout_seconds'], 'note': ''}
+                    'created_at': now(), 'expires_at': now() + self.config['approval_timeout_seconds'], 'note': '',
+                    **metadata}
 
         self.store.put('approval', approval)
 
@@ -2047,6 +2094,11 @@ class Engine:
 
             from team_document_capabilities import require_artifacts
             require_artifacts(job)
+            if job.get('p0_contract_version') == 1:
+                from team_p0_contract import current_artifacts
+                artifacts_valid, artifact_issue = current_artifacts(job)
+                if not artifacts_valid:
+                    raise ValueError(artifact_issue)
             from team_code_test_contract import commands, verify_snapshot
             required_commands = commands(job)
             if required_commands:
@@ -2063,6 +2115,8 @@ class Engine:
             completion_payload = payload
             if completion_payload.get('review_findings'):
                 raise ValueError('未解決のレビュー指摘があるため正式受領できません。差し戻して修正・再レビューしてください。')
+            if job.get('p0_contract_version') == 1 and completion_payload.get('pending_items'):
+                raise ValueError('完成物の起動・操作と受入条件の確認が残っています。未完了のまま正式受領できません。')
             legacy_handoff = ('pending_items' not in completion_payload
                               and any(t.get('status') == 'handed_off' for t in tasks))
             has_pending = (bool(completion_payload.get('review_findings'))
@@ -2087,6 +2141,9 @@ class Engine:
                 self.store.update(approval_id, status='approved', note=str(note or '')[:4000],
                                   decided_at=decided_at, decision=audit)
                 self.store.update(job['id'], status=new_status, _transition_reason='formal_acceptance')
+                if job.get('p0_contract_version') == 1:
+                    self.store.update(job['id'], goal_contract=dict(
+                        job['goal_contract'], completion_status='accepted'))
                 self.store.event('formal_acceptance_decided',
                                  '認証済みアプリセッションから成果物の正式受領が記録されました。',
                                  task['id'], job['id'], details=audit)
@@ -2222,6 +2279,11 @@ class Engine:
         from team_document_capabilities import require_plan
         require_plan(job,result)
 
+        if job.get('p0_contract_version') == 1:
+            from team_p0_contract import approved_plan
+            contract = approved_plan(job, result)
+            job = self.store.update(job['id'], goal_contract=contract)
+
         from team_code_test_contract import snapshot_files, validate_plan
         test_plan = validate_plan(result['code_test_plan']) if job.get('code_test_contract_version') else None
         existing = snapshot_files(job['project'], test_plan['existing_tests']) if test_plan and test_plan['existing_tests'] else {}
@@ -2233,6 +2295,8 @@ class Engine:
         for spec in result['tasks']:
 
             new = self.new_task(job, spec['title'], spec['instruction'], spec['role'], after)
+            if job.get('p0_contract_version') == 1:
+                self.store.update(new['id'], goal_links=list(spec['goal_links']), goal_id=job['id'])
 
             after = new['id']
 
@@ -2506,6 +2570,22 @@ class Engine:
 
             + validation_context
             + '\n\n元の依頼:\n' + job['goal']
+            + ('\n\nこの依頼の達成条件を、元の依頼を変えずにgoal_contractへ整理する。'
+               'primary_goalは利用者が達成したいこと、deliverablesは実際の完成物、'
+               'acceptance_criteriaは完成物で観測できる条件にする。'
+               '各tasksのgoal_linksには対応するdeliverablesまたはacceptance_criteriaの文面を正確に記す。'
+               '目的に結び付かない最適化・内部改修は計画へ入れない。'
+               if ctx.task['role'] == 'planner' and job.get('p0_contract_version') == 1 else '')
+            + ('\n\n承認済みの完成条件: '
+               + json.dumps(job.get('goal_contract') or {}, ensure_ascii=False)
+               + '\n今回作成または更新した完成物のプロジェクト相対パスをartifactsへ列挙する。'
+                 'まだ最終成果物がない中間工程は空配列にする。作成していないものを列挙しない。'
+               if ctx.task['role'] == 'builder' and job.get('p0_contract_version') == 1 else '')
+            + ('\n\n修正を要する指摘はblocking_reasonsへ記録し、requirementには承認済みの'
+               'deliverablesまたはacceptance_criteriaの文面を正確に記す。'
+               '緊急の安全問題は「安全」、直接の実行阻害は「実行阻害」と記す。'
+               'そこへ結び付かない改善提案はwarningsへ記録し、依頼を進める。'
+               if ctx.task['role'] == 'reviewer' and job.get('p0_contract_version') == 1 else '')
             + (CODE_TEST_PLAN_RULE if ctx.task['role'] == 'planner' and job.get('code_test_contract_version') else '')
             + ('\n\n利用者が依頼時に指定した検証コマンド（既存の操作承認・安全確認を通すこと）：\n'
                + '\n'.join(f'{i + 1}. {command}' for i, command in enumerate(job['validation_commands']))
@@ -2592,6 +2672,24 @@ class Engine:
 
         self._record_progress_warnings(task, result)
 
+        review_job = self.store.get(task['job_id'], 'job')
+        if task['role'] == 'reviewer' and review_job.get('p0_contract_version') == 1:
+            reasons = result.get('blocking_reasons') or []
+            allowed = (set((review_job.get('goal_contract') or {}).get('deliverables') or []) |
+                       set((review_job.get('goal_contract') or {}).get('acceptance_criteria') or []) |
+                       {'安全', '実行阻害'})
+            if reasons and any(row.get('requirement') not in allowed for row in reasons):
+                raise ProviderError('停止理由を承認済みの成果物・受入条件または安全・実行阻害へ対応付けてください。', 'format')
+            if result.get('status') == 'needs_changes' and not reasons:
+                checks = result.get('checks') or []
+                if result.get('stage_complete') is True and checks and all(
+                        isinstance(check, str) and check.startswith('参考：') for check in checks):
+                    result['warnings'] = list(result.get('warnings') or []) + checks
+                    result['status'] = 'done'
+                    self._record_progress_warnings(task, result)
+                else:
+                    raise ProviderError('修正指摘に必須条件・具体的な支障の対応がありません。', 'format')
+
         updates = result.get('context_updates', [])
 
         if not isinstance(updates,list) or len(updates)>20 or any(
@@ -2646,6 +2744,13 @@ class Engine:
                 if not all(isinstance(item.get(k), str) and item[k].strip() for k in ('title', 'instruction')):
 
                     raise ProviderError('計画に作業内容がありません。')
+
+            if self.store.get(task['job_id']).get('p0_contract_version') == 1:
+                from team_p0_contract import validate_plan as validate_p0_plan
+                try:
+                    validate_p0_plan(self.store.get(task['job_id'], 'job'), result)
+                except ValueError as exc:
+                    raise ProviderError(str(exc), 'format') from exc
 
             if self.store.get(task['job_id']).get('code_test_contract_version'):
                 from team_code_test_contract import snapshot_files, validate_plan
@@ -2704,6 +2809,18 @@ class Engine:
             if task['role'] == 'builder' and (self.store.get(task['job_id']).get('code_test_plan') or {}).get('required'):
                 if not isinstance(result.get('test_files'), list) or not isinstance(result.get('test_change_reason'), str):
                     raise ProviderError('テストファイルと変更理由の報告形式が不正です。')
+
+            if task['role'] == 'builder' and job_now.get('p0_contract_version') == 1:
+                from team_p0_contract import artifact_records
+                artifacts = result.get('artifacts', [])
+                try:
+                    artifact_records(job_now['project'], artifacts)
+                except (ValueError, OSError) as exc:
+                    result['status'] = 'needs_changes'
+                    result['summary'] = (result['summary'] + '\n完成物の確認: ' + str(exc))[:1800]
+                    result['blocking_reasons'] = list(result.get('blocking_reasons') or []) + [
+                        {'requirement': '完成物が依頼フォルダ内に存在する', 'impact': '成果物を確認できない'}]
+                result['artifacts'] = artifacts if isinstance(artifacts, list) else []
 
             # Legacy stored reports can omit the new field. New provider reports
             # must supply it through RESULT_SCHEMA, before this validation step.
@@ -2818,6 +2935,29 @@ class Engine:
                     self.store.update(job['id'],status='blocked')
                     self.store.event('deliverable_missing',str(exc),task['id'],job['id'])
                     return
+
+            if task['role'] == 'builder' and job.get('p0_contract_version') == 1 and result.get('status') == 'done':
+                from team_p0_contract import artifact_records
+                records = artifact_records(job['project'], result.get('artifacts') or [])
+                if records:
+                    existing = {row['path']: row for row in job.get('p0_artifacts') or []}
+                    existing.update({row['path']: row for row in records})
+                    job = self.store.update(job['id'], p0_artifacts=list(existing.values()))
+
+            if task['role'] == 'reviewer' and job.get('p0_contract_version') == 1 and result.get('status') == 'done':
+                last_review = not any(
+                    t['job_id'] == job['id'] and t.get('after') == task['id']
+                    and t['role'] == 'reviewer' and t['status'] == 'queued'
+                    for t in self.store.all('task'))
+                if last_review:
+                    from team_p0_contract import current_artifacts
+                    valid, issue = current_artifacts(job)
+                    if not valid:
+                        result = dict(result, status='needs_changes',
+                                      summary=(result['summary'] + '\n' + issue)[:1800],
+                                      checks=list(result.get('checks') or []) + [issue],
+                                      blocking_reasons=list(result.get('blocking_reasons') or []) + [
+                                          {'requirement': '現在の完成物が存在する', 'impact': issue}])
 
             self.store.update(task['id'], result=result, summary=result['summary'], status='succeeded', finished_at=now())
 
@@ -2946,6 +3086,17 @@ class Engine:
 
                     findings = [{'reviewer': t.get('agent_name', 'reviewer'), 'summary': t['result']['summary']}
                                 for t in reviews if t['result'].get('status') == 'needs_changes']
+                    pending_items = self._pending_acceptance_items(job['id'], reviews)
+                    if job.get('p0_contract_version') == 1:
+                        criteria = (job.get('goal_contract') or {}).get('acceptance_criteria') or []
+                        pending_items.append({'title': '完成物の起動と操作',
+                                              'note': '実際の完成物を起動・操作して確認してください。',
+                                              'checks': ['完成物が起動し、操作できる']})
+                        pending_items.append({'title': '依頼した機能',
+                                              'note': '実際の完成物で受入条件を確認してください。',
+                                              'checks': list(criteria)})
+                        contract = dict(job['goal_contract'], completion_status='awaiting_user_acceptance')
+                        self.store.update(job['id'], goal_contract=contract)
                     self.new_approval(task, 'completion', {'summary': summary, 'checks': checks,
 
                         'stage_checks': [{'task_id': t['id'], 'title': t['title'],
@@ -2962,7 +3113,7 @@ class Engine:
 
                         'review_findings': findings,
 
-                        'pending_items': self._pending_acceptance_items(job['id'], reviews)})
+                        'pending_items': pending_items})
 
             elif result['status'] == 'needs_changes':
                 # Keep confirmation read-only; insert a builder and re-confirmation
@@ -3152,10 +3303,18 @@ class Engine:
                 'skill_catalog_chars':len(shared_catalog(definition.name)), 'metric':'characters, not provider tokens'}
             self.store.update(task['id'], agent_run=ctx.agent_run)
             job_for_schema = self.store.get(task['job_id'], 'job')
-            schema = (PLAN_SCHEMA_TESTS if job_for_schema.get('code_test_contract_version') else PLAN_SCHEMA) \
-                if task['role'] == 'planner' else \
-                (RESULT_SCHEMA_TESTS if task['role'] == 'builder' and
-                 (job_for_schema.get('code_test_plan') or {}).get('required') else RESULT_SCHEMA)
+            if task['role'] == 'planner':
+                if job_for_schema.get('p0_contract_version') == 1:
+                    schema = PLAN_SCHEMA_P0_TESTS if job_for_schema.get('code_test_contract_version') else PLAN_SCHEMA_P0
+                else:
+                    schema = PLAN_SCHEMA_TESTS if job_for_schema.get('code_test_contract_version') else PLAN_SCHEMA
+            elif task['role'] == 'builder' and job_for_schema.get('p0_contract_version') == 1:
+                schema = (RESULT_SCHEMA_P0_BUILDER_TESTS if
+                          (job_for_schema.get('code_test_plan') or {}).get('required')
+                          else RESULT_SCHEMA_P0_BUILDER)
+            else:
+                schema = (RESULT_SCHEMA_TESTS if task['role'] == 'builder' and
+                          (job_for_schema.get('code_test_plan') or {}).get('required') else RESULT_SCHEMA)
             if task['role'] == 'planner':
                 ctx.check()
                 if not self._claim_g2_for_run(task['id'], task['attempt']):
@@ -3222,6 +3381,15 @@ class Engine:
 
             self._finish(task, result)
 
+            resumed_job = self.store.get(task['job_id'], 'job')
+            interruption = resumed_job.get('p0_interruption') or {}
+            if (resumed_job.get('p0_contract_version') == 1
+                    and interruption.get('resume_target') == task['id']
+                    and self.store.get(task['id'], 'task').get('status') == 'succeeded'
+                    and interruption.get('recovery_status') == 'retrying'):
+                self.store.update(resumed_job['id'], p0_interruption=dict(
+                    interruption, recovery_status='recovered', recovered_at=now()))
+
             self.sync_handoff(task['job_id'])
 
             conflicts = self.handoff.pending_conflicts(task['job_id'])
@@ -3235,6 +3403,7 @@ class Engine:
             with self.store.lock:
 
                 current = self.store.get(task['id'])
+                p0_development = self.store.get(task['job_id'], 'job').get('p0_contract_version') == 1
 
                 cancelled = isinstance(exc, Cancelled) or current['status'] == 'cancelled'
 
@@ -3271,7 +3440,7 @@ class Engine:
                 # 2026-10-12 (user approved, plan C): a Claude sign-in failure holds the task instead of failing it.
                 # Claude tasks stay queued until the sign-in changes (team_claude_auth); the user is notified once.
                 guard = getattr(self, 'claude_auth', None)
-                if (not cancelled and not recovery and guard is not None and task['profile'].get('adapter') == 'claude'
+                if (not p0_development and not cancelled and not recovery and guard is not None and task['profile'].get('adapter') == 'claude'
                         and guard.on_failure(exc)):
                     self.store.update(task['id'], status='queued', failure_code='claude_auth_wait',
                                       summary='Claude Code のログインが切れたため待機しています。ログインし直すか、長期の鍵を入れ直すと自動で再開します。')
@@ -3280,7 +3449,7 @@ class Engine:
                 # 2026-10-15: a GitHub Copilot sign-in failure is queued for a move to Claude (tick); when that is not
                 # allowed or Claude is not usable either, the tick stops it as before.
                 from team_recovery import COPILOT_AUTH
-                if (not cancelled and not recovery and task['profile'].get('adapter') == 'copilot'
+                if (not p0_development and not cancelled and not recovery and task['profile'].get('adapter') == 'copilot'
                         and COPILOT_AUTH.search(str(exc))):
                     self.store.update(task['id'], status='queued', failure_code='copilot_auth_wait',
                                       summary='GitHub Copilot のログインが切れたため、Claude への切り替えを確かめています。')
@@ -3288,7 +3457,7 @@ class Engine:
                     return
                 # 2026-10-08: a provider usage limit is waited out instead of failing the job (up to 3 automatic tries).
                 from team_recovery import usage_limit_retry_at
-                retry_at = None if cancelled or recovery else usage_limit_retry_at(exc, now())
+                retry_at = None if p0_development or cancelled or recovery else usage_limit_retry_at(exc, now())
                 if retry_at and current.get('quota_waits', 0) < 3:
                     waits = current.get('quota_waits', 0) + 1
                     when = time.strftime('%H:%M', time.localtime(retry_at))
@@ -3312,6 +3481,12 @@ class Engine:
                 if self.store.get(task['job_id'])['status'] != 'cancelled':
 
                     self.store.update(task['job_id'], status='interrupted' if cancelled else 'failed')
+
+                if p0_development and not cancelled:
+                    category = ('SAFETY_BLOCKED' if failure_code in
+                                ('reference_secret', 'egress_blocked', 'permission_denied', 'security')
+                                else 'MAINTENANCE_REQUIRED')
+                    self._hold_p0_task(task, failure_code, category)
 
                 self.store.event('task_error', str(exc)[:1800], task['id'], task['job_id'])
 
@@ -3424,7 +3599,18 @@ class Engine:
 
                     continue
 
-                if self.handoff.pending_conflicts(job['id']) and not task.get('conflict_review_for'):
+                from team_recovery import retry_local_read
+                try:
+                    conflicts = (retry_local_read(lambda: self.handoff.pending_conflicts(job['id']))
+                                 if job.get('p0_contract_version') == 1 else self.handoff.pending_conflicts(job['id']))
+                except Exception:
+                    if job.get('p0_contract_version') != 1:
+                        raise
+                    self.store.update(task['id'], status='blocked', failure_code='local_state_read',
+                                      summary='開発エンジンの状態確認が必要です。途中成果は保存されています。')
+                    self._hold_p0_task(task, 'local_state_read')
+                    continue
+                if conflicts and not task.get('conflict_review_for'):
 
                     continue
 
@@ -3435,11 +3621,16 @@ class Engine:
                 if task.get('retry_at') and now() < task['retry_at']:
 
                     # 2026-10-15: a Claude task waiting out a usage limit continues on Copilot when allowed.
-                    if task.get('failure_code') == 'usage_limit_wait':
+                    if task.get('failure_code') == 'usage_limit_wait' and job.get('p0_contract_version') != 1:
                         self._failover(task, job, 'usage_limit', task['retry_at'])
                     continue  # waiting for a provider usage limit to reset (or started on Copilot next tick)
 
                 if task.get('failure_code') == 'copilot_auth_wait' and task['profile'].get('adapter') == 'copilot':
+                    if job.get('p0_contract_version') == 1:
+                        self.store.update(task['id'], status='blocked', failure_code='copilot_auth',
+                                          summary='開発エンジンの認証確認が必要です。途中成果は保存されています。')
+                        self._hold_p0_task(task, 'copilot_auth')
+                        continue
                     if not self._failover(task, job, 'copilot_auth'):
                         # Neither provider can take it: stop, as before (the user accepted this, 2026-10-15).
                         self.store.update(task['id'], status='failed', failure_code='copilot_auth',
@@ -3453,6 +3644,11 @@ class Engine:
                 if guard is not None and task['profile'].get('adapter') == 'claude':
                     logged_in = self.claude_logged_in()
                     if not guard.available(logged_in):
+                        if job.get('p0_contract_version') == 1:
+                            self.store.update(task['id'], status='blocked', failure_code='claude_auth',
+                                              summary='開発エンジンの認証確認が必要です。途中成果は保存されています。')
+                            self._hold_p0_task(task, 'claude_auth')
+                            continue
                         if logged_in is False:
                             guard.on_failure('未ログイン')
                         if task.get('failure_code') != 'claude_auth_wait':
@@ -3538,6 +3734,8 @@ class Engine:
         acceptance screen. Open fix/re-review steps are cancelled; the findings stay visible, and nothing is marked passed."""
         with self.store.lock:
             job = self.store.get(job_id, 'job')
+            if job.get('p0_contract_version') == 1:
+                raise ValueError('この開発依頼は完成物と受入条件の確認が必要です。')
             if not self.config.get('document_review_relaxed', False):
                 raise ValueError('資料レビューの緩和は管理者設定で無効です。修正・再レビューを実施してください。')
             if not job.get('document_source'):
@@ -3749,6 +3947,8 @@ class Engine:
         waiting (or stops, for a Copilot sign-in) and the user is told once per job why it did not switch. The original
         profile comes back for tasks not yet started once it can run again (_restore_recovered_models)."""
         from team_config import FAILOVER_DATA_CLASSES, failover_profile
+        if job.get('p0_contract_version') == 1:
+            return False
         from team_security_templates import project_data_class
         source = task['profile'].get('adapter')
         if source not in self.PROVIDER_NAMES or task['id'] in self.active or task['status'] != 'queued':
@@ -3842,6 +4042,9 @@ class Engine:
                 continue
 
             job = self.store.get(task['job_id'], 'job')
+
+            if job.get('p0_contract_version') == 1:
+                continue
 
             if job['status'] in ('accepted', 'accepted_with_pending_checks', 'cancelled', 'interrupted'):
 
@@ -4014,6 +4217,10 @@ class Engine:
                 job_changes['handoff_scope'] = list(self.store.get(task['job_id'], 'job').get('handoff_scope', [])) + [
                     {'task_id': task_id, 'title': task['title'], 'note': str(note)[:4000], 'via': 'retry', 'at': now()}]
                 self.store.event('handoff_scope', '利用者が未実施として残す範囲を指定して再試行しました。', task_id, task['job_id'])
+            if task_job.get('p0_contract_version') == 1:
+                interruption = task_job.get('p0_interruption') or {}
+                if interruption.get('resume_target') == task_id:
+                    job_changes['p0_interruption'] = dict(interruption, recovery_status='retrying')
             self.store.update(task['job_id'], **job_changes)
 
             if task['role'] == 'planner':

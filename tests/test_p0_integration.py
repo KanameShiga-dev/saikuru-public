@@ -1,0 +1,97 @@
+"""Synthetic P0 path from approved plan through an actual local test and acceptance."""
+
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from team_config import default_config
+from team_engine import Context, Engine
+from team_p0_contract import initial
+from team_store import Store
+
+
+COMMAND = 'python -B -X utf8 -m unittest test_lookup'
+
+
+class P0IntegrationTests(unittest.TestCase):
+    def test_plan_to_artifact_to_user_acceptance(self):
+        temp = tempfile.TemporaryDirectory(prefix='saikuru-p0-synthetic-')
+        self.addCleanup(temp.cleanup)
+        folder = temp.name
+        root = Path(folder)
+        store = Store(root / 'runtime')
+        config = default_config()
+        config['approved_roots'] = [str(root)]
+        engine = Engine(store, config, {}, 'http://127.0.0.1:0')
+        engine.paused = True
+        self.addCleanup(store.db.close)
+        self.addCleanup(engine.handoff.close)
+        goal = 'Create a fictional lookup and show no result for an unknown ID'
+        job = store.put('job', {'id': 'fictional-p0-job', 'title': 'Fictional lookup',
+            'goal': goal, 'goal_contract': initial(goal), 'p0_contract_version': 1,
+            'project': str(root), 'status': 'awaiting_approval', 'auto_execute': False,
+            'validation_commands': [], 'code_test_contract_version': 1})
+        planner = engine.new_task(job, 'Plan', 'Plan fictional lookup', 'planner')
+        store.update(planner['id'], status='succeeded', result={'status': 'done'})
+        plan = {'summary': 'Create a fictional lookup', 'security_review_required': False,
+            'goal_contract': {'primary_goal': 'Search fictional items',
+                              'deliverables': ['lookup.py'],
+                              'acceptance_criteria': ['Unknown ID shows no result'],
+                              'non_goals': [], 'constraints': ['Fictional data only']},
+            'tasks': [{'title': 'Build fictional lookup', 'instruction': 'Build and test lookup',
+                       'role': 'builder', 'goal_links': ['lookup.py', 'Unknown ID shows no result']}],
+            'code_test_plan': {'required': True, 'reason': 'New code',
+                               'cases': ['Unknown ID shows no result'],
+                               'command': COMMAND, 'existing_tests': []}}
+        engine._expand_plan(planner, plan)
+        tasks = store.for_job('task', job['id'])
+        builder = next(task for task in tasks if task['role'] == 'builder')
+        reviews = [task for task in tasks if task['role'] == 'reviewer']
+        self.assertEqual(store.get(job['id'])['goal_contract']['original_request'], goal)
+        self.assertEqual(store.get(builder['id'])['goal_links'],
+                         ['lookup.py', 'Unknown ID shows no result'])
+
+        (root / 'lookup.py').write_text(
+            'def lookup(item_id):\n    return "No result" if item_id != "A001" else "Fictional item"\n',
+            encoding='utf-8')
+        (root / 'test_lookup.py').write_text(
+            'import unittest\nfrom lookup import lookup\n'
+            'class Check(unittest.TestCase):\n'
+            '    def test_unknown(self): self.assertEqual(lookup("X999"), "No result")\n',
+            encoding='utf-8')
+        run = subprocess.run(['python', '-B', '-X', 'utf8', '-m', 'unittest', 'test_lookup'],
+                             cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        context = Context.__new__(Context)
+        context.engine, context.task = engine, builder
+        context.command_result(COMMAND, run.returncode, run.stdout + run.stderr)
+        done = {'status': 'done', 'summary': 'Fictional lookup exists', 'checks': [],
+                'pending_checks': [], 'question': '', 'questions': [], 'context_updates': [],
+                'test_files': ['test_lookup.py'], 'test_change_reason': '',
+                'artifacts': ['lookup.py']}
+        engine._finish(builder, done)
+        self.assertEqual(store.get(builder['id'])['result']['status'], 'done')
+        review = {'status': 'done', 'summary': 'Synthetic review passed', 'checks': [],
+                  'pending_checks': [], 'question': '', 'questions': [],
+                  'context_updates': []}
+        for reviewer in reviews:
+            engine._finish(reviewer, dict(review))
+        job = store.get(job['id'])
+        self.assertEqual(job['status'], 'awaiting_acceptance')
+        approval = next(item for item in store.for_job('approval', job['id'])
+                        if item['kind'] == 'completion')
+        self.assertEqual(len(approval['payload']['pending_items']), 2)
+        with self.assertRaises(ValueError):
+            engine.accept_completion(approval['id'], '正式受領')
+        current_id = approval['id']
+        for _ in range(2):
+            response = engine.record_completion_evidence(
+                current_id, 0, 0, '合成成果物の操作を確認', True)
+            current_id = response['approval_id']
+        engine.acknowledge_completion_review(current_id, True)
+        self.assertEqual(engine.accept_completion(current_id, '正式受領')['status'], 'accepted')
+        self.assertEqual(store.get(job['id'])['goal_contract']['completion_status'], 'accepted')
+
+if __name__ == '__main__':
+    unittest.main()

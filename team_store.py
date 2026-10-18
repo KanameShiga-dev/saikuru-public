@@ -45,6 +45,19 @@ class Store:
             body = json.dumps(obj, ensure_ascii=False)
             if kind in ('job', 'task'):
                 previous = self.db.execute('SELECT body FROM objects WHERE id=?', (obj['id'],)).fetchone()
+                if kind == 'job' and previous:
+                    original = json.loads(previous[0])
+                    if original.get('p0_contract_version') == 1:
+                        if (obj.get('goal') != original.get('goal')
+                                or (obj.get('goal_contract') or {}).get('original_request') != original.get('goal')):
+                            raise ValueError('元の依頼は変更できません。要求変更は利用者の承認が必要です。')
+                        if original.get('status') not in ('planning', 'awaiting_approval'):
+                            fixed = ('primary_goal', 'deliverables', 'acceptance_criteria',
+                                     'non_goals', 'constraints')
+                            previous_contract = original.get('goal_contract') or {}
+                            next_contract = obj.get('goal_contract') or {}
+                            if any(next_contract.get(key) != previous_contract.get(key) for key in fixed):
+                                raise ValueError('承認済みの達成条件は変更できません。要求変更には利用者の承認が必要です。')
                 old = json.loads(previous[0]).get('status') if previous else None
                 status = obj.get('status')
                 if old != status:

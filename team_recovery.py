@@ -1,6 +1,8 @@
 """Local recovery guidance. Never execute commands supplied by a model report."""
 import json
+import hashlib
 import re
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -14,6 +16,37 @@ USAGE_LIMIT = re.compile(r"hit your [a-z0-9 -]*limit|usage limit|quota exceeded|
 COPILOT_AUTH = re.compile(r"not (?:logged|signed) in|copilot login|authentication (?:failed|required)|unauthori[sz]ed"
                           r"|\b401\b|re-?authenticate|(?:oauth )?token (?:has )?(?:expired|is invalid|invalid)", re.I)
 RESET_AT = re.compile(r'resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?', re.I)
+
+
+def retry_local_read(operation, max_retries=2):
+    """Retry only an idempotent local read on a transient SQLite lock."""
+    for attempt in range(max_retries + 1):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if attempt >= max_retries or not re.search(r'locked|busy', str(exc), re.I):
+                raise
+            time.sleep(.05 * (attempt + 1))
+
+
+def p0_interruption(task, previous, code, category='MAINTENANCE_REQUIRED'):
+    """Record bounded, non-sensitive failure metadata for resuming the same task."""
+    code = str(code or 'execution')[:80]
+    if category not in ('MAINTENANCE_REQUIRED', 'SAFETY_BLOCKED'):
+        category = 'MAINTENANCE_REQUIRED'
+    signature = hashlib.sha256(
+        (code + ':' + task.get('role', '') + ':' +
+         str((task.get('profile') or {}).get('adapter', ''))).encode()).hexdigest()[:20]
+    count = (int(previous.get('attempt_count', 0)) + 1
+             if isinstance(previous, dict) and previous.get('failure_signature') == signature else 1)
+    return {
+        'interrupted_task_id': task['id'], 'interruption_reason': code,
+        'recovery_status': 'safety_blocked' if category == 'SAFETY_BLOCKED' else 'maintenance_required',
+        'resume_target': task['id'], 'failure_signature': signature,
+        'attempt_count': count, 'last_failure': time.time(),
+        'error_category': category,
+        'next_action': '安全上の問題を確認する' if category == 'SAFETY_BLOCKED' else '保守担当が実行環境を確認する',
+    }
 
 
 def usage_limit_retry_at(message, now_ts=None):

@@ -75,6 +75,9 @@ class App:
         self.port = port
         self.origin = f'http://127.0.0.1:{port}'
         self.cookie = secrets.token_urlsafe(32)
+        # Removed from the process environment before worker CLIs are launched.
+        # Never return this capability through a browser state endpoint.
+        self.maintenance_token = os.environ.pop('SAIKURU_MAINTENANCE_TOKEN', '')
         self.engine = Engine(self.store, self.config, self.commands, self.origin)
         self.consultations = Consultations(self)
         self.archives = Archives(self.ledger, self.engine)
@@ -251,7 +254,10 @@ class App:
             self._ended_cache = fresh
             jobs_total = len(jobs)
             self._state_cache = (key, (jobs_total, shown, tasks, approvals))
-        return {'jobs': shown, 'tasks': tasks,
+        from team_p0_contract import progress as p0_progress
+        visible_jobs = [dict(job, p0_progress=p0_progress(job, tasks, approvals))
+                        if job.get('p0_contract_version') == 1 else job for job in shown]
+        return {'jobs': visible_jobs, 'tasks': tasks,
                 'approvals': approvals, 'events': self.store.events(),
                 'history': {'days': self.history_days(), 'hidden_jobs': jobs_total - len(shown)},
                 'config': self.config, 'providers': self.health, 'paused': self.engine.paused,
@@ -259,6 +265,42 @@ class App:
                 'usage': self.usage.snapshot(), 'cli_update': self.cli_update.snapshot(),
                 'claude_update': self.claude_update.snapshot(), 'copilot_update': self.copilot_update.snapshot(),
                 'notifications': self.notifications.snapshot()}
+
+    def public_state(self):
+        """Keep P0 maintenance diagnostics out of the end-user state feed."""
+        return self.redact_state(self.state())
+
+    @staticmethod
+    def redact_state(state):
+        exposed = dict(state)
+        exposed['approvals'] = [
+            (dict(approval, payload={'summary': approval.get('business_summary', ''), 'questions': []})
+             if approval.get('intended_role') == 'maintainer' else approval)
+            for approval in state['approvals']]
+        maintenance_tasks = {a['task_id'] for a in state['approvals']
+                             if a.get('intended_role') == 'maintainer'}
+        maintenance_tasks.update(job['p0_interruption'].get('interrupted_task_id')
+                                 for job in state['jobs']
+                                 if isinstance(job.get('p0_interruption'), dict)
+                                 and job['p0_interruption'].get('recovery_status') == 'maintenance_required')
+        exposed['tasks'] = [
+            ({'id': task['id'], 'job_id': task['job_id'], 'status': task['status'],
+              'role': task.get('role'), 'after': task.get('after'),
+              'title': '保守対応待ち',
+              'summary': '開発エンジンの確認が必要です。途中成果は保存されています。'}
+             if task['id'] in maintenance_tasks else task)
+            for task in state['tasks']]
+        exposed['jobs'] = [
+            (dict(job, p0_interruption={k: v for k, v in job['p0_interruption'].items()
+                                        if k not in ('failure_signature', 'interruption_reason')})
+             if job.get('p0_contract_version') == 1 and isinstance(job.get('p0_interruption'), dict) else job)
+            for job in state['jobs']]
+        maintenance_tasks.discard(None)
+        exposed['events'] = [
+            (dict(event, message='開発エンジンの確認が必要です。', details=None)
+             if event.get('task_id') in maintenance_tasks else event)
+            for event in state['events']]
+        return exposed
 
     def archive(self, query='', job_id='', limit=50, offset=0):
         """Finished work older than the screen's period: a summary list matching the text, or one job with its tasks."""
@@ -313,6 +355,11 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return hmac.compare_digest(actual, self.app.cookie)
 
+    def maintenance_authorized(self):
+        expected = getattr(self.app, 'maintenance_token', '')
+        supplied = self.headers.get('X-Saikuru-Maintenance', '')
+        return bool(expected and supplied and hmac.compare_digest(supplied, expected))
+
     def send(self, status, value, content_type='application/json; charset=utf-8', set_cookie=False):
         body = json.dumps(value, ensure_ascii=False).encode() if not isinstance(value, bytes) else value
         self.send_response(status)
@@ -366,6 +413,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/state':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
+                return self.send(200, self.app.public_state())
+            if path == '/api/maintenance/state':
+                if not self.maintenance_authorized():
+                    raise PermissionError('保守担当の認証が必要です。')
                 return self.send(200, self.app.state())
             if path == '/api/notifications':
                 if not self.authorized():
@@ -393,7 +444,21 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/tasks/detail':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
-                return self.send(200, self.app.task_detail(parse_qs(urlparse(self.path).query).get('id', [''])[0]))
+                detail_id = parse_qs(urlparse(self.path).query).get('id', [''])[0]
+                detail_task = self.app.store.get(detail_id, 'task')
+                detail_job = self.app.store.get(detail_task['job_id'], 'job')
+                maintenance_question = any(
+                    item.get('task_id') == detail_id and item.get('intended_role') == 'maintainer'
+                    for item in self.app.store.for_job('approval', detail_job['id']))
+                if (detail_job.get('p0_contract_version') == 1
+                        and (maintenance_question or (
+                            (detail_job.get('p0_interruption') or {}).get('interrupted_task_id') == detail_id
+                            and (detail_job.get('p0_interruption') or {}).get('recovery_status') == 'maintenance_required'))
+                        and not self.maintenance_authorized()):
+                    return self.send(200, {'id': detail_id, 'job_id': detail_job['id'],
+                                           'status': detail_task['status'],
+                                           'summary': '開発エンジンの確認が必要です。途中成果は保存されています。'})
+                return self.send(200, self.app.task_detail(detail_id))
             if path == '/api/jobs/evaluation':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -407,9 +472,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
                 query = parse_qs(urlparse(self.path).query)
-                return self.send(200, self.app.archive(query.get('q', [''])[0], query.get('id', [''])[0],
-                                                       int((query.get('limit') or ['50'])[0]),
-                                                       int((query.get('offset') or ['0'])[0])))
+                archived = self.app.archive(query.get('q', [''])[0], query.get('id', [''])[0],
+                                            int((query.get('limit') or ['50'])[0]),
+                                            int((query.get('offset') or ['0'])[0]))
+                if 'job' in archived and not self.maintenance_authorized():
+                    projected = self.app.redact_state({
+                        'jobs': [archived['job']], 'tasks': archived['tasks'],
+                        'approvals': archived['approvals'], 'events': []})
+                    archived = {'job': projected['jobs'][0], 'tasks': projected['tasks'],
+                                'approvals': projected['approvals']}
+                return self.send(200, archived)
             if path == '/api/ledger/consultation/models':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -700,6 +772,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/decide':
                 if type(body.get('allow')) is not bool:
                     raise ValueError('承認または拒否を選んでください。')
+                pending = self.app.store.get(body['id'], 'approval')
+                if pending.get('intended_role') == 'maintainer' and not self.maintenance_authorized():
+                    raise PermissionError('保守担当の認証が必要です。')
                 engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'),
                               body.get('review_checklist'))
                 result = {'ok': True}
@@ -730,6 +805,12 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/retry':
                 if body.get('checked_changes') is not True:
                     raise ValueError('既に行われた変更を確認してください。')
+                retry_task = self.app.store.get(body['id'], 'task')
+                retry_job = self.app.store.get(retry_task['job_id'], 'job')
+                if (retry_job.get('p0_contract_version') == 1
+                        and (retry_job.get('p0_interruption') or {}).get('recovery_status') == 'maintenance_required'
+                        and not self.maintenance_authorized()):
+                    raise PermissionError('保守担当の認証が必要です。')
                 engine.retry(body['id'], body.get('note', ''), body.get('handoff_allowed') is True)
                 result = {'ok': True}
             elif path == '/api/document/resume':
@@ -751,6 +832,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/conflicts/investigate':
                 result = engine.investigate_conflicts(body['id'])
             elif path == '/api/tasks/model':
+                model_task = self.app.store.get(body['id'], 'task')
+                if (self.app.store.get(model_task['job_id'], 'job').get('p0_contract_version') == 1
+                        and not self.maintenance_authorized()):
+                    raise PermissionError('保守担当の認証が必要です。')
                 profile = body.get('profile')
                 if not isinstance(profile, dict):
                     raise ValueError('切替先のモデルを選択してください。')

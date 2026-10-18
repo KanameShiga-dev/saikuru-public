@@ -2,6 +2,27 @@
 import re
 
 
+_TECHNICAL_QUESTION = re.compile(
+    r'(?i)(?:TEMP/TMP|\bTMPDIR\b|\bPython\s*\d|\bPID\b|\bport\s*\d|ポート\s*\d|'
+    r'サンドボックス|sandbox|環境変数|実行環境|プロセス|スタックトレース|'
+    r'依存パッケージ|モデル設定|Provider設定|承認Revision|ACL|フック設定|'
+    r'どの(?:コード|ファイル|Agent|モデル|Provider|バージョン).{0,16}(?:修正|変更|選択))')
+
+
+def decision_metadata(kind, payload):
+    """Conservative server-side role for a pending approval."""
+    summary = str(payload.get('summary') or '')[:300]
+    if kind in ('plan', 'completion'):
+        return 'ACCEPTANCE', 'end_user', summary or '計画または完成物を確認してください。'
+    if kind in ('ai_start', 'tool') or payload.get('reference_guard'):
+        return 'RISK', 'authorized_person', summary or 'AI利用または操作の範囲を確認してください。'
+    questions = payload.get('questions') or []
+    wording = '\n'.join(str(q.get('text') or '') for q in questions if isinstance(q, dict))
+    if _TECHNICAL_QUESTION.search(summary + '\n' + wording):
+        return 'MAINTENANCE', 'maintainer', '開発エンジンの確認が必要です。途中成果は保存されています。'
+    return 'BUSINESS', 'end_user', summary or '依頼内容を確認してください。'
+
+
 def legacy_questions(text):
     """Extract explicitly labelled choices, without deciding on the user's behalf."""
     headings = list(re.finditer(r'(?m)^\s*(\d+)[.．]\s+(.+)$', text))
