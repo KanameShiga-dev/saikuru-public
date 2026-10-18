@@ -232,7 +232,38 @@ function matchesInstructions(p,filter){
  if(filter==='claude_missing')return presence.claude===false;
  return !filter||presence.status===filter;
 }
+function renderIssueTable(){
+ let panel=$('development-issues');
+ if(!panel){panel=node('section');panel.id='development-issues';$('list').before(panel);}
+ panel.replaceChildren(node('h2','開発課題表'));
+ panel.append(node('p','課題の記録だけではAI作業や承認は開始しません。警告・改善は作業を止めずに管理します。'));
+ const filter=node('select');filter.setAttribute('aria-label','課題の状態で絞り込み');
+ for(const [value,label]of [['active','未解決'],['all','すべて'],['resolved','解決済み']]){const option=node('option',label);option.value=value;filter.append(option);}
+ panel.append(filter);
+ const add=node('button','課題を追加');add.type='button';panel.append(add);
+ const editor=node('div'),view=node('div');panel.append(editor,view);
+ const statusLabels={open:'未対応',in_progress:'対応中',resolved:'解決済み',deferred:'保留'};
+ function edit(issue={}){
+  editor.replaceChildren();const form=node('form');form.append(node('h3',issue.id?'課題を編集':'課題を登録'));
+  for(const [key,label,max]of [['project','対象プロジェクト',160],['title','課題名',240],['impact','目的・工程への影響',2000],['next_action','次の対応・完了条件',2000],['owner','担当',120]]){
+   const field=node('label',label),input=node(max>240?'textarea':'input');input.name=key;input.maxLength=max;input.value=issue[key]||(key==='project'?'采来':'');input.required=['project','title'].includes(key);field.append(input);form.append(field);
+  }
+  for(const [key,label,choices]of [['severity','進行への影響',{warning:'警告・改善（継続）',blocker:'進行を妨げる課題'}],['status','状態',statusLabels]]){
+   const field=node('label',label),input=node('select');input.name=key;for(const [value,text]of Object.entries(choices)){const option=node('option',text);option.value=value;input.append(option);}input.value=issue[key]||(key==='severity'?'warning':'open');field.append(input);form.append(field);
+  }
+  const save=node('button','課題を保存');save.type='submit';const cancel=node('button','閉じる');cancel.type='button';cancel.onclick=()=>editor.replaceChildren();const feedback=node('p');feedback.setAttribute('role','status');form.append(save,cancel,feedback);editor.append(form);
+  form.onsubmit=async event=>{event.preventDefault();save.disabled=true;try{await api('/api/ledger/issues/save',{...Object.fromEntries(new FormData(form)),...(issue.id?{id:issue.id,revision:issue.revision}:{})});await load();message('課題を保存しました。');}catch(error){feedback.textContent=error.message;save.disabled=false;}};
+ }
+ function draw(){
+  view.replaceChildren();const rows=(state.development_issues||[]).filter(i=>filter.value==='all'||(filter.value==='resolved'?i.status==='resolved':i.status!=='resolved'));
+  view.append(node('p',`${rows.length}件`));const table=node('table'),head=node('tr');
+  for(const text of ['対象','課題','区分','状態','工程への影響・次の対応','操作'])head.append(node('th',text));const thead=node('thead');thead.append(head);table.append(thead);const tbody=node('tbody');
+  for(const issue of rows){const row=node('tr',undefined,issue.severity==='warning'?'issue-warning':'issue-blocker');row.append(node('td',issue.project),node('td',issue.title),node('td',issue.severity==='warning'?'⚠ 警告・継続':'進行障害'),node('td',statusLabels[issue.status]));const detail=node('td');detail.append(node('p',issue.impact||'未記入'),node('p','次の対応：'+(issue.next_action||'未記入')),node('p','担当：'+(issue.owner||'未定')));row.append(detail);const action=node('td'),button=node('button','編集');button.type='button';button.onclick=()=>edit(issue);action.append(button);row.append(action);tbody.append(row);}table.append(tbody);view.append(table);
+ }
+ filter.onchange=draw;add.onclick=()=>edit();draw();
+}
 function render(){
+ renderIssueTable();
  const q=$('search').value.toLowerCase(),category=$('category').value,showRetired=$('show-retired').checked,instructionFilter=$('instruction-filter').value;
  const hidden=showRetired?0:state.projects.filter(isRetiredProject).length;
  const items=state.projects.filter(p=>(showRetired||!isRetiredProject(p))&&(!category||p.category===category)&&matchesInstructions(p,instructionFilter)&&JSON.stringify([p.name,p.path,p.purpose,p.observation.technology]).toLowerCase().includes(q));
@@ -240,6 +271,8 @@ function render(){
  items.sort(cmp[order]);
  $('count').textContent=`${items.length}件表示 ／ 台帳 ${state.projects.length}件（資料・候補を含む）${hidden?` ／ アーカイブ・削除 ${hidden}件は非表示`:''}`;
  $('list').replaceChildren();
+ const recorded=(state.warning_issues||[]).filter(i=>i.status==='open'&&(!q||JSON.stringify([i.job_title,i.summary]).toLowerCase().includes(q)));
+ if(recorded.length){const section=node('section',undefined,'progress-warning');section.append(node('h2',`記録済みの警告・改善課題 ${recorded.length}件`),node('p','現在の作業を止めずに記録した課題です。'));for(const issue of recorded){const row=node('details');row.append(node('summary',issue.summary),node('p','依頼：'+issue.job_title),node('p','状態：未対応 ／ 進行への影響：停止不要'));section.append(row);}$('list').append(section);}
 
  for(const p of items){
   const card=node('article',undefined,'project'),button=node('button',p.name);button.type='button';button.dataset.projectId=p.id;

@@ -175,37 +175,8 @@ class App:
                 self.usage.refresh_now('claude')
 
     def prepare_new_request(self, project):
-        """For jobs started from 依頼を追加: register in the ledger, then create missing harness files.
-
-        Uses the existing ledger/harness paths (no overwrite, no moves). Failures are reported, not raised,
-        so the request itself is not lost. Projects outside the ledger root are skipped.
-        """
-        from team_ledger import ROOT as ledger_root
-        notes = []
-        try:
-            path = Path(project).resolve()
-            if (canonical(path) not in [canonical(p) for p in self.config['approved_roots']]
-                    or not path.is_dir() or not path.is_relative_to(ledger_root) or path == ledger_root):
-                return ['台帳登録・ハーネスのコンバートは対象外です（設定された台帳ルート以下の登録済みプロジェクトのみ）。']
-            item = self.ledger.add({'path': str(path)})
-            notes.append('台帳に登録しました。')
-        except (OSError, ValueError, RuntimeError) as exc:
-            return [f'台帳登録に失敗しました: {exc}']
-        try:
-            preview = self.harnesses.preview({'id': item['id']})
-            create = [row for row in preview['files'] if row['state'] == 'create']
-            if not create:
-                notes.append('ハーネス資料は既にそろっています（上書きなし）。')
-            else:
-                result = self.harnesses.apply({'token': preview['token'], 'confirmed': True,
-                    'confirmed_project': preview['project']['path'], 'moves': [], 'directories': [],
-                    'files': [{'path': row['path'], 'content': row['content']} for row in create]})
-                notes.append(f"ハーネスのコンバートで{len(result['created'])}件を作成しました（既存{len(result['skipped_existing'])}件は上書きなし）。")
-            if preview['conflicts']:
-                notes.append('作成しなかった衝突: ' + '、'.join(preview['conflicts'][:5]))
-        except (OSError, ValueError, RuntimeError) as exc:
-            notes.append(f'ハーネスのコンバートに失敗しました: {exc}')
-        return notes
+        """Job registration must be side-effect-free; ledger/harness changes use their separate workflows."""
+        return ['台帳登録・ハーネス作成はジョブ登録から分離しました。必要な場合は対象と差分を確認する専用操作を利用してください。']
 
     def save_config(self, config):
         validate_config(config)
@@ -465,7 +436,18 @@ class Handler(BaseHTTPRequestHandler):
             if path in ('/api/ledger', '/api/ledger/export'):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
-                return self.send(200, self.app.ledger.snapshot(self.app.config['approved_roots'], instruction_checks=True))
+                snapshot = self.app.ledger.snapshot(self.app.config['approved_roots'], instruction_checks=True)
+                # Existing persisted job records are the source of ledger warning issues.
+                issues = []
+                for job in self.app.store.all('job'):
+                    for issue in job.get('warning_issues') or []:
+                        issues.append(dict(issue, project=job.get('project', ''), job_title=job.get('title', '')))
+                snapshot['warning_issues'] = issues
+                snapshot['development_issues'] = self.app.ledger.issues()
+                for project in snapshot['projects']:
+                    project['warning_issues'] = [i for i in issues
+                                                if canonical(i['project']) == canonical(project['path'])]
+                return self.send(200, snapshot)
             if path == '/api/ledger/preview-status':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -618,6 +600,8 @@ class Handler(BaseHTTPRequestHandler):
                 result['authenticated'] = self.app.health.get('claude', {}).get('authenticated')
             elif path == '/api/ledger/update':
                 result = self.app.ledger.update(body)
+            elif path == '/api/ledger/issues/save':
+                result = self.app.ledger.save_issue(body)
             elif path == '/api/ledger/add':
                 result = self.app.ledger.add(body)
             elif path == '/api/ledger/scan':
@@ -638,7 +622,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.app.moves.start(body)
             elif path == '/api/jobs':
                 if body.get('consent') is not True:
-                    raise ValueError('AIへの送信と作業範囲の確認が必要です。')
+                    raise ValueError('ジョブ登録内容の確認が必要です。登録だけではAIは起動しません。')
                 if not isinstance(body.get('title'),str) or not isinstance(body.get('goal'),str) or not body['title'].strip() or not body['goal'].strip() or len(body['goal'])>16000:
                     raise ValueError('依頼名と内容を入力してください（内容は16,000文字まで）。')
                 self.app.attachments.select(body.get('attachment_ids',[]))
@@ -689,26 +673,25 @@ class Handler(BaseHTTPRequestHandler):
                 runs = [('off', '（トークン削減 OFF）'), ('on', '（トークン削減 ON）')] if compare else [(token_reduction, '')]
                 comparison_id = secrets.token_hex(16) if compare else None
                 created = []
-                for side, suffix in runs:
-                    title = str(body.get('title', ''))
-                    job = engine.create_job((title[:160 - len(suffix)] + suffix) if suffix else title, goal,
-                                            str(body.get('project', '')), body.get('auto_execute') is True,
-                                            attachment_ids=body.get('attachment_ids', []),
-                                            skill_mode=str(body.get('skill_mode') or 'auto'), skill_ids=body.get('skill_ids', []),
-                                            evaluation_mode=body.get('evaluation_mode') or None,
-                                            evaluation_confirmed=body.get('evaluation_confirmed') is True,
-                                            role_profiles=role_profiles, token_reduction=side, comparison_id=comparison_id,
-                                            route=route, light_scope_file=body.get('light_scope_file'),
-                                            light_acceptance=body.get('light_acceptance'),
-                                            validation_commands=validation_commands,
-                                            **document)
-                    self.app.store.event('new_request_harness', ' '.join(prepared), job_id=job['id'])
-                    if found['confirm']:
-                        from team_audit import record as audit
-                        self.app.store.event('input_guard', '利用者が確認して送信: ' + '、'.join(found['confirm']), job_id=job['id'])
-                        audit(job['project'], {'kind': 'input_guard', 'job_id': job['id'], 'categories': found['confirm'],
-                                               'outcome': 'sent_after_confirmation'})
-                    created.append(job)
+                with self.app.store.atomic():
+                    for side, suffix in runs:
+                        title = str(body.get('title', ''))
+                        job = engine.create_job((title[:160 - len(suffix)] + suffix) if suffix else title, goal,
+                                                str(body.get('project', '')), body.get('auto_execute') is True,
+                                                attachment_ids=body.get('attachment_ids', []),
+                                                skill_mode=str(body.get('skill_mode') or 'auto'), skill_ids=body.get('skill_ids', []),
+                                                evaluation_mode=body.get('evaluation_mode') or None,
+                                                evaluation_confirmed=body.get('evaluation_confirmed') is True,
+                                                role_profiles=role_profiles, token_reduction=side, comparison_id=comparison_id,
+                                                route=route, light_scope_file=body.get('light_scope_file'),
+                                                light_acceptance=body.get('light_acceptance'),
+                                                validation_commands=validation_commands,
+                                                registration_actor='authenticated_local_app_session',
+                                                **document)
+                        self.app.store.event('new_request_harness', ' '.join(prepared), job_id=job['id'])
+                        if found['confirm']:
+                            self.app.store.event('input_guard', '利用者が確認して送信: ' + '、'.join(found['confirm']), job_id=job['id'])
+                        created.append(job)
                 result = dict(created[0], prepared=prepared, comparison=[j['id'] for j in created] if compare else None)
             elif path == '/api/jobs/artifact-url':
                 result = engine.record_artifact_url(str(body.get('id', '')), str(body.get('url', '')), str(body.get('note', '')))
@@ -720,6 +703,18 @@ class Handler(BaseHTTPRequestHandler):
                 engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'),
                               body.get('review_checklist'))
                 result = {'ok': True}
+            elif path == '/api/jobs/formal-acceptance':
+                result = engine.accept_completion(str(body.get('approval_id', '')),
+                                                  body.get('confirmation'), body.get('note', ''),
+                                                  actor='authenticated_local_app_session')
+            elif path == '/api/jobs/review-confirmation':
+                result = engine.acknowledge_completion_review(str(body.get('approval_id', '')),
+                                                              body.get('confirmed'),
+                                                              actor='authenticated_local_app_session')
+            elif path == '/api/jobs/reconfirm-review':
+                result = engine.reissue_completion_review(str(body.get('approval_id', '')),
+                                                          body.get('confirmed'),
+                                                          actor='authenticated_local_app_session')
             elif path == '/api/completion/evidence':
                 result = engine.record_completion_evidence(
                     str(body.get('approval_id', '')), body.get('item_index'),

@@ -11,6 +11,8 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from claude_hook_settings import build_egress_hook_settings
+
 
 class Cancelled(Exception):
     pass
@@ -20,6 +22,24 @@ class ProviderError(Exception):
     def __init__(self, message, code='provider'):
         super().__init__(message)
         self.code = code
+
+
+def _set_scoped_test_temp(ctx, env):
+    job = ctx.engine.store.get(ctx.task['job_id'], 'job')
+    if ctx.task.get('role') != 'builder':
+        return
+    project_root = Path(ctx.project).resolve()
+    test_temp = project_root / '.local' / 'test-tmp'
+    is_junction = getattr(test_temp, 'is_junction', lambda: False)
+    if (test_temp.is_symlink() or is_junction() or not test_temp.is_dir()
+            or not test_temp.resolve().is_relative_to(project_root)):
+        raise ProviderError('指定テストの一時領域が許可範囲内にありません。テストは開始していません。',
+                            'test_temp_scope')
+    # Scope TEMP/TMP to the registered project for this Claude builder process and
+    # its test child process. This does not change the Windows or user environment.
+    env['TEMP'] = str(test_temp.resolve())
+    env['TMP'] = str(test_temp.resolve())
+    env['TMPDIR'] = str(test_temp.resolve())
 
 
 class Process:
@@ -95,13 +115,22 @@ def decode_result(text):
 
 class CodexAdapter:
     def run(self, ctx, prompt, schema):
+        from team_egress_guard import require_safe_egress
+        require_safe_egress({'prompt': prompt, 'agent_instructions': ctx.agent_system_instructions,
+                             'agent_description': ctx.agent_definition.description}, 'codex')
         profile = ctx.task['profile']
         command = ctx.command + ['app-server', '--listen', 'stdio://',
                                  '-c', 'service_tier="default"', '--disable', 'fast_mode',
                                  '--disable', 'multi_agent', '--disable', 'multi_agent_v2',
                                  '-c', 'model_reasoning_effort="' + profile['effort'] + '"']
         if not ctx.engine.config.get('computer_use_allowed', False):
-            command += ['--disable', 'computer_use']
+            # The desktop user's browser MCP/notify executable may be running
+            # and locked. It is not part of a non-GUI project worker's runtime.
+            # Override only this child; retain its existing Windows sandbox.
+            command += ['--disable', 'computer_use',
+                        '-c', 'mcp_servers.node_repl.enabled=false',
+                        '-c', 'mcp_servers.node_repl.command=' + json.dumps(sys.executable),
+                        '-c', 'notify=[]']
         if getattr(ctx, 'text_only', False):
             command += ['--disable', 'shell_tool', '--disable', 'unified_exec',
                         '-c', 'web_search="disabled"', '-c', 'mcp_servers={}',
@@ -221,6 +250,9 @@ class CodexAdapter:
 
 class ClaudeAdapter:
     def run(self, ctx, prompt, schema):
+        from team_egress_guard import require_safe_egress
+        require_safe_egress({'prompt': prompt, 'agent_instructions': ctx.agent_system_instructions,
+                             'agent_description': ctx.agent_definition.description}, 'claude')
         profile = ctx.task['profile']
         # 2026-10-12 (plan A): with the long-lived token stored by the user, the regular login is not checked; the
         # token goes to this CLI process only (team_claude_auth). A token that no longer works fails the run with a
@@ -266,19 +298,31 @@ class ClaudeAdapter:
         env['AGENT_TEAM_RUN_TOKEN'] = ctx.token
         env['AGENT_TEAM_ENDPOINT'] = ctx.endpoint
         env['AGENT_TEAM_TASK'] = ctx.task['id']
+        _set_scoped_test_temp(ctx, env)
         if stored_token:
             # An API key in the environment would take precedence over the token (Claude Code's documented order).
             env.pop('ANTHROPIC_API_KEY', None)
             env = guard.env(env)
         hook = Path(__file__).with_name('approval_hook.py')
-        settings = {'hooks': {'PreToolUse': [{'matcher': '*', 'hooks': [
+        result_hook = Path(__file__).with_name('result_hook.py')
+        egress_settings = build_egress_hook_settings(
+            sys.executable, [str(result_hook)], [str(result_hook)],
+            [str(Path(__file__).with_name('egress_batch_hook.py'))])
+        settings = egress_settings
+        settings['hooks']['PreToolUse'] = [{'matcher': '*', 'hooks': [
             {'type': 'command', 'command': sys.executable, 'args': [str(hook)],
-             'timeout': ctx.approval_timeout + 30}]}],
-            # 2026-10-09 Bash results (exit code + output) go to 采来 as evidence for the reviewers. A command that
-            # exits non-zero fires PostToolUseFailure instead of PostToolUse, so both are registered.
-            **{event: [{'matcher': 'Bash', 'hooks': [
-                {'type': 'command', 'command': sys.executable, 'args': [str(Path(__file__).with_name('result_hook.py'))],
-                 'timeout': 40}]}] for event in ('PostToolUse', 'PostToolUseFailure')}}}
+             'timeout': ctx.approval_timeout + 30}]}]
+        try:
+            from claude_hook_settings import validate_egress_hook_settings
+            validate_egress_hook_settings(settings)
+            missing_hook_scripts = [path for path in
+                (hook, result_hook, Path(__file__).with_name('egress_batch_hook.py'))
+                if not path.is_file()]
+            if missing_hook_scripts:
+                raise ValueError('egress_hook_script_missing')
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ProviderError('Claude Codeの送信ガード設定を確認できないため、モデル起動を停止しました。',
+                                'claude_hooks') from exc
         definition = ctx.agent_definition
         # Explicit CLI agent definition takes precedence over project-local customizations.
         # Only prompt/tools/description are transferred; hooks/MCP/permission overrides are not.
@@ -611,6 +655,8 @@ class CopilotAdapter:
         baseline: (credits, premium) already recorded for this session. A resumed session may report totals that
         include the earlier run; a value not below the baseline is treated as such a total and only the increase
         is recorded, a smaller value as the resumed run's own use."""
+        from team_egress_guard import require_safe_egress
+        require_safe_egress(text, 'copilot')
         process = None
         final, credits, premium = '', None, None
         self._spent = (None, None)
@@ -781,6 +827,8 @@ class GeminiAdapter:
         (home / '.gemini' / 'policies' / 'agent-team.toml').write_text(rules, encoding='utf-8')
 
     def _call(self, ctx, model, text, cwd, env, repair=False):
+        from team_egress_guard import require_safe_egress
+        require_safe_egress(text, 'gemini')
         command = ctx.command + ['-p', '標準入力の指示に従って回答してください。', '-m', model, '-o', 'json', '--skip-trust']
         process, out = None, []
         try:

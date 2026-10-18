@@ -13,6 +13,7 @@ import uuid
 def screen_model_read(value):
     """Keep detected restricted content out of project-read results sent to a model."""
     from team_dlp import scan_input
+    from team_egress_guard import findings, sanitize_tool_output
     def content_only(item):
         if isinstance(item, dict):
             return {key: content_only(part) for key, part in item.items()
@@ -21,10 +22,19 @@ def screen_model_read(value):
             return [content_only(part) for part in item]
         return item
 
-    found = scan_input(json.dumps(content_only(value), ensure_ascii=False))
-    if found['block'] or found['confirm']:
+    scanned = content_only(value)
+    # Preserve the established DLP policy as well as the new path/egress checks.
+    # A policy classification that cannot be represented in this value must fail closed.
+    dlp = scan_input(json.dumps(scanned, ensure_ascii=False))
+    if dlp.get('block') or dlp.get('confirm'):
         raise ValueError('読み取り結果に保護対象の情報が含まれるためモデルへ渡せません。')
-    return value
+    clean, labels, _changed = sanitize_tool_output(scanned)
+    if labels and any(label not in ('user_profile_path', 'home_path', 'user_profile_variable') for label in labels):
+        raise ValueError('読み取り結果に保護対象の情報が含まれるためモデルへ渡せません。')
+    if findings(clean):
+        raise ValueError('読み取り結果を送信前に安全と確認できないためモデルへ渡せません。')
+    # Only user-profile components are safely replaceable in a source excerpt; never return raw values.
+    return clean
 
 def receipt(root, path, start, count, reused=False):
     stat = path.stat()
@@ -82,7 +92,7 @@ def bootstrap(root, text, previous=None):
         report = {'status':'unavailable', 'files':[], 'evidence':[], 'errors':['保護対象の情報を含むため調査結果を渡せません。'], 'snippets':[]}
     return report
 
-BLOCKED = {'.git', '.env', '.ssh', '.aws', '.azure', '.codex', '.claude', 'node_modules', '__pycache__',
+BLOCKED = {'.git', '.env', '.ssh', '.aws', '.azure', '.codex', '.claude', '.local', 'node_modules', '__pycache__',
            'data', 'backups', 'logs', 'recordings', 'records', 'profiles', 'certs',
            'engines', '.venv', '.offline_stage', 'credentials', 'secrets', 'dist', 'build'}
 TEXT = {'.py', '.js', '.ts', '.tsx', '.jsx', '.html', '.css', '.md', '.json', '.toml',

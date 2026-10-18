@@ -236,4 +236,11 @@ def provider_input(ctx, prompt, provider):
         blocks = [{'type': 'text', 'text': prompt + RULE + labels}] + attachments.content(ids, provider)
     if images:
         blocks += [{'type': 'text', 'text': REFERENCE_IMAGE_RULE}] + [image_block(encoded, provider) for encoded in images]
+    # The text is checked at the final boundary before it is handed to an external model.
+    # Image pixels are not OCR-screened here; callers must not treat this as image DLP.
+    from team_egress_guard import require_safe_egress
+    text_blocks = [block.get('text', '') for block in blocks if isinstance(block, dict) and block.get('type') == 'text']
+    require_safe_egress({'agent_instructions': getattr(ctx, 'agent_system_instructions', ''),
+                         'agent_description': getattr(getattr(ctx, 'agent_definition', None), 'description', ''),
+                         'text_blocks': text_blocks}, 'provider_input')
     return blocks

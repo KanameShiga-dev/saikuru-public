@@ -137,6 +137,58 @@ class Ledger:
             self.db.backup(dest)
         return name
 
+    def issues(self):
+        with self.lock:
+            path = self.directory / 'development-issues.json'
+            if not path.exists():
+                return []
+            return json.loads(path.read_text(encoding='utf-8'))
+
+    def save_issue(self, body):
+        fields = {'project': 160, 'title': 240, 'impact': 2000,
+                  'next_action': 2000, 'owner': 120}
+        item = {}
+        for key, limit in fields.items():
+            value = body.get(key, '')
+            if not isinstance(value, str) or len(value) > limit:
+                raise ValueError('課題の入力形式または文字数を確認してください。')
+            item[key] = value.strip()
+        if not item['title'] or not item['project']:
+            raise ValueError('対象プロジェクトと課題名は必須です。')
+        for key, choices, default in (
+            ('severity', ('blocker', 'warning'), 'warning'),
+            ('status', ('open', 'in_progress', 'resolved', 'deferred'), 'open'),
+        ):
+            item[key] = body.get(key, default)
+            if item[key] not in choices:
+                raise ValueError('課題の区分または状態が不正です。')
+        with self.lock:
+            items = self.issues()
+            issue_id = body.get('id')
+            old = next((i for i in items if i['id'] == issue_id), None)
+            if issue_id and old is None:
+                raise ValueError('課題が見つかりません。')
+            if old and body.get('revision') != old['revision']:
+                raise ValueError('課題が更新されています。再読込して確認してください。')
+            at = stamp()
+            item.update(id=old['id'] if old else hashlib.sha256(os.urandom(32)).hexdigest()[:24],
+                        revision=old['revision'] + 1 if old else 1,
+                        created_at=old['created_at'] if old else at, updated_at=at,
+                        history=(old.get('history', []) + [{k: v for k, v in old.items() if k != 'history'}]) if old else [])
+            items = [item if i['id'] == item['id'] else i for i in items] if old else items + [item]
+            path = self.directory / 'development-issues.json'
+            temp = self.directory / 'development-issues.json.tmp'
+            try:
+                with temp.open('w', encoding='utf-8') as stream:
+                    json.dump(items, stream, ensure_ascii=False, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp, path)
+            finally:
+                if temp.exists():
+                    temp.unlink()
+            return item
+
     def snapshot(self, approved=None, instruction_checks=False):
         with self.lock:
             projects = [json.loads(row[0]) for row in self.db.execute('SELECT body FROM projects ORDER BY path COLLATE NOCASE')]

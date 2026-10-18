@@ -37,10 +37,10 @@ def _verification(job, builder):
         reason = 'コード変更なし、またはテスト対象外（計画の理由を参照）' if plan and not plan.get('required') \
             else '検証コマンドが指定されていません'
         return {'id': 'CQA-03', 'state': INCONCLUSIVE, 'detail': reason, 'commands': 0}
-    issues = gate_findings(listed, builder)
-    state = FAILED if issues else PASSED
+    issues = gate_findings(listed, builder, job=job, project=job.get('project'))
+    state = (INVALIDATED if any('証跡が失効' in issue for issue in issues) else FAILED) if issues else PASSED
     return {'id': 'CQA-03', 'state': state, 'commands': len(listed),
-            'detail': ' '.join(issues) if issues else '指定された検証コマンドがすべて終了コード0（直前の制作工程）'}
+            'detail': ' '.join(issues) if issues else '指定された検証コマンドの成功と現行版との一致を確認'}
 
 
 def _tests(job, builder):

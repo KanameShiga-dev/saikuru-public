@@ -51,13 +51,31 @@ def main():
     try:
         sys.stdout.reconfigure(encoding='utf-8')
         data = json.load(sys.stdin)
+        event = data.get('hook_event_name')
+        response = data.get('tool_response') if event == 'PostToolUse' else data.get('error')
+        from team_egress_guard import sanitize_tool_output
+        clean_response, _labels, changed = sanitize_tool_output(response)
+
+        # PostToolUse can replace a result before the next provider request. Keep the
+        # same object shape; PostToolBatch is the fail-closed fallback if replacement fails.
+        if event == 'PostToolUse' and changed and isinstance(response, dict):
+            print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse',
+                                                     'updatedToolOutput': clean_response}}, ensure_ascii=False))
+
         if data.get('tool_name') != 'Bash':
             return
         exit_code, output, timed_out = result_of(data)
+        output, _output_labels, _output_changed = sanitize_tool_output(output)
+        if not isinstance(output, str):
+            output = '[EGRESS_BLOCKED: protected output withheld]'
         from team_security_audit import mask
         output = mask(output)
+        command = (data.get('tool_input') or {}).get('command', '')
+        safe_command, _command_labels, _command_changed = sanitize_tool_output(command)
+        if isinstance(safe_command, str) and safe_command.startswith('[EGRESS_BLOCKED:'):
+            safe_command = '[sensitive command withheld]'
         payload = json.dumps({'task_id': os.environ['AGENT_TEAM_TASK'], 'tool': 'Bash',
-                              'command': (data.get('tool_input') or {}).get('command', ''),
+                              'command': safe_command,
                               'exit_code': exit_code, 'output': output[-20000:], 'timed_out': timed_out}).encode()
         request = urllib.request.Request(os.environ['AGENT_TEAM_ENDPOINT'] + '/worker/tool-result', data=payload,
                                          headers={'Content-Type': 'application/json',

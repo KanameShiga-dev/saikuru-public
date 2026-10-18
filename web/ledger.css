@@ -51,3 +51,15 @@ main{max-width:1440px}
 .skill-picker legend{font-weight:600;padding:0 4px}
 .skill-picker-list{display:grid;gap:4px;max-height:220px;overflow:auto;margin-top:6px}
 .skill-picker-item{align-items:baseline}
+
+/* Warning text and icon accompany color; it is not an approval request. */
+.progress-warning{background:#fff3cd;color:#664d03;border:2px solid #b58100;border-radius:8px;padding:10px;margin:8px 0;text-align:left}.progress-warning p{margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}.progress-warning summary{cursor:pointer}
+.issue-warning { background: #fff3cd; color: #664d03; }
+.issue-blocker { background: #fbe9e7; color: #70251b; }
+#development-issues { margin: 16px 0; padding: 16px; border: 1px solid #bacbc5; border-radius: 10px; }
+#development-issues table { width: 100%; border-collapse: collapse; }
+#development-issues th, #development-issues td { border: 1px solid #bacbc5; padding: 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+#development-issues > div { overflow-x: auto; }
+#development-issues form { max-width: 800px; padding: 12px; }
+#development-issues form label { display: block; margin: 8px 0; }
+#development-issues form input, #development-issues form textarea, #development-issues form select { display: block; width: 100%; }

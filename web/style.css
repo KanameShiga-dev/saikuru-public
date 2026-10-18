@@ -135,3 +135,6 @@ select{max-width:100%;text-overflow:ellipsis}
 .review-check-unchecked strong{color:var(--red)}
 .review-check-advice strong{color:var(--muted)}
 .review-checklist label:not(.check){display:grid;gap:4px;margin-top:10px}
+
+/* Warning text and icon accompany color; it is not an approval request. */
+.progress-warning{background:#fff3cd;color:#664d03;border:2px solid #b58100;border-radius:8px;padding:10px;margin:8px 0;text-align:left}.progress-warning p{margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}.progress-warning summary{cursor:pointer}

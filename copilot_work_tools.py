@@ -206,6 +206,10 @@ class Server:
             result = {'content': [{'type': 'text', 'text': '拒否: ' + str(exc)}], 'isError': True}
         except Exception:
             result = {'content': [{'type': 'text', 'text': '拒否: 対象外のパス・操作、または上限です。'}], 'isError': True}
+        # Tool results are returned to Copilot. Apply the same last-boundary output
+        # filtering used for Claude, including read, command, and denial responses.
+        from team_egress_guard import sanitize_tool_output
+        result, _labels, _changed = sanitize_tool_output(result)
         self.send({'jsonrpc': '2.0', 'id': request_id, 'result': result})
 
     def serve(self, stream):

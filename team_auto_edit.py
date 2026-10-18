@@ -17,6 +17,58 @@ PROTECTED = {'.git', '.codex', '.claude', '.ssh', 'node_modules', '.venv', 'venv
              'config.ts', 'conftest.py'}
 
 
+def approved_scope_edit(ctx, target):
+    """Recognize the explicit scope contract; unknown formats remain manual.
+
+    Approval is bound to the actual ancestor planner, never any older plan.
+    This grants ordinary source/document saves only, not commands or deletion.
+    """
+    if not ctx.writable or ctx.task.get('role') != 'builder':
+        return False
+    store = ctx.engine.store
+    job = store.get(ctx.task['job_id'], 'job')
+    if job.get('status') in ('cancelled', 'interrupted', 'failed'):
+        return False
+    task, seen = ctx.task, set()
+    while task.get('role') != 'planner':
+        if task['id'] in seen or not task.get('after'):
+            return False
+        seen.add(task['id'])
+        task = store.get(task['after'], 'task')
+        if task.get('job_id') != job['id']:
+            return False
+    plans = [a for a in store.all('approval') if a.get('job_id') == job['id']
+             and a.get('task_id') == task['id'] and a.get('kind') == 'plan']
+    if len(plans) != 1 or plans[0].get('status') != 'approved':
+        return False
+    root = Path(ctx.project).resolve()
+    try:
+        text = (root / 'SCOPE.md').read_text(encoding='utf-8-sig')
+        roots = [line[6:].strip() for line in text.splitlines() if line.startswith('Root: ')]
+        allowed = [line.split(':', 1)[1].strip() for line in text.splitlines()
+                   if line.startswith('Allowed after human G3 approval: ')]
+        if len(roots) != 1 or Path(roots[0]).resolve() != root or len(allowed) != 1:
+            return False
+        relative = target.resolve().relative_to(root)
+        if target.is_symlink() or any((root.joinpath(*relative.parts[:n])).is_symlink()
+                                     for n in range(1, len(relative.parts) + 1)):
+            return False
+        protected = PROTECTED | {'scope.md', 'command_allowlist.md', 'security_policy.md',
+                                 'data_classification.md', 'tool_policy.yaml', 'audit'}
+        if any(p.casefold() in protected or p.casefold().startswith('.env') for p in relative.parts):
+            return False
+        if target.suffix.lower() not in SOURCE_SUFFIXES:
+            return False
+        # Only explicit conventional directories, no prose-based wildcard grants.
+        grants = {value.strip() for value in allowed[0].split(',')}
+        rel = relative.as_posix()
+        return any(grant in grants and rel.startswith(grant[:-2])
+                   for grant in ('app/**', 'tests/**', 'docs/**', 'data/**', 'evidence/**', '.local/test-tmp/**')) or (
+                       rel == 'README.md' and 'README.md' in grants)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def auto_edit_reason(ctx, payload):
     if (payload.get('source') != 'codex'
             or payload.get('operation') != 'item/fileChange/requestApproval'

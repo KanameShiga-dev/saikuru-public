@@ -23,7 +23,9 @@ SECRET = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\b
 EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
 PHONE = re.compile(r'(?<!\d)(?:0\d{1,4}-\d{1,4}-\d{3,4}|0[789]0\d{8}|\+81[- ]?\d{1,4}[- ]?\d{1,4}[- ]?\d{3,4})(?!\d)')
 PRIVATE_IP = re.compile(r'(?<![\d.])(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}(?![\d.])')
-INTERNAL_HOST = re.compile(r'\b[\w-]+(?:\.[\w-]+)*\.(?:local|lan|corp|internal|intra|intranet|localdomain)\b', re.I)
+# ASCII DNS labels only: Japanese prose such as "TMPDIRは.local" describes
+# a directory, not an internal hostname. Preserve actual host detection.
+INTERNAL_HOST = re.compile(r'\b[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.(?:local|lan|corp|internal|intra|intranet|localdomain)\b', re.I)
 LOCAL_PATH = re.compile(r'(?:\b[A-Za-z]:[\\/]|\\\\[\w.$-]+\\|(?:^|\s)~[\\/]|/(?:home|Users)/[\w.-]+)')
 MY_NUMBER = re.compile(r'(?<!\d)\d{4}[- ]?\d{4}[- ]?\d{4}(?!\d)')
 CARD = re.compile(r'(?<!\d)(?:\d[ -]?){13,16}(?!\d)')

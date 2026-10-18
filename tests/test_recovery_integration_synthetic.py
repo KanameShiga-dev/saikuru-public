@@ -77,9 +77,11 @@ class RecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual(self.store.get(self.approval_id)['status'], 'expired')
 
     def test_restore_both_databases_and_preserve_acceptance(self):
-        self.engine.decide(self.approval_id, True, '')
+        self.engine.acknowledge_completion_review(self.approval_id, True)
+        self.engine.accept_completion(self.approval_id, '正式受領')
         new_id = self.engine.record_completion_evidence(self.approval_id, 0, 0, 'Synthetic observation', True)['approval_id']
-        self.engine.decide(new_id, True, '')
+        self.engine.acknowledge_completion_review(new_id, True)
+        self.engine.accept_completion(new_id, '正式受領')
         primary = self.base / 'runtime' / self.store.backup()
         handoff = self.base / 'runtime' / ('handoff-' + primary.name)
         self.engine.handoff.backup(handoff)

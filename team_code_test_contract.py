@@ -87,6 +87,8 @@ def snapshot_files(project, files, previous=None, change_reason=''):
 
 
 def verify_snapshot(project, snapshot):
+    if not isinstance(snapshot, dict) or not snapshot:
+        return False
     try:
         current = snapshot_files(project, list(snapshot))
     except ValueError:
@@ -98,7 +100,7 @@ def builder_issues(job, task, result):
     plan = job.get('code_test_plan') or {}
     if not plan.get('required'):
         return [], None
-    issues = findings(commands(job), task)
+    issues = findings(commands(job), task, job=job, project=job['project'])
     try:
         snapshot = snapshot_files(job['project'], result.get('test_files'),
                                   job.get('test_assets'), result.get('test_change_reason', ''))

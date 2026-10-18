@@ -88,14 +88,14 @@ class ValidationGateTests(unittest.TestCase):
         self.assertEqual(self.store.get(reviewer['id'])['result']['status'], 'needs_changes')
         self.assertIn('終了状態: 1', self.store.get(reviewer['id'])['result']['summary'])
 
-    def test_later_command_invalidates_earlier_success(self):
+    def test_later_unrelated_command_preserves_earlier_success(self):
         builder, reviewer = self.cycle()
         ctx = Context.__new__(Context)
         ctx.engine, ctx.task = self.engine, builder
         ctx.command_result(COMMAND, 0, 'synthetic success')
         ctx.command_result('python -V', 0, 'synthetic version')
         self.engine._finish(reviewer, dict(DONE))
-        self.assertEqual(self.store.get(reviewer['id'])['result']['status'], 'needs_changes')
+        self.assertEqual(self.store.get(reviewer['id'])['result']['status'], 'done')
 
     def test_builder_reports_failure_and_repair_is_queued(self):
         builder, reviewer = self.cycle()

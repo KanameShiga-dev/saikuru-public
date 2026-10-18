@@ -35,8 +35,11 @@ def record_result(task, commands, command, exit_code, timed_out):
     return runs[-30:]
 
 
-def findings(commands, cycle_task):
-    """Only evidence from the builder immediately before this review counts."""
+def findings(commands, cycle_task, job=None, project=None):
+    """Use this builder's result or a still-valid persisted result for the job.
+
+    Legacy callers without a job keep their original task-local behavior.
+    """
     if not commands:
         return []
     if not cycle_task or cycle_task.get('role') != 'builder':
@@ -48,9 +51,38 @@ def findings(commands, cycle_task):
     issues = []
     for index in range(len(commands)):
         run = latest.get(index)
-        if run is None:
-            issues.append(f'検証コマンド{index + 1}が未実行です。')
-        elif run.get('timed_out') or run.get('exit_code') != 0:
+        persisted = (job or {}).get('validation_evidence') or {}
+        evidence = persisted.get(str(index)) if isinstance(persisted, dict) else None
+        if run is not None and (run.get('timed_out') or run.get('exit_code') != 0):
             code = '時間切れ' if run.get('timed_out') else str(run.get('exit_code'))
             issues.append(f'検証コマンド{index + 1}が成功していません（終了状態: {code}）。')
+            continue
+        if job is None:
+            if run is None:
+                issues.append(f'検証コマンド{index + 1}が未実行です。')
+            continue
+        if (not isinstance(evidence, dict) or evidence.get('version') != 1
+                or evidence.get('command') != commands[index]
+                or evidence.get('job_id') != job.get('id')
+                or evidence.get('exit_code') != 0 or evidence.get('timed_out') is not False
+                or not evidence.get('task_id') or type(evidence.get('observed_at_ns')) is not int):
+            issues.append(f'検証コマンド{index + 1}の有効な実行記録がありません。')
+            continue
+        if run is not None and evidence['task_id'] != cycle_task.get('id'):
+            issues.append(f'検証コマンド{index + 1}の実行記録と担当が一致しません。')
+            continue
+        from team_validation_evidence import validity
+        valid, reason, _ = validity(project or job.get('project', ''), evidence.get('snapshot'), commands)
+        if not valid:
+            issues.append(f'検証コマンド{index + 1}の証跡が失効しました: {reason}')
     return issues
+
+
+def review_context(commands, cycle_task, job):
+    """Give reviewers the gate's computed status without making prose authoritative."""
+    issues = findings(commands, cycle_task, job=job, project=job.get('project'))
+    if issues:
+        return ('采来の検証証跡判定: 要再検証。理由: ' + ' '.join(issues)[:800]
+                + '。レビュー本文の「再テスト不要」という判断はこの判定を変更しません。')
+    return ('采来の検証証跡判定: 現行版で有効。終了コードと対象版を確認済み。'
+            'テスト範囲や成果物の正しさは別途レビューしてください。')

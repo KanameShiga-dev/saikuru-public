@@ -37,7 +37,7 @@ class Store:
         self.db.execute("INSERT OR IGNORE INTO metrics_meta VALUES ('started_at', ?)", (now(),))
         self.db.commit()
 
-    def put(self, kind, obj):
+    def put(self, kind, obj, transition_reason=None):
         with self.lock:
             self.revision += 1
             obj = copy.deepcopy(obj)
@@ -49,7 +49,7 @@ class Store:
                 status = obj.get('status')
                 if old != status:
                     job_id = obj['id'] if kind == 'job' else obj['job_id']
-                    reason = 'system' if status == 'interrupted' else 'other'
+                    reason = str(transition_reason)[:80] if transition_reason else ('system' if status == 'interrupted' else 'other')
                     if kind == 'job' and status == 'failed':
                         reason = 'task_error'
                     if reason != 'system':
@@ -89,14 +89,14 @@ class Store:
                 raise ValueError('対象が見つかりません。')
             return json.loads(row[1])
 
-    def update(self, object_id, **values):
+    def update(self, object_id, _transition_reason=None, **values):
         with self.lock:
             row = self.db.execute('SELECT kind, body FROM objects WHERE id=?', (object_id,)).fetchone()
             if not row:
                 raise ValueError('対象が見つかりません。')
             obj = json.loads(row[1])
             obj.update(values)
-            return self.put(row[0], obj)
+            return self.put(row[0], obj, transition_reason=_transition_reason)
 
     def all(self, kind):
         with self.lock:
@@ -108,10 +108,14 @@ class Store:
             return [json.loads(row[0]) for row in self.db.execute(
                 "SELECT body FROM objects WHERE kind=? AND json_extract(body,'$.job_id')=? ORDER BY rowid", (kind, job_id))]
 
-    def event(self, event_type, message, task_id=None, job_id=None):
+    def event(self, event_type, message, task_id=None, job_id=None, details=None):
         # Persist summaries, not raw provider protocol messages or environment variables.
         record = dict(type=event_type, message=str(message)[:3000], task_id=task_id,
                       job_id=job_id, at=now())
+        if details is not None:
+            if not isinstance(details, dict):
+                raise ValueError('イベント詳細はオブジェクトで指定してください。')
+            record['details'] = copy.deepcopy(details)
         with self.lock:
             self.db.execute('INSERT INTO events(body) VALUES (?)', (json.dumps(record, ensure_ascii=False),))
             if self.depth == 0:

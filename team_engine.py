@@ -1,6 +1,7 @@
 import copy
 
 import hashlib
+import hmac
 
 import json
 
@@ -33,6 +34,10 @@ from team_instructions import compact_instruction, instruction_revision
 from team_recovery import advice as recovery_advice, handoff_report_advice
 
 from team_usage_metrics import code_version, context_budget
+
+# Per-process HMAC key keeps review-target fingerprints opaque at rest. After restart, old
+# fingerprints cannot be reused; a fresh review cycle is required.
+_ACCEPTANCE_TARGET_KEY = secrets.token_bytes(32)
 from team_common_agents import names_for_role, load_agent
 
 from team_shared_harness import catalog as shared_catalog, shared_document
@@ -68,6 +73,14 @@ RESULT_SCHEMA = object_schema({'status': {'type': 'string', 'enum': ['done', 'bl
 
     'questions': QUESTIONS, 'context_updates': CONTEXT_UPDATES})
 
+RESULT_SCHEMA['properties'].update({
+    'warnings': {'type': 'array', 'maxItems': 20, 'items': STR},
+    'stage_complete': {'type': 'boolean'},
+    'blocking_reasons': {'type': 'array', 'maxItems': 20, 'items': object_schema({
+        'requirement': STR, 'impact': STR})},
+})
+RESULT_SCHEMA['required'] = list(RESULT_SCHEMA['properties'])
+
 RESULT_SCHEMA_TESTS = object_schema(dict(RESULT_SCHEMA['properties'],
     test_files={'type': 'array', 'maxItems': 20, 'items': STR}, test_change_reason=STR))
 
@@ -79,6 +92,9 @@ PLAN_SCHEMA = object_schema({'summary': STR, 'tasks': {'type': 'array', 'items':
 
     'questions': QUESTIONS, 'context_updates': CONTEXT_UPDATES})
 
+PLAN_SCHEMA['properties']['warnings'] = {'type': 'array', 'maxItems': 20, 'items': STR}
+PLAN_SCHEMA['required'] = list(PLAN_SCHEMA['properties'])
+
 PLAN_SCHEMA_TESTS = object_schema(dict(PLAN_SCHEMA['properties'], code_test_plan=object_schema({
     'required': {'type': 'boolean'}, 'reason': STR,
     'cases': {'type': 'array', 'maxItems': 20, 'items': STR}, 'command': STR,
@@ -87,6 +103,13 @@ PLAN_SCHEMA_TESTS = object_schema(dict(PLAN_SCHEMA['properties'], code_test_plan
 # The meaning of a result status is defined here only; role instructions refer to these texts and must not redefine
 # "blocked" (2026-10-08: the review text told reviewers to block when conditions were missing, contradicting the common rule; a review that only
 # lacked re-run test results stopped the job waiting for the user with nothing to answer).
+PROGRESS_RULE = ('進行判断: 実行不能、利用者の必須受入条件の不成立、許可外操作や情報漏洩・破壊につながる具体的問題だけを停止理由にする。'
+                 '停止には対象の必須条件と次工程への具体的な支障を示す。改善提案・範囲外の問題・現在の工程を妨げない未確認はwarningsへ記録して継続し、判断質問を増やさない。'
+                 '警告だけでblocked/needs_changesにしない。担当工程が完了したらstage_complete=trueとdone、'
+                 '必須条件の不足はblocking_reasonsのrequirementとimpactへ記録する。未完了を完了と申告しない。'
+                 'G2/G3・危険操作の人間承認と既存の安全ガードは維持する。'
+                 '利用者向け要約は目的・工程・支障・次の作業を中心にし、ファイル名や行番号は必要時の根拠へ分ける。')
+
 BLOCKED_RULE = ('blockedは利用者の判断が必要なときだけ使い、その判断をquestionsで質問する。'
                 '作業担当の作業で解消できる不足（未実行のテスト・実行確認、足りない修正など）はblockedにしない。')
 STAGE_COMPLETION_RULE = (
@@ -500,14 +523,29 @@ class Context:
                                 self.task['id'], self.task['job_id'])
         from team_validation_gate import record_result
         from team_code_test_contract import commands
+        from team_validation_evidence import snapshot
         job = self.engine.store.get(self.task['job_id'], 'job')
+        listed = commands(job)
         runs = record_result(self.engine.store.get(self.task['id'], 'task'),
-                             commands(job), command, exit_code, timed_out)
+                             listed, command, exit_code, timed_out)
         if runs is not None:
             self.engine.store.update(self.task['id'], validation_runs=runs)
-        elif self.task.get('role') == 'builder' and commands(job):
-            # A later command might change the project; only checks run after it may count.
-            self.engine.store.update(self.task['id'], validation_runs=[])
+            index = listed.index(str(command).strip())
+            proof = {'version': 1, 'job_id': job['id'], 'task_id': self.task['id'], 'command': listed[index],
+                     'exit_code': runs[-1]['exit_code'], 'timed_out': runs[-1]['timed_out'],
+                     'observed_at_ns': runs[-1]['observed_at_ns']}
+            if exit_code == 0 and timed_out is not True:
+                try:
+                    proof['snapshot'] = snapshot(job['project'], self.engine.store.directory, listed)
+                except (OSError, ValueError) as exc:
+                    proof['invalid_reason'] = str(exc)[:300]
+                    self.engine.store.event('validation_evidence_unavailable',
+                                            '検証対象の版を記録できませんでした: ' + proof['invalid_reason'],
+                                            self.task['id'], job['id'])
+            previous = job.get('validation_evidence') or {}
+            evidence = dict(previous) if isinstance(previous, dict) else {}
+            evidence[str(index)] = proof
+            self.engine.store.update(job['id'], validation_evidence=evidence)
 
     def agent_started(self, session_id, launch_method):
 
@@ -1083,7 +1121,7 @@ class Engine:
     def create_job(self, title, goal, project, auto_execute, planner_profile=None, document_source=None, attachment_ids=None, document_format=None,
                    skill_mode='auto', skill_ids=None, evaluation_mode=None, evaluation_confirmed=False, role_profiles=None,
                    token_reduction=None, comparison_id=None, route='full', light_scope_file=None, light_acceptance=None,
-                   validation_commands=None):
+                   validation_commands=None, registration_actor=None):
         from team_validation_gate import validate_commands
         validation_commands = validate_commands(validation_commands)
         if validation_commands and document_source:
@@ -1093,6 +1131,8 @@ class Engine:
             require_clean_input('\n'.join(validation_commands), False, '検証コマンド')
 
         skill_selection = self._skill_selection(skill_mode, skill_ids)
+        if skill_selection['ids']:
+            raise ValueError('依頼登録ではプロジェクトへスキルを適用しません。スキル適用は作業範囲を確認する別操作で行ってください。')
         if token_reduction not in (None, 'on', 'off') or (comparison_id is not None and not token_reduction):
             raise ValueError('トークン削減の指定は ON・OFF・設定に従う のいずれかです。')
         evaluation = None
@@ -1147,8 +1187,17 @@ class Engine:
                     or not target.resolve().is_relative_to(Path(project).resolve())):
                 raise ValueError('軽い経路の対象ファイルが見つかりません。')
 
-        from team_attachments import Attachments
-        attachment_ids = [a['id'] for a in Attachments(self.store).select(attachment_ids)]
+        # G1 validates only existing attachment records. Attachments.select() may refresh a
+        # prepared sidecar for older records, so defer content preparation and any such write
+        # until after G2, when the planner actually needs the attachment contents.
+        attachment_ids = attachment_ids or []
+        if (not isinstance(attachment_ids, list) or len(attachment_ids) > 4
+                or any(not isinstance(ident, str) for ident in attachment_ids)
+                or len(set(attachment_ids)) != len(attachment_ids)):
+            raise ValueError('添付は重複なしで4ファイルまでです。')
+        selected_attachments = [self.store.get(ident, 'attachment') for ident in attachment_ids]
+        if sum(item.get('size', 0) for item in selected_attachments) > 15 * 1024 * 1024:
+            raise ValueError('添付の合計は15MB以内です。')
         from team_instruction_health import inspect_instructions
         from team_ledger import ROOT as ledger_root
         instruction_boundary = ledger_root if Path(project).resolve().is_relative_to(ledger_root) else Path(project)
@@ -1173,8 +1222,10 @@ class Engine:
                 'attachment_ids': attachment_ids,
                 'instruction_health': instruction_health,
                 'request_origin': 'new',
+                'registration_actor': registration_actor or 'unknown',
 
-                'route': route, 'status': 'running' if route == 'light_eval' else 'planning', 'created_at': now()})
+                'route': route, 'status': 'awaiting_approval', 'created_at': now(),
+                'g2_gate_version': 1, 'g2_status': 'pending', 'g2_revision': 0})
 
             self.store.update(job['id'], intake_classification=intake, skill_selection=skill_selection, evaluation=evaluation)
             job['evaluation'] = evaluation
@@ -1188,13 +1239,6 @@ class Engine:
                 self.store.event('evaluation_job', '効果検証用の依頼（モード' + evaluation['mode'] + '）', job_id=job['id'])
             job['intake_classification'] = intake
             job['skill_selection'] = skill_selection
-            if skill_selection['ids']:
-                # Adding a skill on the request form applies it to the request's project (same as the skill list's 適用先).
-                active = {i['id'] for i in self.handoff.released_skills(job['project']) if i['active']}
-                for skill_id in skill_selection['ids']:
-                    if skill_id not in active:
-                        self.handoff.apply_skill(skill_id, job['project'])
-                self.store.event('skills_selected', '依頼時にプロジェクトへ追加したスキル（候補）: ' + '、'.join(skill_selection['names']), job_id=job['id'])
             overrides = self._role_profiles(role_profiles)
             if planner_profile is not None:
                 overrides['planner'] = copy.deepcopy(planner_profile)
@@ -1206,16 +1250,17 @@ class Engine:
                 self.store.update(job['id'], role_overrides=job['role_overrides'])
 
             if route == 'light_eval':
-                instruction = ('評価用の単一対象ファイル ' + scope.as_posix() + ' だけを変更する。'
-                               '他のファイルの変更、外部送信、削除、権限・認証・設定変更は行わない。'
-                               '合格条件：' + light_acceptance.strip() + '\n元の依頼：' + goal)
-                builder = self.new_task(job, '指定された単一ファイルを修正する', instruction, 'builder')
                 self.store.update(job['id'], light_scope_file=scope.as_posix(),
                                   light_acceptance=light_acceptance.strip(), security_review_required=True)
-                self._queue_reviews(job, builder['id'])
-                self.store.event('light_route_eval', '分離評価用の軽い経路を明示選択しました。', job_id=job['id'])
-            else:
-                self.new_task(job, '作業計画を作る', goal, 'planner')
+                job.update(light_scope_file=scope.as_posix(), light_acceptance=light_acceptance.strip(),
+                           security_review_required=True)
+                self.store.event('light_route_eval', '分離評価用経路を選択しました。計画生成とG3承認を先に行います。', job_id=job['id'])
+            planner = self.new_task(job, '作業計画を作る', goal, 'planner')
+            self._request_g2(job['id'], planner['id'], '新規ジョブ登録。G1はG2の承認を含みません。')
+            self.store.event('g1_job_registered', 'ジョブを隔離ランタイムへ登録しました。AI計画生成はG2承認待ちです。',
+                             planner['id'], job['id'], {'actor': registration_actor or 'unknown',
+                             'g2_status': 'pending'})
+            job = self.store.get(job['id'], 'job')
 
             self.store.event('job_created', '依頼を受け付けました。', job_id=job['id'])
 
@@ -1294,6 +1339,230 @@ class Engine:
 
         return approval
 
+    @staticmethod
+    def _g2_payload_digest(payload):
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+
+    def _g2_fingerprint(self, job, task):
+        """Bind one planner authorization to the project, scope, prompt, and selected provider profile."""
+        root = Path(job['project']).resolve(strict=True)
+        scope_path = root / 'SCOPE.md'
+        scope_status, scope_digest = 'ready', None
+        try:
+            if not scope_path.is_file():
+                scope_status = 'missing'
+            else:
+                resolved_scope = scope_path.resolve(strict=True)
+                if not resolved_scope.is_relative_to(root):
+                    scope_status = 'outside_root'
+                else:
+                    scope_digest = hashlib.sha256(resolved_scope.read_bytes()).hexdigest()
+        except (OSError, RuntimeError, ValueError):
+            scope_status = 'unreadable'
+        content = {
+            'job_id': job['id'], 'root': str(root), 'title': job.get('title'),
+            'goal': job.get('goal'), 'document_source': job.get('document_source'),
+            'document_format': job.get('document_format'),
+            'attachment_ids': sorted(job.get('attachment_ids') or []),
+            'attachments': sorted(({'id': item.get('id'), 'sha256': item.get('sha256'),
+                                    'size': item.get('size')} for item in
+                                   (self.store.get(ident, 'attachment')
+                                    for ident in (job.get('attachment_ids') or []))),
+                                 key=lambda item: str(item.get('id') or '')),
+            'task_id': task['id'], 'plan_input': task.get('instruction'),
+            'scope_sha256': scope_digest,
+            'scope_status': scope_status,
+            'profile': task.get('profile'),
+            'provider_settings': self.config.get('provider_settings') or {},
+            'local_plan_check': self.config.get('local_summary') or {'mode': 'shadow', 'model': 'gemma4:latest'},
+            'plan_policy': {'g3_required': True, 'g2_model_calls': 1},
+        }
+        return self._g2_payload_digest(content), {
+            'root': str(root), 'scope_sha256': scope_digest,
+            'scope_status': scope_status,
+            'plan_input_sha256': hashlib.sha256(str(task.get('instruction', '')).encode('utf-8')).hexdigest(),
+            'job_content_sha256': self._g2_payload_digest({k: content[k] for k in
+                ('job_id', 'title', 'goal', 'document_source', 'document_format', 'attachment_ids', 'attachments')}),
+            'provider': (task.get('profile') or {}).get('adapter'),
+            'model': (task.get('profile') or {}).get('model'),
+            'effort': (task.get('profile') or {}).get('effort'),
+            'post_plan_local_check': self.config.get('local_summary') or {'mode': 'shadow', 'model': 'gemma4:latest'},
+        }
+
+    def _job_g2_approval(self, job_id, approval_id):
+        """Resolve a G2 link only from its owning job; never follow a cross-job ID."""
+        if not isinstance(approval_id, str) or not approval_id:
+            return None
+        for approval in self.store.for_job('approval', job_id):
+            if approval.get('id') == approval_id:
+                if approval.get('job_id') != job_id:
+                    return None
+                return approval
+        return None
+
+
+    def _request_g2(self, job_id, task_id, reason):
+        """Persist a fresh, single-invocation G2 gate. Caller may already hold Store's reentrant lock."""
+        with self.store.atomic():
+            job = self.store.get(job_id, 'job')
+            task = self.store.get(task_id, 'task')
+            if job.get('g2_gate_version') != 1 or task.get('role') != 'planner':
+                raise ValueError('G2ゲートの対象が不整合です。')
+            fingerprint, detail = self._g2_fingerprint(job, task)
+            old_id = job.get('g2_approval_id')
+            old = self._job_g2_approval(job_id, old_id)
+            if old_id and old is None:
+                self.store.event('g2_approval_reference_invalid',
+                                 'G2承認参照が対象ジョブ内にないため、新しい未承認の判断を作成します。',
+                                 task_id, job_id, {'reason': 'missing_or_foreign_job_reference'})
+            if (old and old.get('kind') == 'ai_start' and old.get('job_id') == job_id
+                    and old.get('task_id') == task_id and old.get('status') == 'pending'
+                    and old.get('payload', {}).get('fingerprint') == fingerprint):
+                return old
+            for approval in self.store.for_job('approval', job_id):
+                if approval.get('kind') == 'ai_start' and approval.get('status') in ('pending', 'approved'):
+                    self.store.update(approval['id'], status='superseded', note='G2対象が更新されました。')
+            revision = int(job.get('g2_revision', 0)) + 1
+            payload = {'purpose': 'AI計画生成のみ。後続作業には別途G3計画承認が必要です。',
+                       'gate_version': 1, 'revision': revision, 'fingerprint': fingerprint,
+                       'target': detail, 'provider_attempts': 1,
+                       'retry_policy': '失敗・入力・対象・モデルの変更後は新しいG2承認が必要です。',
+                       'reason': str(reason)[:300]}
+            approval = self.new_approval(task, 'ai_start', payload)
+            # The approval is bound to the next scheduler attempt. Retries and recovered tasks
+            # therefore cannot reuse a G2 decision from a prior provider invocation.
+            approval = self.store.update(approval['id'], expires_at=None, attempt=task['attempt'] + 1)
+            self.store.update(job_id, status='awaiting_approval', g2_status='pending',
+                              g2_revision=revision, g2_fingerprint=fingerprint,
+                              g2_approval_id=approval['id'], g2_execution_started_at=None)
+            self.store.event('g2_approval_required', 'AI計画生成の承認を待っています。', task_id, job_id,
+                             {'approval_id': approval['id'], 'revision': revision})
+            return approval
+
+    def _g2_block(self, job, task, reason):
+        """Fail closed for malformed or unknown gates; never infer human consent."""
+        with self.store.atomic():
+            current = self.store.get(task['id'], 'task')
+            current_job = self.store.get(job['id'], 'job')
+            if current.get('status') not in ('cancelled', 'succeeded', 'handed_off'):
+                self.store.update(task['id'], status='blocked', summary='G2承認状態を検証できないため、AI実行を停止しました。')
+            if current_job.get('status') not in ('cancelled', 'accepted', 'accepted_with_pending_checks'):
+                self.store.update(job['id'], status='blocked', g2_status='invalid')
+            self.store.event('g2_gate_invalid', 'G2状態が不明または不整合のため実行を拒否しました。',
+                             task['id'], job['id'], {'reason': str(reason)[:200]})
+
+    def _g2_approval_is_current(self, job, task, expected_attempt=None):
+        if job.get('g2_gate_version') != 1 or job.get('g2_status') != 'approved':
+            return False
+        try:
+            fingerprint, _ = self._g2_fingerprint(job, task)
+            approval = self._job_g2_approval(job['id'], job.get('g2_approval_id'))
+            if approval is None:
+                return False
+            payload = approval.get('payload') or {}
+            return (approval.get('kind') == 'ai_start' and approval.get('status') == 'approved'
+                    and approval.get('job_id') == job['id'] and approval.get('task_id') == task['id']
+                    and approval.get('attempt') == (task['attempt'] if expected_attempt is None else expected_attempt)
+                    and payload.get('gate_version') == 1
+                    and payload.get('revision') == job.get('g2_revision')
+                    and payload.get('fingerprint') == fingerprint
+                    and job.get('g2_fingerprint') == fingerprint
+                    and approval.get('digest') == self._g2_payload_digest(payload))
+        except (OSError, KeyError, RuntimeError, TypeError):
+            return False
+
+    def _decide_g2(self, approval_id, allow, note):
+        with self.store.atomic():
+            approval = self.store.get(approval_id, 'approval')
+            task = self.store.get(approval.get('task_id', ''), 'task')
+            job = self.store.get(task['job_id'], 'job')
+            if (approval.get('kind') != 'ai_start' or approval.get('status') != 'pending'
+                    or approval.get('job_id') != job['id'] or approval.get('task_id') != task['id']
+                    or approval.get('attempt') != task.get('attempt', 0) + 1
+                    or task.get('role') != 'planner' or task.get('status') != 'queued'
+                    or job.get('g2_gate_version') != 1 or job.get('g2_status') != 'pending'
+                    or job.get('g2_approval_id') != approval_id or job.get('status') != 'awaiting_approval'):
+                raise ValueError('G2承認が未処理ではないか、対象ジョブの状態が不整合です。')
+            payload = approval.get('payload') or {}
+            fingerprint, _ = self._g2_fingerprint(job, task)
+            if (payload.get('gate_version') != 1 or payload.get('revision') != job.get('g2_revision')
+                    or payload.get('fingerprint') != fingerprint or job.get('g2_fingerprint') != fingerprint
+                    or approval.get('digest') != self._g2_payload_digest(payload)):
+                self.store.update(approval_id, status='superseded', note='承認対象が変わったため再確認が必要です。')
+                self._request_g2(job['id'], task['id'], '承認前にRoot・SCOPE・計画入力・モデル設定の変更を検出しました。')
+                self.store.event('g2_approval_stale', '古いG2承認を拒否し、最新対象の再確認を要求しました。',
+                                 task['id'], job['id'])
+                return
+            if allow and payload.get('target', {}).get('scope_status') != 'ready':
+                raise ValueError('SCOPE.mdをRoot内で読み取れる状態にしてから、最新のG2承認を確認してください。')
+            if allow:
+                self.store.update(approval_id, status='approved', note=str(note or '')[:4000],
+                                  decided_at=now(), decided_by='authenticated_local_app_session')
+                self.store.update(job['id'], status='planning', g2_status='approved',
+                                  g2_approved_at=now(), g2_approved_by='authenticated_local_app_session')
+                self.store.event('g2_approval_decided', '認証済みローカルUI操作でAI計画生成を承認しました。',
+                                 task['id'], job['id'], {'approval_id': approval_id,
+                                  'revision': job['g2_revision'], 'fingerprint': fingerprint,
+                                  'actor': 'authenticated_local_app_session', 'allowed_model_calls': 1})
+            else:
+                self.store.update(approval_id, status='denied', note=str(note or '')[:4000],
+                                  decided_at=now(), decided_by='authenticated_local_app_session')
+                self.store.update(job['id'], status='blocked', g2_status='denied')
+                self.store.update(task['id'], status='blocked', summary='AI計画生成は承認されませんでした。')
+                self.store.event('g2_approval_decided', 'AI計画生成が拒否されました。モデルは起動していません。',
+                                 task['id'], job['id'], {'approval_id': approval_id,
+                                  'revision': job['g2_revision'],
+                                  'actor': 'authenticated_local_app_session'})
+
+    def _claim_g2_for_run(self, task_id, attempt):
+        """Atomically consume the one-call G2 authorization immediately before provider dispatch."""
+        with self.store.atomic():
+            task = self.store.get(task_id, 'task')
+            job = self.store.get(task['job_id'], 'job')
+            if 'g2_gate_version' not in job:
+                if task.get('role') == 'planner':
+                    self._g2_block(job, task, 'missing_gate')
+                    return False
+                return True
+            if job.get('g2_gate_version') != 1 or task.get('role') != 'planner':
+                self._g2_block(job, task, 'unknown_gate_or_role')
+                return False
+            if (task.get('status') != 'running' or task.get('attempt') != attempt
+                    or job.get('status') != 'planning'):
+                return False
+            if job.get('g2_status') in ('executing', 'consumed'):
+                self.store.event('g2_duplicate_start_rejected', '同じG2承認による重複計画実行を拒否しました。',
+                                 task_id, job['id'], {'attempt': attempt, 'revision': job.get('g2_revision')})
+                return False
+            if not self._g2_approval_is_current(job, task):
+                if job.get('g2_status') == 'approved':
+                    self._request_g2(job['id'], task['id'], '計画対象またはモデル設定が承認後に変わりました。')
+                    self.store.update(task['id'], status='queued', started_at=None)
+                elif job.get('g2_status') == 'pending':
+                    # A pending approval must remain attached to exactly this planner.
+                    approval = self._job_g2_approval(job['id'], job.get('g2_approval_id'))
+                    if (approval is None or approval.get('kind') != 'ai_start'
+                            or approval.get('job_id') != job['id']
+                            or approval.get('task_id') != task['id']
+                            or approval.get('status') != 'pending'
+                            or approval.get('attempt') != task.get('attempt', 0) + 1):
+                        self._g2_block(job, task, 'pending_approval_mismatch')
+                else:
+                    self._g2_block(job, task, 'approval_not_current')
+                return False
+            approval = self._job_g2_approval(job['id'], job.get('g2_approval_id'))
+            if (approval is None or approval.get('kind') != 'ai_start'
+                    or approval.get('job_id') != job['id'] or approval.get('task_id') != task['id']
+                    or approval.get('status') != 'approved'):
+                self._g2_block(job, task, 'approval_reference_changed_before_claim')
+                return False
+            self.store.update(job['id'], g2_status='executing',
+                              g2_execution_attempt=attempt, g2_execution_started_at=now())
+            self.store.event('g2_execution_claimed', '承認済みの計画生成を1回開始します。', task_id, job['id'],
+                             {'approval_id': approval['id'], 'revision': job['g2_revision'],
+                              'attempt': attempt})
+            return True
+
     def record_completion_evidence(self, approval_id, item_index, check_index, evidence, confirmed):
         """Record a user's verification and require a fresh completion decision."""
         if type(item_index) is not int or type(check_index) is not int:
@@ -1361,6 +1630,10 @@ class Engine:
 
             approval = self.store.get(approval_id, 'approval')
 
+            if approval.get('kind') == 'ai_start':
+                self._decide_g2(approval_id, allow, note)
+                return
+
             task = self.store.get(approval['task_id'], 'task')
 
             job = self.store.get(task['job_id'], 'job')
@@ -1391,6 +1664,10 @@ class Engine:
             if approval['status'] != 'pending':
 
                 raise ValueError('この要求は処理済みです。')
+
+            if approval['kind'] == 'completion' and allow:
+
+                raise ValueError('正式受領は承認操作と分離しました。受領確認欄から明示的に実行してください。')
 
             if approval['attempt'] != task['attempt'] or (approval['kind'] == 'tool' and now() > approval['expires_at']):
 
@@ -1481,30 +1758,339 @@ class Engine:
 
                 elif approval['kind'] == 'completion':
 
-                    if allow:
-                        from team_document_capabilities import require_artifacts
-                        require_artifacts(job)
-
-                    if self.handoff.pending_conflicts(job['id']):
-
-                        raise ValueError('引き継ぎ情報の矛盾を先に解消してください。')
-
-                    completion_payload = approval.get('payload', {})
-                    # Current approvals carry every handed-off check in pending_items.
-                    # Preserve the legacy fallback only for approvals made before that field existed.
-                    legacy_handoff = ('pending_items' not in completion_payload
-                                      and any(t['job_id'] == job['id'] and t['status'] == 'handed_off'
-                                              for t in self.store.all('task')))
-                    has_pending = (bool(completion_payload.get('review_findings'))
-                                   or bool(completion_payload.get('pending_items')) or legacy_handoff)
-
-                    if allow:
-                        self.store.update(job['id'], status='accepted_with_pending_checks' if has_pending else 'accepted')
-                    elif str(note or '').strip():
+                    if str(note or '').strip():
                         # A rejection with a reason is a change request, not the end of the job.
                         self.rework_from_rejection(job['id'], note, approval['task_id'])
-                    else:
+                    elif not allow:
                         self.store.update(job['id'], status='blocked')
+
+
+    def _acceptance_target_snapshot(self, job):
+        from team_validation_evidence import snapshot
+        from team_code_test_contract import commands
+        return snapshot(job['project'], self.store.directory, commands(job))
+
+    def _acceptance_target_state(self, job, proof):
+        """Persist only opaque fingerprints needed to decide whether reissue is safe."""
+        stable_files = json.dumps(proof['files'], sort_keys=True, separators=(',', ':')).encode('utf-8')
+        policy = {
+            'security_review_required': job.get('security_review_required'),
+            'validation_commands': proof['validation_commands'],
+            'code_test_plan': job.get('code_test_plan'),
+            'document_source': job.get('document_source'),
+            'document_format': job.get('document_format'),
+            'security_review': self.config.get('security_review', 'always'),
+            'document_review_relaxed': self.config.get('document_review_relaxed', False),
+        }
+        policy_digest = hashlib.sha256(json.dumps(
+            policy, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+        return {
+            'files_digest': hashlib.sha256(stable_files).hexdigest(),
+            'excluded': proof['excluded'],
+            'validation_commands': proof['validation_commands'],
+            'environment_scope': proof['environment_scope'],
+            # The environment fingerprint is stable only when no application environment variables are in scope.
+            'environment': proof['environment'] if proof['environment_scope'] == 'none' else None,
+            'acceptance_policy_digest': policy_digest,
+        }
+
+    def _acceptance_review_state(self, job, task):
+        cycle_id = task.get('review_cycle')
+        reviewers = [t for t in self.store.for_job('task', job['id'])
+                     if t.get('role') == 'reviewer'
+                     and (not cycle_id or t.get('review_cycle') == cycle_id)]
+        state = []
+        for reviewer in reviewers:
+            result = json.dumps(reviewer.get('result'), ensure_ascii=False,
+                                sort_keys=True, separators=(',', ':')).encode('utf-8')
+            state.append({
+                'task_id': reviewer.get('id'), 'status': reviewer.get('status'),
+                'updated_at': reviewer.get('updated_at'), 'review_cycle': reviewer.get('review_cycle'),
+                'agent_name': reviewer.get('agent_name'),
+                'result_digest': hashlib.sha256(result).hexdigest(),
+            })
+        return state
+
+    def _acceptance_target_token(self, job, proof=None):
+        proof = proof or self._acceptance_target_snapshot(job)
+        return hmac.new(_ACCEPTANCE_TARGET_KEY, proof['digest'].encode('ascii'), hashlib.sha256).hexdigest()
+
+    def acknowledge_completion_review(self, approval_id, confirmed, actor='authenticated_local_app_session'):
+        """Record review-result acknowledgement without changing the job's acceptance state."""
+        if confirmed is not True:
+            raise ValueError('レビュー結果を確認した場合だけ記録してください。')
+        if actor != 'authenticated_local_app_session':
+            raise ValueError('レビュー結果の確認は認証済みのアプリ操作からのみ実行できます。')
+        with self.store.lock:
+            approval = self.store.get(approval_id, 'approval')
+            if approval.get('kind') != 'completion':
+                raise ValueError('レビュー結果の確認対象を選択してください。')
+            job = self.store.get(approval['job_id'], 'job')
+            task = self.store.get(approval['task_id'], 'task')
+            if task.get('job_id') != job.get('id') or approval.get('job_id') != job.get('id'):
+                raise ValueError('承認要求のジョブ・担当の紐付けが不正です。')
+            payload = approval.get('payload')
+            if not isinstance(payload, dict):
+                raise ValueError('レビュー結果の内容を確認できません。')
+            digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            if not approval.get('digest') or not secrets.compare_digest(approval['digest'], digest):
+                raise ValueError('レビュー結果の内容に不整合があります。最新の内容を確認してください。')
+            if approval.get('status') != 'pending' or job.get('status') != 'awaiting_acceptance':
+                raise ValueError('現在の状態ではレビュー結果を確認できません。画面を再読み込みしてください。')
+            approvals = [a for a in self.store.for_job('approval', job['id']) if a.get('kind') == 'completion']
+            if not approvals or approvals[-1].get('id') != approval_id:
+                raise ValueError('レビュー結果が古くなりました。最新の内容を開いてください。')
+            if approval.get('review_acknowledgement'):
+                raise ValueError('このレビュー結果は既に確認済みです。')
+            tasks = self.store.for_job('task', job['id'])
+            no_fix_document_review = (payload.get('accept_without_fix') is True
+                                      and self.config.get('document_review_relaxed', False)
+                                      and bool(job.get('document_source')))
+            allowed_review_states = ('succeeded', 'handed_off', 'cancelled') if no_fix_document_review else ('succeeded', 'handed_off')
+            if any(t.get('status') not in allowed_review_states for t in tasks):
+                raise ValueError('未完了の担当があるためレビュー結果を確認できません。')
+            pending = [a for a in self.store.for_job('approval', job['id'])
+                       if a.get('status') == 'pending' and a.get('id') != approval_id]
+            if pending:
+                raise ValueError('ほかの判断待ちを先に解消してください。')
+            cycle_id = task.get('review_cycle')
+            reviews = [t for t in tasks if t.get('role') == 'reviewer'
+                       and (not cycle_id or t.get('review_cycle') == cycle_id)]
+            normal_reviews = [t for t in reviews if t.get('agent_name') != 'common-security-reviewer']
+            if not normal_reviews or any(t.get('status') != 'succeeded' for t in normal_reviews):
+                raise ValueError('通常レビューが完了していません。')
+            from team_artifact_guard import is_artifact_format
+            document_job = (self.config.get('document_review_relaxed', False)
+                            and bool(job.get('document_source'))
+                            and not is_artifact_format(job.get('document_format')))
+            security_required = (job.get('security_review_required') is True
+                                 or (self.config.get('security_review', 'always') == 'always' and not document_job))
+            security_reviews = [t for t in reviews if t.get('agent_name') == 'common-security-reviewer']
+            if security_required and (not security_reviews
+                                      or any(t.get('status') != 'succeeded' for t in security_reviews)):
+                raise ValueError('必要なセキュリティレビューが完了していません。')
+            target_proof = self._acceptance_target_snapshot(job)
+            target_version_token = self._acceptance_target_token(job, target_proof)
+            decided_at = now()
+            audit = {
+                'action': 'review_result_confirmation',
+                'actor': actor,
+                'authorization': 'session_cookie_and_ui_marker',
+                'approval_id': approval_id,
+                'task_id': task['id'],
+                'target_job_id': job['id'],
+                'from_status': job['status'],
+                'to_status': job['status'],
+                'payload_digest': digest,
+                'target_version_token': target_version_token,
+                'target_state': self._acceptance_target_state(job, target_proof),
+                'review_state': self._acceptance_review_state(job, task),
+                'decided_at': decided_at,
+            }
+            with self.store.atomic():
+                current = self.store.get(approval_id, 'approval')
+                if current.get('status') != 'pending' or current.get('review_acknowledgement'):
+                    raise ValueError('レビュー結果は既に処理されています。画面を再読み込みしてください。')
+                self.store.update(approval_id, review_acknowledgement=audit)
+                self.store.event('review_result_acknowledged',
+                                 '認証済みブラウザーでレビュー結果が確認されました。受領状態は維持されています。',
+                                 task['id'], job['id'], details=audit)
+            return {'ok': True, 'status': job['status'], 'audit': audit}
+
+    def reissue_completion_review(self, approval_id, confirmed, actor='authenticated_local_app_session'):
+        """Issue a fresh review confirmation after restart only when the reviewed target is unchanged."""
+        if confirmed is not True:
+            raise ValueError('最新のレビュー結果を確認した場合だけ再確認要求を発行してください。')
+        if actor != 'authenticated_local_app_session':
+            raise ValueError('レビュー結果の再確認は認証済みのアプリ操作からのみ実行できます。')
+        with self.store.lock:
+            approval = self.store.get(approval_id, 'approval')
+            if approval.get('kind') != 'completion' or approval.get('status') != 'pending':
+                raise ValueError('再確認できる正式受領待ちの要求ではありません。')
+            job = self.store.get(approval['job_id'], 'job')
+            task = self.store.get(approval['task_id'], 'task')
+            if (approval.get('job_id') != job.get('id') or task.get('job_id') != job.get('id')
+                    or approval.get('attempt') != task.get('attempt')
+                    or job.get('status') != 'awaiting_acceptance'):
+                raise ValueError('現在の状態ではレビュー結果を再確認できません。')
+            completions = [a for a in self.store.for_job('approval', job['id']) if a.get('kind') == 'completion']
+            if not completions or completions[-1].get('id') != approval_id:
+                raise ValueError('正式受領要求が古くなりました。最新の内容を開いてください。')
+            payload = approval.get('payload')
+            if not isinstance(payload, dict):
+                raise ValueError('レビュー結果の内容を確認できません。')
+            digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            if not approval.get('digest') or not secrets.compare_digest(approval['digest'], digest):
+                raise ValueError('レビュー結果の内容に不整合があります。再レビューが必要です。')
+            previous = approval.get('review_acknowledgement')
+            if not isinstance(previous, dict) or previous.get('action') != 'review_result_confirmation':
+                raise ValueError('既存のレビュー確認証跡がありません。通常のレビュー確認を行ってください。')
+            if (previous.get('approval_id') != approval_id or previous.get('target_job_id') != job['id']
+                    or previous.get('payload_digest') != digest):
+                raise ValueError('以前の確認証跡が現在のレビュー結果と一致しません。再レビューが必要です。')
+            current_proof = self._acceptance_target_snapshot(job)
+            current_token = self._acceptance_target_token(job, current_proof)
+            if isinstance(previous.get('target_version_token'), str) and secrets.compare_digest(
+                    previous['target_version_token'], current_token):
+                raise ValueError('レビュー確認証跡はまだ有効です。再発行は不要です。')
+            prior_state = previous.get('target_state')
+            if not isinstance(prior_state, dict):
+                raise ValueError('過去の確認には安全な復旧情報がありません。対象を再レビューしてください。')
+            current_state = self._acceptance_target_state(job, current_proof)
+            if (prior_state.get('environment_scope') != 'none'
+                    or current_state.get('environment_scope') != 'none'):
+                raise ValueError('環境変数依存を再起動後に安全に比較できません。テストとレビューを再実行してください。')
+            if prior_state != current_state:
+                raise ValueError('確認後に成果物、設定、受入条件または実行環境が変化しました。再テストと再レビューが必要です。')
+            if previous.get('review_state') != self._acceptance_review_state(job, task):
+                raise ValueError('レビュー結果または担当状態が変化しました。再レビューが必要です。')
+            reviewers = [t for t in self.store.for_job('task', job['id'])
+                         if t.get('role') == 'reviewer'
+                         and (not task.get('review_cycle') or t.get('review_cycle') == task.get('review_cycle'))]
+            if not reviewers or any(t.get('status') != 'succeeded' for t in reviewers):
+                raise ValueError('必要なレビューが完了していません。再レビューしてください。')
+            other_pending = [a for a in self.store.for_job('approval', job['id'])
+                             if a.get('status') == 'pending' and a.get('id') != approval_id]
+            if other_pending:
+                raise ValueError('ほかの判断待ちを先に解消してください。')
+            with self.store.atomic():
+                replacement = self.new_approval(task, 'completion', payload)
+                self.store.update(approval_id, status='superseded',
+                                  note='再起動後、対象とレビューの不変を照合して新しい確認要求へ置き換えました。',
+                                  decided_at=now(), superseded_by=replacement['id'])
+                self.store.update(replacement['id'], supersedes_approval_id=approval_id,
+                                  reconfirmation_reason='process_restart_after_target_verification')
+                details = {'action': 'completion_review_reissued', 'actor': actor,
+                           'target_job_id': job['id'], 'previous_approval_id': approval_id,
+                           'replacement_approval_id': replacement['id'],
+                           'reason': 'process_restart_after_target_verification',
+                           'target_unchanged': True, 'review_unchanged': True,
+                           'from_status': job['status'], 'to_status': job['status']}
+                self.store.event('completion_review_reissued',
+                                 '再起動後、変更のない対象に新しいレビュー確認要求を発行しました。',
+                                 task['id'], job['id'], details=details)
+            return {'ok': True, 'status': job['status'], 'approval_id': replacement['id'],
+                    'supersedes_approval_id': approval_id}
+
+
+    def accept_completion(self, approval_id, confirmation, note='', actor='authenticated_local_app_session'):
+        """Record an explicit, authenticated UI action accepting the whole job's deliverable."""
+        if confirmation != '正式受領':
+            raise ValueError('正式受領を行う場合は確認欄に「正式受領」と入力してください。')
+        if actor != 'authenticated_local_app_session':
+            raise ValueError('正式受領は認証済みのアプリ操作からのみ実行できます。')
+        with self.store.lock:
+            approval = self.store.get(approval_id, 'approval')
+            if approval.get('kind') != 'completion':
+                raise ValueError('正式受領の対象となる成果確認を選択してください。')
+            job = self.store.get(approval['job_id'], 'job')
+            task = self.store.get(approval['task_id'], 'task')
+            if task.get('job_id') != job.get('id') or approval.get('job_id') != job.get('id'):
+                raise ValueError('承認要求のジョブ・担当の紐付けが不正です。')
+            payload = approval.get('payload')
+            if not isinstance(payload, dict):
+                raise ValueError('正式受領の対象内容を確認できません。')
+            payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            expected_digest = hashlib.sha256(payload_text.encode()).hexdigest()
+            if not approval.get('digest') or not secrets.compare_digest(approval['digest'], expected_digest):
+                raise ValueError('正式受領の対象内容に不整合があります。最新の内容を確認してください。')
+            if approval.get('status') != 'pending':
+                raise ValueError('この正式受領要求は処理済みです。画面を再読み込みしてください。')
+            if job.get('status') != 'awaiting_acceptance':
+                raise ValueError('この依頼は正式受領待ちではありません。画面を再読み込みしてください。')
+            completions = [a for a in self.store.for_job('approval', job['id']) if a.get('kind') == 'completion']
+            if not completions or completions[-1].get('id') != approval_id:
+                raise ValueError('正式受領要求が古くなりました。最新の内容を開いてください。')
+            if approval.get('attempt') != task.get('attempt'):
+                raise ValueError('正式受領要求の対象版が古くなりました。')
+            review_ack = approval.get('review_acknowledgement')
+            current_target_token = self._acceptance_target_token(job)
+            if (not isinstance(review_ack, dict)
+                    or review_ack.get('action') != 'review_result_confirmation'
+                    or review_ack.get('approval_id') != approval_id
+                    or review_ack.get('target_job_id') != job['id']
+                    or review_ack.get('from_status') != 'awaiting_acceptance'
+                    or review_ack.get('to_status') != 'awaiting_acceptance'
+                    or review_ack.get('payload_digest') != expected_digest):
+                raise ValueError('正式受領の前にレビュー結果を確認してください。')
+            if (not isinstance(review_ack.get('target_version_token'), str)
+                    or not secrets.compare_digest(review_ack['target_version_token'], current_target_token)):
+                raise ValueError('レビュー確認後に対象版が変化したか、確認証跡を再検証できません。最新のレビュー結果を確認してください。')
+            tasks = self.store.for_job('task', job['id'])
+            if any(t.get('status') not in ('succeeded', 'handed_off') for t in tasks):
+                raise ValueError('未完了の担当があるため正式受領できません。')
+            pending = [a for a in self.store.for_job('approval', job['id'])
+                       if a.get('status') == 'pending' and a.get('id') != approval_id]
+            if pending:
+                raise ValueError('ほかの判断待ちを先に解消してください。')
+            if self.handoff.pending_conflicts(job['id']):
+                raise ValueError('引き継ぎ情報の矛盾を先に解消してください。')
+
+            cycle_id = task.get('review_cycle')
+            reviews = [t for t in tasks if t.get('role') == 'reviewer'
+                       and (not cycle_id or t.get('review_cycle') == cycle_id)]
+            normal_reviews = [t for t in reviews if t.get('agent_name') != 'common-security-reviewer']
+            if not normal_reviews or any(t.get('status') != 'succeeded' for t in normal_reviews):
+                raise ValueError('通常レビューが完了していないため正式受領できません。')
+            from team_artifact_guard import is_artifact_format
+            document_job = (self.config.get('document_review_relaxed', False)
+                            and bool(job.get('document_source'))
+                            and not is_artifact_format(job.get('document_format')))
+            security_required = (job.get('security_review_required') is True
+                                 or (self.config.get('security_review', 'always') == 'always' and not document_job))
+            security_reviews = [t for t in reviews if t.get('agent_name') == 'common-security-reviewer']
+            if security_required and (not security_reviews
+                                      or any(t.get('status') != 'succeeded' for t in security_reviews)):
+                raise ValueError('必要なセキュリティレビューが完了していないため正式受領できません。')
+            if any((t.get('result') or {}).get('status') == 'needs_changes' for t in reviews):
+                raise ValueError('レビュー指摘が未解決のため正式受領できません。差し戻して修正・再レビューしてください。')
+
+            from team_document_capabilities import require_artifacts
+            require_artifacts(job)
+            from team_code_test_contract import commands, verify_snapshot
+            required_commands = commands(job)
+            if required_commands:
+                from team_validation_gate import findings
+                cycle = self.store.get(cycle_id, 'task') if cycle_id else None
+                issues = findings(required_commands, cycle, job=job, project=job['project'])
+                snapshot = (cycle or {}).get('test_asset_snapshot')
+                if ((job.get('code_test_plan') or {}).get('required')
+                        and (not isinstance(snapshot, dict) or not verify_snapshot(job['project'], snapshot))):
+                    issues.append('テストファイルの証跡が欠損または失効しています。')
+                if issues:
+                    raise ValueError('受領前に検証証跡が失効しました: ' + ' '.join(issues)[:700])
+
+            completion_payload = payload
+            if completion_payload.get('review_findings'):
+                raise ValueError('未解決のレビュー指摘があるため正式受領できません。差し戻して修正・再レビューしてください。')
+            legacy_handoff = ('pending_items' not in completion_payload
+                              and any(t.get('status') == 'handed_off' for t in tasks))
+            has_pending = (bool(completion_payload.get('review_findings'))
+                           or bool(completion_payload.get('pending_items')) or legacy_handoff)
+            new_status = 'accepted_with_pending_checks' if has_pending else 'accepted'
+            decided_at = now()
+            audit = {
+                'action': 'formal_acceptance',
+                'actor': actor,
+                'authorization': 'session_cookie_and_ui_marker',
+                'approval_id': approval_id,
+                'task_id': task['id'],
+                'target_job_id': job['id'],
+                'from_status': job['status'],
+                'to_status': new_status,
+                'conditional': has_pending,
+                'unresolved_items': len(completion_payload.get('pending_items') or [])
+                                     + len(completion_payload.get('review_findings') or []),
+                'decided_at': decided_at,
+            }
+            with self.store.atomic():
+                self.store.update(approval_id, status='approved', note=str(note or '')[:4000],
+                                  decided_at=decided_at, decision=audit)
+                self.store.update(job['id'], status=new_status, _transition_reason='formal_acceptance')
+                self.store.event('formal_acceptance_decided',
+                                 '認証済みアプリセッションから成果物の正式受領が記録されました。',
+                                 task['id'], job['id'], details=audit)
+            return {'ok': True, 'status': new_status, 'audit': audit}
 
 
 
@@ -1809,6 +2395,14 @@ class Engine:
     def _instructions(self, ctx):
 
         job = self.store.get(ctx.task['job_id'], 'job')
+        validation_context = ''
+        if ctx.task['role'] == 'reviewer':
+            from team_code_test_contract import commands
+            if commands(job):
+                from team_validation_gate import review_context
+                cycle_id = ctx.task.get('review_cycle')
+                cycle = self.store.get(cycle_id, 'task') if cycle_id else None
+                validation_context = '\n\n' + review_context(commands(job), cycle, job)
         from team_review_context import evaluation_mode_for_job
         review_context_mode = evaluation_mode_for_job(self.config, job) if ctx.task['role'] == 'reviewer' else 'off'
 
@@ -1849,7 +2443,10 @@ class Engine:
                         continue
                     content = '\n'.join(line for line in content.splitlines() if line.strip() != '@AGENTS.md')
 
-                shared.append(str(path) + '\n' + content)
+                # Policy source labels are model-facing; local lookup paths stay local.
+                label = ('利用者共通方針' if path.parent == policy_root
+                         else 'プロジェクト方針: ' + path.name)
+                shared.append(label + '\n' + content)
 
         return ('采来 — サイクル —の限定担当です。日本語で指定JSONスキーマに従って応答してください。\n'
 
@@ -1870,7 +2467,7 @@ class Engine:
 
                '依頼範囲の編集だけ許可。既存変更を保存し、重要な削除やグローバル方針変更をしない。\n')
 
-            + '不明点は先に根拠を調べる。' + BLOCKED_RULE +
+            + '不明点は先に根拠を調べる。' + BLOCKED_RULE + PROGRESS_RULE +
 
             'questionsは質問ごとにid,text,optionsを分け、各optionにid,label,input_required,input_labelを含める。'
 
@@ -1907,6 +2504,7 @@ class Engine:
 
             + '\n現在の方針:\n' + '\n\n'.join(shared)
 
+            + validation_context
             + '\n\n元の依頼:\n' + job['goal']
             + (CODE_TEST_PLAN_RULE if ctx.task['role'] == 'planner' and job.get('code_test_contract_version') else '')
             + ('\n\n利用者が依頼時に指定した検証コマンド（既存の操作承認・安全確認を通すこと）：\n'
@@ -1947,6 +2545,41 @@ class Engine:
 
 
 
+    def _record_progress_warnings(self, task, result):
+        warnings = result.get('warnings', [])
+        reasons = result.get('blocking_reasons', [])
+        if (not isinstance(warnings, list) or len(warnings) > 20
+                or any(not isinstance(x, str) or not x.strip() or len(x) > 1500 for x in warnings)):
+            raise ProviderError('警告の形式が不正です。')
+        if (not isinstance(reasons, list) or len(reasons) > 20
+                or any(not isinstance(x, dict) or set(x) != {'requirement', 'impact'}
+                       or any(not isinstance(x[k], str) or not x[k].strip() or len(x[k]) > 1500
+                              for k in ('requirement', 'impact')) for x in reasons)):
+            raise ProviderError('停止理由には必須条件と具体的な支障が必要です。')
+        # Promote only explicitly completed stages with no unresolved decisions/checks.
+        # Never reinterpret tool, approval, authorization or execution errors here.
+        if (task.get('role') != 'planner' and result.get('stage_complete') is True
+                and warnings and not reasons and not result.get('questions')
+                and not result.get('pending_checks') and not result.get('question')
+                and result.get('status') in ('blocked', 'needs_changes')):
+            result['status'] = 'done'
+        if reasons and result.get('status') == 'done':
+            result['status'] = 'needs_changes'
+        if warnings:
+            with self.store.atomic():
+                job = self.store.get(task['job_id'], 'job')
+                records = list(job.get('warning_issues') or [])
+                existing = {x.get('id') for x in records}
+                for message in warnings:
+                    ident = hashlib.sha256((task['id'] + '\n' + message).encode()).hexdigest()
+                    if ident not in existing:
+                        records.append({'id': ident, 'task_id': task['id'], 'job_id': job['id'],
+                                        'summary': message, 'severity': 'warning', 'status': 'open',
+                                        'blocking': False, 'created_at': now(),
+                                        'source': 'agent_report'})
+                        existing.add(ident)
+                self.store.update(job['id'], warning_issues=records)
+
     def _validate(self, task, result):
 
         # Only the "no question / no update" fields are filled when absent or null: their absence means the same as
@@ -1956,6 +2589,8 @@ class Engine:
         for key, empty in EMPTY_WHEN_ABSENT.items():
             if result.get(key) is None:
                 result[key] = copy.deepcopy(empty)
+
+        self._record_progress_warnings(task, result)
 
         updates = result.get('context_updates', [])
 
@@ -2130,7 +2765,7 @@ class Engine:
                 from team_validation_gate import findings
                 from team_code_test_contract import commands, verify_snapshot
                 cycle = self.store.get(task['review_cycle'], 'task') if task.get('review_cycle') else None
-                missing = findings(commands(job), cycle)
+                missing = findings(commands(job), cycle, job=job, project=job['project'])
                 if (job.get('code_test_plan') or {}).get('required') and not verify_snapshot(
                         job['project'], (cycle or {}).get('test_asset_snapshot') or {}):
                     missing.append('テスト実行後にテストファイルが変更・削除されています。')
@@ -2243,17 +2878,8 @@ class Engine:
                     self.store.event('document_plan_incomplete',str(exc),task['id'],job['id'])
                     return
 
-                if job['auto_execute'] or job.get('document_source'):
-                    if job.get('document_source'):
-                        self.store.event('document_plan_auto_approved','確認済みの資料作成範囲で計画を自動承認しました。',task['id'],job['id'])
-
-                    self._expand_plan(task, result)
-
-                else:
-
-                    self.store.update(job['id'], status='awaiting_approval')
-
-                    self.new_approval(task, 'plan', result)
+                self.store.update(job['id'], status='awaiting_approval')
+                self.new_approval(task, 'plan', result)
 
             elif result['status'] == 'blocked':
 
@@ -2530,7 +3156,25 @@ class Engine:
                 if task['role'] == 'planner' else \
                 (RESULT_SCHEMA_TESTS if task['role'] == 'builder' and
                  (job_for_schema.get('code_test_plan') or {}).get('required') else RESULT_SCHEMA)
+            if task['role'] == 'planner':
+                ctx.check()
+                if not self._claim_g2_for_run(task['id'], task['attempt']):
+                    agent_outcome, failure_code = 'held', 'g2_authorization'
+                    return
+                ctx.check()
             result = ADAPTERS[task['profile']['adapter']]().run(ctx, prompt, schema)
+            if task['role'] == 'planner':
+                with self.store.atomic():
+                    current_job = self.store.get(task['job_id'], 'job')
+                    if (current_job.get('g2_gate_version') != 1 or current_job.get('g2_status') != 'executing'
+                            or current_job.get('g2_execution_attempt') != task['attempt']):
+                        self._g2_block(current_job, self.store.get(task['id']), 'g2_claim_lost_after_provider')
+                        agent_outcome, failure_code = 'held', 'g2_authorization'
+                        return
+                    self.store.update(task['job_id'], g2_status='consumed', g2_consumed_at=now())
+                    self.store.event('g2_execution_consumed', '承認済みの計画生成1回を消費しました。',
+                                     task['id'], task['job_id'], {'revision': current_job['g2_revision'],
+                                     'attempt': task['attempt']})
             # 2026-10-09 (user decision): every provider's report passes the same schema gate, so the items do not
             # depend on the model. Claude/Codex enforce the schema in their CLI; Copilot is repaired in its adapter.
             from team_adapters import schema_errors
@@ -2593,6 +3237,20 @@ class Engine:
                 current = self.store.get(task['id'])
 
                 cancelled = isinstance(exc, Cancelled) or current['status'] == 'cancelled'
+
+                if task.get('role') == 'planner':
+                    try:
+                        current_job = self.store.get(task['job_id'], 'job')
+                        if (current_job.get('g2_gate_version') == 1
+                                and current_job.get('g2_status') == 'executing'
+                                and current_job.get('g2_execution_attempt') == task.get('attempt')):
+                            self.store.update(task['job_id'], g2_status='consumed', g2_consumed_at=now())
+                            self.store.event('g2_execution_consumed',
+                                '計画生成の実行権を使用しました。失敗後の再試行には新しいG2承認が必要です。',
+                                task['id'], task['job_id'], {'revision': current_job['g2_revision'],
+                                'attempt': task.get('attempt')})
+                    except (KeyError, TypeError, ValueError):
+                        self._g2_block(self.store.get(task['job_id'], 'job'), current, 'g2_consume_failed')
 
                 agent_outcome = 'cancelled' if cancelled else 'failed'
 
@@ -2702,6 +3360,57 @@ class Engine:
                     continue
 
                 job = self.store.get(task['job_id'])
+
+                if task.get('role') == 'planner':
+                    gate_version = job.get('g2_gate_version')
+                    if gate_version is None:
+                        # Old planner records have no explicit human G2 decision. Leave their history untouched,
+                        # but never dispatch them after this gate is introduced.
+                        continue
+                    if gate_version != 1:
+                        self._g2_block(job, task, 'unknown_gate_version')
+                        continue
+                    g2_status = job.get('g2_status')
+                    if g2_status == 'pending':
+                        pending = self._job_g2_approval(job['id'], job.get('g2_approval_id'))
+                        if pending is None:
+                            self._g2_block(job, task, 'pending_approval_missing_or_foreign')
+                            continue
+                        try:
+                            current_fingerprint, _ = self._g2_fingerprint(job, task)
+                        except (OSError, KeyError, RuntimeError, TypeError):
+                            self._g2_block(job, task, 'pending_gate_unreadable')
+                            continue
+                        if (pending.get('kind') != 'ai_start' or pending.get('status') != 'pending'
+                                or pending.get('task_id') != task['id'] or pending.get('job_id') != job['id']
+                                or pending.get('attempt') != task.get('attempt', 0) + 1
+                                or task.get('status') != 'queued' or job.get('status') != 'awaiting_approval'):
+                            self._g2_block(job, task, 'pending_gate_mismatch')
+                            continue
+                        if pending.get('payload', {}).get('fingerprint') != current_fingerprint:
+                            self._request_g2(job['id'], task['id'], '承認待ち中に計画対象またはモデル設定が変わりました。')
+                        continue
+                    if g2_status == 'approved':
+                        if job.get('status') != 'planning' or task.get('status') != 'queued':
+                            self._g2_block(job, task, 'approved_state_mismatch')
+                            continue
+                        if not self._g2_approval_is_current(job, task, expected_attempt=task['attempt'] + 1):
+                            approval = self._job_g2_approval(job['id'], job.get('g2_approval_id'))
+                            if (approval and approval.get('kind') == 'ai_start'
+                                    and approval.get('job_id') == job['id']
+                                    and approval.get('task_id') == task['id']
+                                    and approval.get('status') == 'approved'):
+                                self._request_g2(job['id'], task['id'], '承認後にRoot・SCOPE・計画入力・Provider設定が変わりました。')
+                            else:
+                                self._g2_block(job, task, 'approved_gate_unreadable')
+                            continue
+                    elif g2_status in ('executing', 'consumed'):
+                        # A provider attempt already claimed this one-call approval. A queued task is a retry.
+                        self._request_g2(job['id'], task['id'], '計画生成の再試行には新しいG2承認が必要です。')
+                        continue
+                    else:
+                        self._g2_block(job, task, 'unknown_g2_status')
+                        continue
 
                 if job['status'] not in ('planning', 'running') or canonical(job['project']) in busy:
 
@@ -2887,6 +3596,7 @@ class Engine:
                 'summary': '\n\n'.join(t.get('agent_name', 'reviewer') + ': ' + t['result']['summary'] for t in latest),
                 'checks': [t.get('agent_name', 'reviewer') + ': ' + c for t in latest for c in t['result'].get('checks', [])],
                 'note': 'AIのレビュー結果です。利用者が指摘を修正せずに受け入れへ進めました。内容を見て、受け入れるか差し戻すかを決めてください。',
+                'accept_without_fix': True,
                 'review_findings': findings,
                 'pending_items': pending_items,
                 'stage_checks': [{'task_id': t['id'], 'title': t['title'],
@@ -2910,6 +3620,9 @@ class Engine:
         with self.store.atomic():
 
             task = self.store.get(task_id, 'task')
+            task_job = self.store.get(task['job_id'], 'job')
+            if task.get('role') == 'planner' and task_job.get('g2_gate_version') != 1:
+                raise ValueError('この計画タスクには有効なG2ゲートがありません。モデルを切り替えられません。')
 
 
             job = self.store.get(task['job_id'], 'job')
@@ -3250,6 +3963,9 @@ class Engine:
         with self.store.lock:
 
             task = self.store.get(task_id, 'task')
+            task_job = self.store.get(task['job_id'], 'job')
+            if task.get('role') == 'planner' and task_job.get('g2_gate_version') != 1:
+                raise ValueError('この計画タスクには有効なG2ゲートがありません。AI実行を再試行できません。')
             if handoff_allowed and (task['role'] not in ('builder', 'researcher') or not str(note or '').strip()):
                 raise ValueError('未実施として残す項目を回答欄に書いてください（作業・調査の担当だけ指定できます）。')
             if (task.get('result') or {}).get('status') == 'needs_changes' and not str(note or '').strip():
@@ -3277,6 +3993,13 @@ class Engine:
             self.sync_handoff(task['job_id'])
 
             revision = instruction_revision(task, instruction, now(), '再試行前の指示整理', str(note)[:4000] if note else '')
+            # A recovery must not erase the failed attempt's report or diagnosis.
+            revision['recovery_history'] = list(task.get('recovery_history', [])) + [{
+                'at': now(), 'attempt': task.get('attempt'), 'status': task.get('status'),
+                'summary': task.get('summary'), 'result': task.get('result'),
+                'failure_code': task.get('failure_code'), 'recovery': task.get('recovery'),
+                'recovery_advice': task.get('recovery_advice'), 'agent_run_id': task.get('agent_run_id'),
+            }]
             if recheck:
                 history = (task.get('review_result_history', []) + [{'result': task['result'], 'recorded_at': now()}])[-20:]
                 revision['review_result_history'] = history
@@ -3292,6 +4015,10 @@ class Engine:
                     {'task_id': task_id, 'title': task['title'], 'note': str(note)[:4000], 'via': 'retry', 'at': now()}]
                 self.store.event('handoff_scope', '利用者が未実施として残す範囲を指定して再試行しました。', task_id, task['job_id'])
             self.store.update(task['job_id'], **job_changes)
+
+            if task['role'] == 'planner':
+                self._request_g2(task['job_id'], task_id,
+                                 '計画担当の手動再試行。既存のG2承認は再利用しません。')
 
             self.store.event('retry', '変更内容を確認したうえで再試行を依頼しました。', task_id, task['job_id'])
 
@@ -3595,7 +4322,7 @@ class Engine:
 
                 return {'allow': False, 'note': '対象プロジェクト外への編集です。'}
 
-            protected = {'.git', '.codex', '.claude', '.ssh', 'agents.md', 'claude.md', 'auth.json', '.credentials.json',
+            protected = {'.git', '.codex', '.claude', '.ssh', 'agents.md', 'claude.md', 'scope.md', 'command_allowlist.md', 'auth.json', '.credentials.json',
                          # Security by Default: the project's security policy and its audit log are people's (and 采来's) files.
                          'security_policy.md', 'data_classification.md', 'tool_policy.yaml', 'audit'}
 
@@ -3605,7 +4332,8 @@ class Engine:
 
             job = self.store.get(ctx.task['job_id'])
 
-            if job['auto_execute']:
+            from team_auto_edit import approved_scope_edit
+            if job['auto_execute'] or approved_scope_edit(ctx, target):
 
                 if target.exists() and (not target.is_file() or target.stat().st_size > 10_000_000):
 
@@ -3627,7 +4355,7 @@ class Engine:
 
                 ctx.event('依頼範囲内の編集を許可（既存ファイルは退避）: ' + str(target.relative_to(root)))
 
-                return {'allow': True, 'note': '利用者がこの依頼の自動実行を指定済み。登録範囲内の通常編集。'}
+                return {'allow': True, 'note': '承認済み範囲内の通常編集。変更前を退避し操作履歴へ記録。以後も通常保存はWrite/Editを使用してください。'}
 
         # No model-written shell command is interpreted as "safe" by a substring check.
 
