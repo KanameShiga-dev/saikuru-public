@@ -62,6 +62,22 @@ class EgressGuardTests(unittest.TestCase):
         self.assertNotIn('C:\\Users\\', clean['stdout'])
         self.assertEqual(findings(clean), [])
 
+    def test_loopback_url_in_tool_output_is_not_withheld_and_batch_continues(self):
+        value = {'file': {'content': 'Open http://127.0.0.1:8000/ or https://localhost:8877/api after starting.'}}
+        clean, labels, changed = sanitize_tool_output(value)
+        self.assertFalse(changed)
+        self.assertNotIn('loopback_url', labels)
+        self.assertEqual(clean, value)
+        self.assertEqual(batch_block_reason({'tool_calls': [{'tool_name': 'Read', 'tool_response': clean}]}), '')
+
+    def test_loopback_url_does_not_hide_a_real_secret_in_tool_output(self):
+        value = {'file': {'content': 'http://127.0.0.1:8000/ api_key=synthetic_secret_value_123'}}
+        clean, labels, _changed = sanitize_tool_output(value)
+        self.assertIn('secret', labels)
+        self.assertNotIn('synthetic_secret_value_123', str(clean))
+        self.assertIn('protected_output_withheld',
+                      batch_block_reason({'tool_calls': [{'tool_name': 'Read', 'tool_response': clean}]}))
+
     def test_unredactable_tool_output_is_withheld_and_batch_stops(self):
         value = {'stdout': 'api_key=synthetic_secret_value_123', 'stderr': '', 'interrupted': False}
         clean, labels, changed = sanitize_tool_output(value)
