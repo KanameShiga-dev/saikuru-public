@@ -130,7 +130,10 @@ def progress(job, tasks, approvals):
     pending = [task for task in owned if task.get('status') in
                ('running', 'awaiting_approval', 'failed', 'blocked', 'interrupted', 'queued')]
     active = next((task for task in pending if task.get('status') != 'queued'), None)
-    remaining = [title(task) for task in pending if task.get('status') == 'queued']
+    if active is None:
+        active = next((task for task in pending if task.get('status') == 'queued'), None)
+    remaining = [title(task) for task in pending
+                 if task.get('status') == 'queued' and task.get('id') != (active or {}).get('id')]
     latest_completion = next((approval for approval in reversed(approvals)
                               if approval.get('job_id') == job.get('id')
                               and approval.get('kind') == 'completion'
@@ -154,7 +157,7 @@ def progress(job, tasks, approvals):
             next_action = title(active) if active else (remaining[0] if remaining else '作業状態を確認する')
     return {
         'completed': completed,
-        'current': ('保守対応待ち' if maintenance_wait else active.get('title') if active else
+        'current': ('保守対応待ち' if maintenance_wait else title(active) if active else
                     '完成物の確認待ち' if latest_completion else '次の作業を待機中'),
         'remaining': remaining + ([] if job.get('status') in ('accepted', 'accepted_with_pending_checks')
                                  else ['利用者による完成物の確認']),
