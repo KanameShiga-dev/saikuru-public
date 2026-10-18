@@ -294,9 +294,9 @@ function describeCommand(command,background){
   }
   if(/(urllib|requests\.|httpx|aiohttp|http\.client|^\s*curl\b|Invoke-WebRequest|Invoke-RestMethod)/i.test(text)){
     const hosts=[...new Set(commandUrls(text).map(urlHost))];
-    if(hosts.length&&hosts.every(isLoopbackHost))return `自分のPC内のアプリ（${hosts.join('、')}）へ接続して、応答を確認します。`;
-    if(hosts.length)return `ネットワークへ接続します（${hosts.join('、')}）。`;
-    return 'ネットワークへ接続するコマンドです。接続先はコマンドの文字列から読み取れません。';
+    if(hosts.length&&hosts.every(isLoopbackHost))return `コマンド文字列に自分のPC宛てのURL（${hosts.join('、')}）が記載されています。実際の接続先や処理の影響は、この表示だけでは確認できません。`;
+    if(hosts.length)return `コマンド文字列に外部URL（${hosts.join('、')}）が記載されています。実際の通信内容は、この表示だけでは確認できません。`;
+    return 'コマンド文字列に通信関連の記載があります。接続先や実際の処理は、この表示だけでは確認できません。';
   }
   match=text.match(/^\s*git\s+(status|diff|log|show|branch)\b/i);
   if(match)return `Gitの状態を確認します（git ${match[1]}）。`;
