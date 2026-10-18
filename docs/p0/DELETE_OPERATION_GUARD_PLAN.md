@@ -1,6 +1,6 @@
-# 削除・破壊操作ガード：実装前の受入試験案
+# 削除・破壊操作ガード：統合確認と受入試験
 
-状態：レビュー用の試験計画。ガード実装・ポリシー変更は未実施。案Aの実装には利用者判断が必要。
+状態：Claude の `f0a2c2c` / `dec1e36` を `p0/integration` にローカル cherry-pick 済み。Codex のレビューで見つけた `outbound_exceptions` の迂回は、`delete` / `dynamic` を例外対象外にする修正と回帰テストで塞いだ。テストは未実行。統合・push・本番反映は別途確認する。
 
 ## 目的
 
@@ -39,7 +39,7 @@
 
 ## 3. 例外・優先順位
 
-- `outbound_exceptions` は現在どのmanualカテゴリも完全一致で例外化できる。削除を人の判断に残すなら、`delete` は管理者例外でも解除できないことをテストする。`excepted()` の汎用処理をそのまま使う場合、`category='delete'` の例外が自動承認の抜け道になり得る。
+- `outbound_exceptions` は他のmanualカテゴリを完全一致で例外化できる。`delete` と `dynamic` は例外判定へ渡さず、人の確認を維持する。追加した合成Engineテストで例外設定があっても両カテゴリに `force_manual` が付くことを確認する（未実行）。
 - 機密・認証情報の `deny` は削除カテゴリより優先し、常に拒否する。
 - ネットワーク・公開等と削除が同じコマンドにある場合も、強い方の強制確認が消えないことを確認する。
 - Codex native command approvalは `Context.approve()` が既に `force_manual` にする別経路。今回のengine試験はClaude等のBash `tool_request()` を通し、native承認だけを試して終わらない。

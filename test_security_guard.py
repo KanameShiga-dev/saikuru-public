@@ -219,3 +219,24 @@ class EngineGuardTests(unittest.TestCase):
         for path in ('SECURITY_POLICY.md', 'TOOL_POLICY.yaml', 'audit/2026-10.jsonl'):
             result = self.engine.tool_request(ctx.token, {'task_id': task['id'], 'tool': 'Write', 'input': {'file_path': path}})
             self.assertFalse(result['allow'], path)
+
+    def test_delete_and_dynamic_findings_cannot_be_waived_by_outbound_exceptions(self):
+        from unittest.mock import patch
+        from team_engine import Context
+        job = self.engine.create_job('sample', 'local goal', self.temp.name, True)
+        task = self.engine.new_task(job, 'change', 'change file', 'builder')
+        ctx = Context(self.engine, task)
+        self.engine.active[task['id']] = ctx
+        seen = []
+        ctx.approve = lambda payload: seen.append(payload) or {'allow': False, 'note': 'test'}
+        policy = {'outbound_exceptions': [
+            {'category': 'delete', 'contains': 'rm -rf build', 'reason': 'test exception'},
+            {'category': 'dynamic', 'contains': 'python -c "exec(1)"', 'reason': 'test exception'},
+        ]}
+        bash = lambda command: self.engine.tool_request(ctx.token, {
+            'task_id': task['id'], 'tool': 'Bash', 'input': {'command': command}})
+        with patch('team_dlp.load_policy', return_value=policy):
+            bash('rm -rf build')
+            bash('python -c "exec(1)"')
+        self.assertEqual([item['guard']['category'] for item in seen], ['delete', 'dynamic'])
+        self.assertTrue(all(item['force_manual'] for item in seen))

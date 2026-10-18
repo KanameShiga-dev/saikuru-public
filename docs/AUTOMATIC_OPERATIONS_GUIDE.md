@@ -37,13 +37,15 @@
 
 ### 削除・破壊操作に関する注意
 
-現行の `team_outbound_guard.classify()` には削除・破壊操作の分類規則がない。`rm -rf`、PowerShellの `Remove-Item -Recurse -Force` とその `rm` / `rmdir` / `del` / `erase` / `rd` エイリアス、`del /s /q`、`rmdir /s /q`、`git reset --hard`、`git clean -fdx`、Pythonの `shutil.rmtree` 等は `classify()` が未検出（`None`）を返す。その要求が通常のBash承認経路に入ると、`automatic_operations=true` では個別の人の承認なしに通る可能性がある。
+`p0/integration` の現在の作業ツリーには、`delete` と `dynamic` の分類規則が追加されている。削除操作（`rm` / `Remove-Item` / `git reset --hard` / `git clean` / `shutil.rmtree` 等）と、実行内容を隠す一部の表現（PowerShell encoded command、`exec` / `eval` / `compile` / `__import__`、Base64 decode 等）は人の確認へ回す。これはコマンド文字列の分類であり、下記の未対応例を含め、削除・破壊操作全般を保証して防ぐものではない。
 
-このリスクは文字列パターンの追加だけでは解消しない。`python cleanup.py` のようなスクリプト実行、別名・関数・変数展開、動的実行、難読化されたコマンド、`find -delete`、`git restore`、削除と同等の上書き等は静的なコマンド分類を迂回し得る。Codex native command approvalは別経路で強制的に人の承認へ回るが、Claude等の `tool_request()` 経由のBashには同じ強制が常に適用されるわけではない。`job.auto_execute=true` による通常の `Write` / `Edit` の直接許可も、このコマンド分類とは別の経路である。
+この実装で未対応として報告された例は、上書き（`mv` / `cp` / リダイレクト / `Set-Content` / `open(..., 'w')`）、`ri` 等の別名、変数経由のコマンド名、`getattr`、`python cleanup.py` 等のスクリプト内部である。別名・関数・変数展開、動的実行、難読化も静的分類を迂回し得る。コードレビューで見つかった管理者例外の抜け道は、統合側で `delete` / `dynamic` を `outbound_exceptions` の対象外にする修正と回帰テストを追加した。これらはローカル未実行のため、動作確認は未完了として扱う。
+
+Codex native command approvalは別経路で強制的に人の承認へ回るが、Claude等の `tool_request()` 経由のBashには同じ強制が常に適用されるわけではない。`job.auto_execute=true` による通常の `Write` / `Edit` の直接許可も、このコマンド分類とは別の経路である。
 
 2026-10-19の読み取り確認では、本番として使われる `data/config.json` の保存値は `automatic_operations=true`、`approved_roots` は5件だった。同時点で8790番は待受けていなかったため、これはファイルに保存された設定値の記録であり、稼働中プロセスの実効設定を確認した結果ではない。設定値やサービス状態は利用時に改めて確認する。
 
-`delete: manual` を追加する案は既知の直接コマンドを人の確認へ回す第一段階として有効だが、削除全般を防ぐ保証にはならない。強い保証が必要なら、Bashの許可リスト化またはOS側の隔離と併用する。削除分類規則はこの文書更新時点で未実装である。
+`delete: manual` は既知の直接コマンドを人の確認へ回す第一段階であり、削除全般を防ぐ保証にはならない。強い保証が必要なら、Bashの許可リスト化またはOS側の隔離と併用する。統合前後を問わず、適用先のブランチ・稼働プロセス・設定を確認し、下記の限界を踏まえて使う。
 
 ## `automatic_operations=false` でも直接許可される範囲
 

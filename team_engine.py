@@ -4464,7 +4464,10 @@ class Engine:
             if guard is not None:
                 category, label, action = guard
                 exception = None
-                if action == 'manual':
+                # Deletion and dynamic-execution findings are never waived by outbound exceptions.
+                # Those exceptions are intended for narrowly approved outbound operations, not local data loss
+                # or commands whose effects cannot be determined from their text.
+                if action == 'manual' and category not in ('delete', 'dynamic'):
                     try:
                         from team_dlp import load_policy
                         exception = excepted(data.get('command', ''), category, load_policy())
