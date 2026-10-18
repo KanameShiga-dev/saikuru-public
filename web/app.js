@@ -84,7 +84,7 @@ function reviewResolutionHint(review,job){
  box.append(el('p','読み取り不可・未測定の指摘は、取得できない理由と後続の確認方法を明記します。未確認を確認済みに置き換えないでください。'));
  return box;
 }
-function date(t) { return new Date(t*1000).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+function date(t) { if(!(t>0))return '日時不明'; return new Date(t*1000).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 let sessionRecovery = null;
 async function recoverSession() {
   if(!sessionRecovery)sessionRecovery=(async()=>{
@@ -1090,6 +1090,7 @@ function renderDetail(task,version) {
         const accept=button(hasPending?'未完了項目を明示して条件付き正式受領':'成果物を正式受領',async()=>{
           if(confirmation.value.trim()!=='正式受領'){notice('正式受領する場合は確認欄に「正式受領」と入力してください。');return;}
           await api('/api/jobs/formal-acceptance',{approval_id:a.id,confirmation:confirmation.value.trim(),note:input.value});
+          notice('正式受領しました。この依頼は終了しました。');
         },'primary');actions.append(accept);
       }
     }else{
