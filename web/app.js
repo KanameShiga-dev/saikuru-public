@@ -27,7 +27,10 @@ function userDecision(a){
   if(a.intended_role==='maintainer'||a.intended_role==='none')return false;
   return ['BUSINESS','ACCEPTANCE'].includes(a.category)||(a.category==='RISK'&&a.intended_role==='authorized_person');
 }
-function jobStatusLabel(job){const phase=p0Phase(job);if(phase)return phase.label;return job?.g2_gate_version===1&&job.g2_status==='pending'?'AIによる計画作成の開始の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
+function jobStatusLabel(job){const phase=p0Phase(job);if(phase)return phase.label;
+  // 新形式の依頼が停止していて、利用者に判断を求める項目が無いとき、原因を推測せず「判断が必要」とは表示しない。
+  if(job?.p0_contract_version===1&&job.status==='blocked'&&!(state?.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a)))return '停止中（次の動作をご確認ください）';
+  return job?.g2_gate_version===1&&job.g2_status==='pending'?'AIによる計画作成の開始の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
 function el(tag, text, cls) { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; }
 function notice(text) { $('notice').textContent=text; }
 // P0 L1：標準画面（既定）と技術詳細の切り替え。選択はこのブラウザーにだけ保存し、読めなくても標準で動く。
@@ -936,7 +939,7 @@ function renderDetail(task,version) {
   const drafts={};$('detail-body').querySelectorAll('textarea').forEach(t=>drafts[t.id]=t.value);
   detailVersion=version;const job=state.jobs.find(j=>j.id===task.job_id);$('detail-title').textContent=task.title;
   const body=$('detail-body');body.replaceChildren(el('p',`${roles[task.role]} / ${task.profile.adapter} / ${task.profile.model} / ${task.profile.effort} · 試行 ${task.attempt}`,'tech-only'),el('p',`状態: ${statuses[task.status]||task.status} · 依頼の状態: ${jobStatusLabel(job)}`));
-  if(job.g2_gate_version===1)body.append(section('AIによる計画作成の開始',`状態: ${job.g2_status==='pending'?'未承認・停止中':job.g2_status==='approved'?'承認済み・開始待ち':job.g2_status==='executing'?'承認済みの計画生成を実行中':job.g2_status==='consumed'?'承認済みの1回を使用済み':job.g2_status==='denied'?'拒否済み':'検証不能'}\nG2は計画生成1回のみを許可します。計画完了後は別のG3計画承認が必要です。`));
+  if(job.g2_gate_version===1)body.append(section('AIによる計画作成の開始',`状態: ${job.g2_status==='pending'?'未承認・停止中':job.g2_status==='approved'?'承認済み・開始待ち':job.g2_status==='executing'?'承認済みの計画生成を実行中':job.g2_status==='consumed'?'承認済みの1回を使用済み':job.g2_status==='denied'?'拒否済み':'検証不能'}\nこの承認で許可するのは、AIによる計画作成の1回だけです。計画ができた後は、別に開発計画の確認・承認が必要です。`));
   const skillMode=job.skill_selection?.mode;
   if(job.evaluation?.mode)body.append(el('p','効果検証用の依頼：モード'+job.evaluation.mode+'（再利用の文脈だけを切り替え）'));
   if(skillMode!=='none'&&job.skill_selection?.names?.length)body.append(el('p','依頼時にプロジェクトへ追加したスキル（候補）: '+job.skill_selection.names.join('、')));
@@ -1056,7 +1059,7 @@ function renderDetail(task,version) {
     if(a.payload.questions?.length){if(summary)body.append(summary);body.append(questionForm(a));continue;}
     const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
     if(summary)box.append(summary);
-    if(a.kind==='ai_start')box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途G3計画承認が必要です。モデル利用量が発生します。','notice'));
+    if(a.kind==='ai_start')box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途、開発計画の確認・承認が必要です。モデル利用量が発生します。','notice'));
     if(a.kind==='tool'&&a.payload?.guard)box.append(el('p','送信の防御：'+a.payload.guard.label+'。'+a.payload.guard.note+' 送信先・送る内容・依頼に必要かを確認してから許可してください。','notice'));
     if(a.kind==='completion'){
       box.append(el('p','レビュー結果の確認と依頼全体の正式受領は別操作です。レビュー確認だけでは受領状態を変更しません。','notice'));
@@ -1090,7 +1093,7 @@ function renderDetail(task,version) {
         },'primary');actions.append(accept);
       }
     }else{
-      actions.append(button(a.kind==='ai_start'?'G2を承認して計画生成を1回開始':'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value}),'primary'));
+      actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value}),'primary'));
     }
     box.append(actions);body.append(box);
   }
@@ -1129,6 +1132,8 @@ function renderDetail(task,version) {
   body.querySelectorAll('textarea').forEach(t=>{if(drafts[t.id])t.value=drafts[t.id];});
   foldDetailSections(body,task);
   // 新形式の依頼では、引き継ぎDBの編集欄と履歴は技術詳細に置く（旧形式の表示は変えない）。
+  // 新形式の依頼では、担当・モデルの切り替えは一般画面に出さない（技術詳細で従来どおり使える）。
+  if(job.p0_contract_version===1)for(const button of body.querySelectorAll('button'))if(button.textContent.trim()==='担当・モデルを切り替える')button.classList.add('tech-only');
   if(job.p0_contract_version===1)for(const node of body.children){const head=node.textContent||'';if(head.startsWith('引き継ぎ情報を登録・訂正')||head.startsWith('引き継ぎDBの履歴'))node.classList.add('tech-only');}
   const phase=p0Phase(job);
   if(phase){
@@ -1327,12 +1332,12 @@ $('new-job').addEventListener('click',()=>{if(!state)return;
   $('project-select').replaceChildren(...state.config.approved_roots.map(p=>new Option(p,p)));
   const auto=$('new-dialog').querySelector('input[name="auto_execute"]'),autoLabel=auto?.closest('label');
   const autoText=autoLabel&&[...autoLabel.childNodes].find(n=>n.nodeType===Node.TEXT_NODE);
-  if(autoText)autoText.nodeValue=' G3計画承認後の後続作業を自動で進める設定（計画生成・計画承認の確認は省略されません）';
-  if(autoLabel?.nextElementSibling)autoLabel.nextElementSibling.textContent='G1登録ではAIを起動しません。G2で計画生成を承認し、生成後にG3で計画を承認してください。';
+  if(autoText)autoText.nodeValue=' 開発計画の承認後の作業を自動で進める設定（計画生成・計画承認の確認は省略されません）';
+  if(autoLabel?.nextElementSibling)autoLabel.nextElementSibling.textContent='依頼の受付ではAIを起動しません。AIによる計画作成の開始を承認し、計画ができたら開発計画を確認・承認してください。';
   const consent=$('new-dialog').querySelector('input[name="consent"]'),consentLabel=consent?.closest('label');
   const consentText=consentLabel&&[...consentLabel.childNodes].find(n=>n.nodeType===Node.TEXT_NODE);
   if(consentText)consentText.nodeValue=' 依頼内容・添付ファイルを隔離ジョブ管理DBへ登録することを確認しました。登録だけではAIへ送信されません。';
-  const submit=$('new-dialog').querySelector('form button[type="submit"]');if(submit)submit.textContent='依頼を登録してG2待ちにする';
+  const submit=$('new-dialog').querySelector('form button[type="submit"]');if(submit)submit.textContent='依頼を登録して、計画作成の開始の承認を待つ';
   $('new-dialog').showModal();checkJobInstructionSize();jobSkills.load(api);
 });
 let folderState=null, folderBusy=false, folderGeneration=0;
@@ -1481,7 +1486,7 @@ $('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormD
 clearJobIssues();const issues=checkJobForm(e.target,f,docs);if(issues.length){showJobIssues(issues);return;}
 if(!docs&&DOCUMENT_REQUEST.test(String(f.get('title'))+' '+String(f.get('goal')))&&!confirm('資料（PowerPoint・Word・PDFなど）を作る依頼のようです。\n\n「依頼の種類」を「資料作成」にすると、図・表付きの資料を作る道具で進められます。開発・作業の依頼では、資料用の道具は使えません。\n\nこのまま開発・作業の依頼として出しますか？（キャンセルで入力に戻ります）'))return;
 action(async()=>{try{await submitJob(f,docs,e.target);}catch(error){showJobIssues([jobServerIssue(error)]);throw error;}});});
-async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const route=f.get('route')||'full';const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,validation_commands:docs?[]:String(f.get('validation_commands')||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{}) ,...(route==='light_eval'?{route,light_scope_file:f.get('light_scope_file'),light_acceptance:f.get('light_acceptance')}: {})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、G2承認待ちの依頼を2件登録しました。':'依頼を登録しました。AI計画生成はG2承認待ちで停止中です。')+(created.prepared?.length?' '+created.prepared.join(' '):''));}
+async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const route=f.get('route')||'full';const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,validation_commands:docs?[]:String(f.get('validation_commands')||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{}) ,...(route==='light_eval'?{route,light_scope_file:f.get('light_scope_file'),light_acceptance:f.get('light_acceptance')}: {})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、計画作成の開始の承認待ちの依頼を2件登録しました。':'依頼を登録しました。AIによる計画作成は、開始の承認待ちで停止中です。')+(created.prepared?.length?' '+created.prepared.join(' '):''));}
 $('pause').addEventListener('click',()=>action(()=>api('/api/pause',{paused:!state.paused})));
 $('stop').addEventListener('click',()=>action(async()=>{if(confirm('全ての実行中の依頼を中止し、新規着手を停止しますか？'))await api('/api/stop',{});}));
 $('backup').addEventListener('click',()=>action(async()=>{const r=await api('/api/backup',{});notice('DBのバックアップを保存しました: data/'+r.file+'、data/'+r.handoff_file);}));
