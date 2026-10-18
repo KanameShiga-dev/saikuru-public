@@ -1141,7 +1141,7 @@ function renderDetail(task,version) {
   // 新形式の依頼では、引き継ぎDBの編集欄と履歴は技術詳細に置く（旧形式の表示は変えない）。
   // 新形式の依頼では、担当・モデルの切り替えは一般画面に出さない（技術詳細で従来どおり使える）。
   if(job.p0_contract_version===1)for(const button of body.querySelectorAll('button'))if(button.textContent.trim()==='担当・モデルを切り替える')button.classList.add('tech-only');
-  if(job.p0_contract_version===1)for(const node of body.children){const head=node.textContent||'';if(head.startsWith('引き継ぎ情報を登録・訂正')||head.startsWith('引き継ぎDBの履歴')||head.startsWith('停止理由と次の操作')||head.startsWith('ボードから復旧する')||head.startsWith('成果物を差し戻す'))node.classList.add('tech-only');}
+  if(job.p0_contract_version===1)for(const node of body.children){const head=node.textContent||'';if(head.startsWith('依頼の一次分類')||head.startsWith('引き継ぎ情報を登録・訂正')||head.startsWith('引き継ぎDBの履歴')||head.startsWith('停止理由と次の操作')||head.startsWith('ボードから復旧する')||head.startsWith('成果物を差し戻す'))node.classList.add('tech-only');}
   const phase=p0Phase(job);
   if(phase){
     // 復旧中・保守対応待ち・安全上の確認待ちでは、技術的な修理の欄を標準で隠す（技術詳細では従来どおり表示）。中止と成果物は残す。
@@ -1461,9 +1461,11 @@ const jobFields={
   evaluation:{label:'効果検証（検証モード）',el:()=>$('job-evaluation-mode'),open:()=>{$('job-evaluation').open=true;}},
   attachments:{label:'参考ファイルを添付',el:()=>$('job-attachments')},
   route:{label:'軽い経路の評価',el:()=>$('job-route'),open:()=>{routingBox.open=true;}},
-  consent:{label:'AIへの送信の確認',el:()=>$('job-form').elements.consent},
+  consent:{label:'確認のチェック',el:()=>$('job-form').elements.consent},
   other:{label:'送信・接続'}};
 $('job-form').noValidate=true;
+// 同意のチェック欄の文言は画面の状態（隔離ジョブ管理の確認など）で書き換わる。エラー文は、実際の文言を引用する。
+function consentLabelText(){return ($('job-form').elements.consent?.closest('label')?.textContent||'').trim()||'依頼内容・添付ファイルと必要な作業情報をAIに送信し、CLIの利用枠を使うことを確認しました。';}
 function checkJobForm(form,f,docs){
   const issues=[],add=(field,problem,fix)=>issues.push({field,problem,fix});
   if(!String(f.get('title')||'').trim())add('title','入力されていません。','依頼の内容が分かる短い名前を入力してください（例：単位変換モジュールの作成）。');
@@ -1481,7 +1483,7 @@ function checkJobForm(form,f,docs){
     if(docs||!f.has('auto_execute')||f.get('evaluation_mode')!=='A'||!f.has('evaluation_confirmed'))add('route','軽い経路の開始条件を満たしていません。','開発・作業、自動実行、検証モードA、検証用データの確認を選んでください。');
     if(!/^[^\\/]+\.py$/i.test(String(f.get('light_scope_file')||''))||!String(f.get('light_acceptance')||'').trim())add('route','対象ファイルか合格条件が不足しています。','単一のPythonファイル名と具体的な合格条件を入力してください。');
   }
-  if(!f.has('consent'))add('consent','チェックが入っていません。','内容を確認のうえ、「依頼内容・添付ファイルと必要な作業情報をAIに送信し、CLIの利用枠を使うことを確認しました。」にチェックを入れてください。');
+  if(!f.has('consent'))add('consent','チェックが入っていません。','内容を確認のうえ、「'+consentLabelText()+'」にチェックを入れてください。');
   return issues;
 }
 function jobServerIssue(error){
@@ -1529,7 +1531,7 @@ $('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormD
 clearJobIssues();const issues=checkJobForm(e.target,f,docs);if(issues.length){showJobIssues(issues);return;}
 if(!docs&&DOCUMENT_REQUEST.test(String(f.get('title'))+' '+String(f.get('goal')))&&!confirm('資料（PowerPoint・Word・PDFなど）を作る依頼のようです。\n\n「依頼の種類」を「資料作成」にすると、図・表付きの資料を作る道具で進められます。開発・作業の依頼では、資料用の道具は使えません。\n\nこのまま開発・作業の依頼として出しますか？（キャンセルで入力に戻ります）'))return;
 action(async()=>{try{await submitJob(f,docs,e.target);}catch(error){showJobIssues([jobServerIssue(error)]);throw error;}});});
-async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const route=f.get('route')||'full';const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,validation_commands:docs?[]:String(f.get('validation_commands')||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{}) ,...(route==='light_eval'?{route,light_scope_file:f.get('light_scope_file'),light_acceptance:f.get('light_acceptance')}: {})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、計画作成の開始の承認待ちの依頼を2件登録しました。':'依頼を登録しました。AIによる計画作成は、開始の承認待ちで停止中です。')+(created.prepared?.length?' '+created.prepared.join(' '):''));}
+async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const route=f.get('route')||'full';const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,validation_commands:docs?[]:String(f.get('validation_commands')||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{}) ,...(route==='light_eval'?{route,light_scope_file:f.get('light_scope_file'),light_acceptance:f.get('light_acceptance')}: {})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、計画作成の開始の承認待ちの依頼を2件登録しました。':'依頼を登録しました。AIによる計画作成は、開始の承認待ちで停止中です。')+(created.prepared?.length&&document.body.dataset.view==='technical'?' '+created.prepared.join(' '):''));}
 $('pause').addEventListener('click',()=>action(()=>api('/api/pause',{paused:!state.paused})));
 $('stop').addEventListener('click',()=>action(async()=>{if(confirm('全ての実行中の依頼を中止し、新規着手を停止しますか？'))await api('/api/stop',{});}));
 $('backup').addEventListener('click',()=>action(async()=>{const r=await api('/api/backup',{});notice('DBのバックアップを保存しました: data/'+r.file+'、data/'+r.handoff_file);}));
