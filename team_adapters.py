@@ -158,7 +158,7 @@ def allow_automatic_format_retry(ctx):
     return job.get('p0_contract_version') != 1
 
 
-def decode_claude_result(message, schema):
+def decode_claude_result(message, schema, assistant_text=''):
     """Recover a complete report when Claude omits structured_output.
 
     The CLI can put its JSON report in result, sometimes inside a code fence or
@@ -168,7 +168,16 @@ def decode_claude_result(message, schema):
     output = message.get('structured_output')
     if isinstance(output, dict) and not schema_errors(output, schema):
         return output
-    return decode_text_report(message.get('result', ''), schema)
+    last_error = None
+    for text in (message.get('result', ''), assistant_text):
+        if not text:
+            continue
+        try:
+            return decode_text_report(text, schema)
+        except ProviderError as exc:
+            last_error = exc
+    raise last_error or ProviderError('Claudeの完了報告を受信できませんでした。作業の成果は保持しています。',
+                                     'format')
 
 
 class CodexAdapter:
@@ -419,6 +428,7 @@ class ClaudeAdapter:
                 process.proc.stdin.write(prompt)
             process.proc.stdin.close()
             artifact_calls = {}
+            last_assistant_text = ''
             while True:
                 msg = process.receive(ctx)
                 kind = msg.get('type')
@@ -436,6 +446,10 @@ class ClaudeAdapter:
                 elif kind == 'assistant':
                     if hasattr(ctx, 'observe_message'):
                         ctx.observe_message(msg.get('message', {}))
+                    text_blocks = [block.get('text', '') for block in msg.get('message', {}).get('content', [])
+                                   if isinstance(block, dict) and block.get('type') == 'text']
+                    if text_blocks:
+                        last_assistant_text = '\n'.join(text_blocks)
                     for block in msg.get('message', {}).get('content', []):
                         if block.get('type') == 'tool_use':
                             ctx.event('処理: ' + str(block.get('name', 'tool')))
@@ -458,7 +472,15 @@ class ClaudeAdapter:
                         raise ProviderError('Claude共通Agentの起動確認を受け取れませんでした。')
                     if msg.get('is_error') or msg.get('subtype') != 'success':
                         raise ProviderError('Claude Code: ' + str(msg.get('result') or msg.get('errors') or msg.get('subtype'))[:1500])
-                    return decode_claude_result(msg, schema)
+                    try:
+                        return decode_claude_result(msg, schema, last_assistant_text)
+                    except ProviderError as exc:
+                        if exc.code == 'format':
+                            ctx.event('報告形式を回収できませんでした（構造化結果='
+                                      + ('有' if isinstance(msg.get('structured_output'), dict) else '無')
+                                      + '、結果の長さ=' + str(len(str(msg.get('result') or '')))
+                                      + '、最終本文の長さ=' + str(len(last_assistant_text)) + '）。')
+                        raise
         finally:
             if process is not None:
                 process.close()
