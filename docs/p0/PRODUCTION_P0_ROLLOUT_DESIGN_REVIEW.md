@@ -74,15 +74,15 @@ G2はジョブ作成時に `g2_gate_version=1` を設定して `_request_g2()` �
 
 | 分岐 | コード位置 | 既存テスト | P0オフ受入時に必要な確認 |
 |---|---|---|---|
-| 設定既定・型・新規ジョブへの反映 | `team_config.py:121-196`; `team_engine.py:1268-1323` | `tests/test_p0_switch.py` の既定ON、OFF、キー無し、非bool拒否 | 4ケースは追加済み。OFFテストには `g2_gate_version` の確認があるが、pending G2 approvalの実在確認を追加する |
-| G2の作成・一回限り消費・再承認 | `team_engine.py:1290,1323,1477-1612,3589-3633` | `tests/test_g1_g2_gate.py::test_g1_registers_durable_pending_gate_and_tick_does_not_dispatch`; `test_g2_is_single_use_and_g3_remains_required_even_when_auto_execute_true`; `tests/test_g1_g2_adversarial.py` の再起動・再試行・スコープ変更群 | P0 false の新規依頼をG2未承認のままdispatchさせず、承認後も指紋変更で再承認させる |
-| G3計画承認 | `team_engine.py:3062` | `tests/test_g1_g2_gate.py::test_g2_is_single_use_and_g3_remains_required_even_when_auto_execute_true` | false設定の新規依頼でもplanner成功後に pending `plan` approvalを作り、承認まで後続担当をdispatchしない |
+| 設定既定・型・新規ジョブへの反映 | `team_config.py:121-196`; `team_engine.py:1268-1323` | `tests/test_p0_switch.py` の既定ON、OFF、キー無し、非bool拒否 | 4ケース追加済み。P0オフの新規ジョブでG2記録が作られることは `tests/test_p0_off_gates.py::test_a_request_is_a_legacy_job_with_the_gates_in_place` でも確認済み |
+| G2の作成・一回限り消費・再承認 | `team_engine.py:1290,1323,1477-1612,3589-3633` | `tests/test_p0_off_gates.py` は既存G1/G2ゲート9件をP0オフで再実行し、追加テストでpending `ai_start` を確認。既存 `tests/test_g1_g2_gate.py`・`tests/test_g1_g2_adversarial.py` はP0既定ONの再起動・再試行・スコープ変更群 | P0オフ新規依頼でG2未承認のままplannerがqueuedとなり、G2 pending承認が記録されることを合成テストで確認済み。指紋変更・再承認のP0オフ固有動作は未確認 |
+| G3計画承認 | `team_engine.py:3062` | `tests/test_p0_off_gates.py::test_the_plan_approval_g3_is_issued_after_g2_with_the_switch_off`（G2承認後 `_finish` まで合成） | P0オフでG2承認後にpending `plan` 承認が発行され、ジョブが `awaiting_approval` になることを確認済み。実AIの計画生成、G3承認後の実作業は未確認 |
 | 認証・利用量の失敗分岐、再試行、Provider自動切替 | `team_engine.py:3456,3493,3502,3510,3535,3673-3707,3992-4049,4095-4108`; `team_config.py:95-116` | Claude報告では固定コミット `3151b2b` の関連151件を実行し、7件は `7d9a00d` でも失敗する既知分。Provider切替経路自体を直接検証する専用合成テストの有無・網羅性は別途確認が必要 | P0 false で、2026-10-15 に利用者が決めた Claude/Copilot 間の限定切替（Public/Internal、担当で有効かつ利用可能な場合のみ、Codexへは切替なし）が復帰することを確認する。隔離複製では Copilot が unavailable と報告されており、その場合は自動切替せず待機・一度通知となる。利用量予測による依頼拒否は行わない |
 | 秘密情報参照ガード | `team_engine.py:3303-3310` | `tests/test_p0_core.py::test_pre_provider_secret_refusal_is_a_safety_stop` | P0 falseでもProvider呼出し前の拒否と承認要求が残り、P0固有interruptionだけが無いことを確認する |
 | 再試行/モデル変更APIの保守認証 | `server.py:814-822,843-846` | 現在 `rg` でP0/non-P0の両方を直接比較するAPIテストを確認できない | P0のmaintenance_requiredは資格情報なしで拒否し、P0 falseの新規ジョブは通常UI認証で従来操作できることを確認する |
 | P0計画・成果物・完了契約 | `team_engine.py:1392,2129-2178,2314-2330,2610-2620,2708-2718,2788,2853,2979-2987,3133,3352-3358`; `team_p0_contract.py:113` | `tests/test_p0_core.py`, `tests/test_p0_integration.py`, `tests/test_formal_acceptance_workflow.py`, `tests/test_code_test_contract_synthetic.py` | P0 falseでP0専用条件を要求しない一方、共通レビュー/正式受領と独立したコードテスト契約が残ることを確認する |
 
-表中の「追加確認」は未実行。既存のP0テストは多くが既定ONの経路を扱い、P0オフの失敗回復・認可境界は現在の追加4件だけでは網羅しない。
+Claude報告では `tests/test_p0_off_gates.py` を含む関連24件が成功（うちP0オフのゲート群は11件、実AI呼出しなし）。テスト結果はClaude報告であり、この更新時点でCodexは再実行していない。P0オフのG2/G3記録は合成テストで確認済みだが、実AIによる計画生成・G3承認後の実作業、失敗回復・認可境界の網羅は未確認。
 
 ### 現在の2コミットと監査記録
 
