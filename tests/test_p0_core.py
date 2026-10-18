@@ -10,12 +10,17 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from eval.development_readiness.reacceptance_fixture import close, make_fixture
-from team_p0_contract import artifact_records, current_artifacts, initial, validate_plan
+from team_p0_contract import artifact_records, current_artifacts, initial, progress, validate_plan
 from team_recovery import p0_failure_category, p0_interruption, retry_local_read
 from team_store import Store
 
 
 class P0ContractTests(unittest.TestCase):
+    def test_shared_fixture_matches_server_progress(self):
+        fixture = json.loads((Path(__file__).parent / 'fixtures' / 'p0' / 'state.json').read_text(encoding='utf-8'))
+        for job in fixture['jobs']:
+            self.assertEqual(progress(job, fixture['tasks'], fixture['approvals']), job['p0_progress'])
+
     def test_original_request_cannot_change_after_registration(self):
         with tempfile.TemporaryDirectory() as folder:
             store = Store(folder)
