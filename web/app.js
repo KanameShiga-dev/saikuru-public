@@ -1268,7 +1268,7 @@ function renderDetail(task,version) {
   // 描き直しで、操作中のボタンが差し替わりフォーカスを失ったときは、承認の枠の見出し（無ければ詳細の題名）へ移す。
   if(dialogHadFocus&&(!$('detail-dialog').contains(document.activeElement)||document.activeElement===$('detail-dialog'))){
     const same=focusedId&&document.getElementById(focusedId);
-    const target=same&&body.contains(same)?same:(body.querySelector('.approval-box h3')||$('detail-title'));
+    const target=same&&body.contains(same)?same:((approvalSummary(body)||body.querySelector('.approval-box h3'))||$('detail-title'));
     if(target!==same)target.tabIndex=-1;
     target.focus();
   }
@@ -1284,7 +1284,20 @@ function restoreFocus(key){
   if(target){target.focus({preventScroll:true});focusPending=false;}
 }
 let focusReturn=null;
-function openTask(id){focusReturn=document.activeElement?.dataset?.focusKey||null;selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
+function openTask(id){focusReturn=document.activeElement?.dataset?.focusKey||null;selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();
+  // 利用者の判断を待つ作業を開いたときは、最初のフォーカスを承認欄に置く（閉じるボタンから十数回Tabを押さずに済む）。
+  if(pendingUser(id).length)focusApproval();}
+// 承認欄の見出し（折りたたみの要約）。折りたたんだ後は h3 が要約に移るため、要約を探す。
+function approvalSummary(body){
+  const box=body.querySelector('.approval-box,[data-user-decision]');
+  return box?.closest('details.detail-fold')?.querySelector(':scope > summary')||null;
+}
+function focusApproval(){
+  const body=$('detail-body'),box=body.querySelector('.approval-box,[data-user-decision]');if(!box)return false;
+  const target=approvalSummary(body)||box.querySelector('textarea,button')||box;
+  if(target===box)box.tabIndex=-1;
+  target.focus();return true;
+}
 // 詳細を閉じたら、開いたボタンの位置へフォーカスを戻す（画面の描き直しで要素が差し替わっても、印（data-focus-key）で探す）。
 // 見つからない（判断が済んで項目が消えた）ときは、進み具合の見出し、無ければ作業ボードへ戻す。
 $('detail-dialog').addEventListener('close',()=>{focusPending=true;setTimeout(()=>{focusPending=false;},4000);setTimeout(()=>{
@@ -1316,7 +1329,7 @@ function restoreDetailFocus(){
   const dialog=$('detail-dialog');if(!dialog.open)return;
   const active=document.activeElement;if(active&&active!==document.body&&active!==dialog&&dialog.contains(active))return;
   const body=$('detail-body'),same=lastDetailFocus&&document.getElementById(lastDetailFocus);
-  const target=same&&body.contains(same)?same:(body.querySelector('.approval-box h3')||$('detail-title'));
+  const target=same&&body.contains(same)?same:((approvalSummary(body)||body.querySelector('.approval-box h3'))||$('detail-title'));
   if(target!==same)target.tabIndex=-1;
   target.focus();
 }
