@@ -407,8 +407,15 @@ function progressCard(job){
   head.append(el('h3',job.title,'job-row-title'),el('span',decision?'あなたの判断が必要':jobStatusLabel(job),'badge'+(decision?' approval':'')));
   if(counts){
     const meter=el('span',undefined,'job-row-progress');
-    meter.append(el('span',`${counts.total}工程中 ${counts.done}件完了`,'job-row-count'));
-    const bar=el('progress');bar.max=counts.total;bar.value=counts.done;bar.setAttribute('aria-label',`${job.title}：${counts.total}工程中${counts.done}件完了`);meter.append(bar);
+    // 従来形式の依頼は、作業の数だけから数える。全作業が終わっていても、依頼が止まっていれば完了ではない
+    // （レビューの指摘が残る、判断待ちなど）。「全部完了」に見える割合は出さず、事実の文だけにする。
+    const allWorksDone=job.p0_contract_version!==1&&counts.done===counts.total;
+    if(allWorksDone){
+      meter.append(el('span',`作業${counts.total}件が終了（依頼は未完了）`,'job-row-count'));
+    }else{
+      meter.append(el('span',`${counts.total}工程中 ${counts.done}件完了`,'job-row-count'));
+      const bar=el('progress');bar.max=counts.total;bar.value=counts.done;bar.setAttribute('aria-label',`${job.title}：${counts.total}工程中${counts.done}件完了`);meter.append(bar);
+    }
     head.append(meter);
   }
   row.append(head);

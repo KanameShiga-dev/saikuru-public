@@ -336,6 +336,12 @@
         ],
         "deliverable_access": []
       }
+    },
+    {
+      "id": "ui-legacy-alldone",
+      "title": "旧形式の依頼（作業は全部終了・依頼は停止）",
+      "goal": "架空の旧形式の依頼",
+      "status": "blocked"
     }
   ],
   "tasks": [
@@ -416,6 +422,20 @@
       "title": "データ取得",
       "status": "awaiting_approval",
       "role": "builder"
+    },
+    {
+      "id": "t-legacy-done-1",
+      "job_id": "ui-legacy-alldone",
+      "title": "実装",
+      "status": "succeeded",
+      "role": "builder"
+    },
+    {
+      "id": "t-legacy-done-2",
+      "job_id": "ui-legacy-alldone",
+      "title": "レビュー",
+      "status": "succeeded",
+      "role": "reviewer"
     }
   ],
   "approvals": [
