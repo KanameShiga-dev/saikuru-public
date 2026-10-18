@@ -29,7 +29,10 @@ class FixtureHandler(Handler):
         return super().do_GET()
 
     def do_POST(self):
-        if urlparse(self.path).path not in {'/api/decide', '/api/completion/evidence', '/api/jobs/evaluation'}:
+        if urlparse(self.path).path not in {'/api/decide', '/api/completion/evidence',
+                                            '/api/jobs/formal-acceptance', '/api/jobs/review-confirmation',
+                                            '/api/jobs/reconfirm-review',
+                                            '/api/jobs/evaluation'}:
             return self.send(403, {'error': 'この隔離画面では受領確認だけを行えます。'})
         return super().do_POST()
 
@@ -61,10 +64,16 @@ def make_fixture(base, port=0, project_dir='project'):
                 'goal': '架空の受領経路だけを確認します。AIによる開発や採点は実施していません。',
                 'project': str(project.resolve()), 'status': 'awaiting_acceptance',
                 'created_at': time.time(), 'auto_execute': False})
+            builder = app.engine.new_task(job, '架空の検証済み成果', '受領経路用の架空タスク。', 'builder')
+            app.store.update(builder['id'], status='succeeded', result={'status': 'done', 'checks': []})
             task = app.engine.new_task(job, '架空メモの表示確認', '受領経路を確認する合成カード。AI実行はありません。', 'reviewer')
-            task = app.store.update(task['id'], status='succeeded', result={
+            task = app.store.update(task['id'], status='succeeded', agent_name='reviewer',
+                review_cycle=builder['id'], result={
                 'status': 'done', 'summary': '架空メモ：確認用。これは表示確認用の合成結果です。AIレビューや採点の合格ではありません。',
                 'checks': [], 'pending_checks': ['カードに「架空メモ：確認用」と表示されることを本人が確認する']})
+            security = app.engine.new_task(job, '架空のセキュリティレビュー', '受領経路用の架空レビュー。', 'reviewer')
+            app.store.update(security['id'], status='succeeded', agent_name='common-security-reviewer',
+                             review_cycle=builder['id'], result={'status': 'done', 'checks': []})
             approval = app.engine.new_approval(task, 'completion', {
                 'summary': '架空メモ：確認用。最初は未確認項目を残して受領し、その後で根拠を追加してください。',
                 'checks': [], 'review_findings': [],
