@@ -363,6 +363,10 @@ class ClaudeAdapter:
                   '--model', profile['model'], '--effort', profile['effort'],
                   '--settings', json.dumps(settings), '--json-schema', json.dumps(schema),
                   '--no-session-persistence']
+        prompt += ('\n\n---\n最終報告は指定されたJSONスキーマに合うJSONオブジェクトだけで返してください。'
+                   '必須項目をすべて含め、値がない文字列は空文字、配列は空配列、'
+                   '真偽値は事実に合わせて true または false にしてください。'
+                   '未確認のことを完了とせず、前置き・説明文・コードブロックは付けないでください。')
         # Images (user attachments or reference images drawn by 采来) need the structured input.
         structured = bool(getattr(ctx, 'attachment_ids', []) or getattr(ctx, 'reference_images', None))
         if structured:
