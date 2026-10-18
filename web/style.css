@@ -143,3 +143,15 @@ select{max-width:100%;text-overflow:ellipsis}
 body:not([data-view="technical"]) .tech-only{display:none !important}
 .view-toggle[aria-pressed="true"]{background:#e8f0fe;border-color:#3b6fd4}
 .view-toggle:focus-visible{outline:3px solid #3b6fd4;outline-offset:2px}
+
+/* P0 L3：依頼の進み具合。状態は色だけでなく、記号（✓ ○ ×）と文字でも示す。 */
+.job-progress{margin:16px 0}
+.job-progress-card{border:1px solid #cdd5df;border-radius:8px;padding:14px 16px;margin:10px 0;background:#fff}
+.job-progress-card .card-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.job-progress-card h3{margin:0;font-size:1.05rem}
+.progress-lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 18px}
+.progress-group h4{margin:10px 0 4px;font-size:.95rem}
+.progress-group ul{margin:0;padding-left:0;list-style:none}
+.progress-group.unmet{border-left:4px solid #b3261e;padding-left:10px}
+.completion-status{font-weight:700}
+.business-summary{font-weight:700;margin:8px 0}

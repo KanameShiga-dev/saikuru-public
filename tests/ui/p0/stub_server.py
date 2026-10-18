@@ -40,7 +40,7 @@ def complete(state):
     state.update({'paused': False, 'events': [], 'providers': {}, 'usage': {},
                   'history': {'days': 7, 'hidden_jobs': 0}, 'cli_update': {}, 'claude_update': {}, 'copilot_update': {},
                   'config': {'roles': {}, 'profiles': {}, 'provider_settings': {'enabled': ['codex', 'claude']},
-                             'max_repairs': 2}})
+                             'max_repairs': 2, 'approved_roots': ['C:/synthetic']}})
     return state
 
 
@@ -63,6 +63,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split('?', 1)[0]
         if path == '/api/state':
             return self.send_json(self.state)
+        if path == '/api/jobs/previews':
+            return self.send_json({'files': []})
         if path.startswith('/api/'):
             return self.send_json({})
         name = 'index.html' if path == '/' else path.lstrip('/')

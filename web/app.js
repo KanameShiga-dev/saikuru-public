@@ -259,11 +259,72 @@ function renderUsageChips(){
   }));
 }
 function openModelPanel(){const panel=document.querySelector('.information-panel');if(!panel)return;panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});panel.querySelector('summary')?.focus();}
+// P0 L3：依頼の進み具合。表示するのは p0_progress / goal_contract / deliverable_access の項目だけで、完成や権限は画面で判断しない。
+// 起動・操作の確認は、サーバーが確認済みを示す値を契約で定めるまで、常に「未検証」と表示する。
+const COMPLETION_LABELS={in_progress:'作業中（完成ではありません）',awaiting_user_acceptance:'あなたの確認待ち（受領前です）',accepted:'受領済み'};
+function progressList(title,items,mark,cls){
+  const box=el('div',undefined,'progress-group'+(cls?' '+cls:''));box.append(el('h4',`${title}（${items.length}件）`));
+  if(!items.length){box.append(el('p','なし','hint'));return box;}
+  const list=el('ul');for(const item of items)list.append(el('li',`${mark} ${item}`));box.append(list);return box;
+}
+function openCompletion(job){
+  const approval=state.approvals.find(a=>a.job_id===job.id&&a.kind==='completion'&&a.status==='pending'&&userDecision(a));
+  if(!approval){notice('確認の準備がまだできていません。作業の工程が終わると、ここから確認できます。');return;}
+  openTask(approval.task_id);
+}
+function openCancel(job){
+  const tasks=state.tasks.filter(t=>t.job_id===job.id).sort((a,b)=>(b.updated_at||0)-(a.updated_at||0));
+  if(!tasks.length){notice('中止できる作業が見つかりません。');return;}
+  openTask(tasks[0].id);
+  setTimeout(()=>{const target=$('detail-body').querySelector('#cancel-job');if(target)revealSection(target);},300);
+}
+const PROGRESS_ACTIONS={
+  review_completion:['成果を確認する',openCompletion],
+  record_completion_evidence:['確認結果を記録する',openCompletion],
+  cancel_job:['この依頼を中止する…',openCancel]
+};
+function progressCard(job){
+  const progress=job.p0_progress||{},goal=job.goal_contract||{},card=el('article',undefined,'job-progress-card');
+  const head=el('div',undefined,'card-head');head.append(el('h3',job.title),el('span',jobStatusLabel(job),'badge'));card.append(head);
+  card.append(el('p',`作るもの：${goal.primary_goal||job.goal||'未設定'}`,'summary'));
+  if(goal.deliverables?.length)card.append(el('p',`成果物（予定）：${goal.deliverables.join('、')}`,'hint'));
+  card.append(el('p',`現在の工程：${progress.current||'確認中'}`));
+  if(progress.next_action)card.append(el('p',`次の動作：${progress.next_action}`));
+  const lists=el('div',undefined,'progress-lists');
+  lists.append(progressList('完成済み',progress.completed||[],'✓'),progressList('残り',progress.remaining||[],'○'));
+  card.append(lists);
+  const unmet=progress.unmet_acceptance_criteria||[];
+  card.append(progressList('未達の受入条件',unmet,'×',unmet.length?'unmet':''));
+  const status=COMPLETION_LABELS[progress.completion_status]||'状態を確認中（完成とは扱いません）';
+  card.append(el('p',`完成の状況：${status}`,'completion-status'));
+  const access=Array.isArray(progress.deliverable_access)?progress.deliverable_access:[];
+  const box=el('div',undefined,'progress-group deliverables');box.append(el('h4','完成物の確認'));
+  if(!access.length)box.append(el('p','登録された成果物はまだありません。','hint'));
+  for(const item of access){
+    const row=el('p');row.append(el('code',item.path||'（場所不明）'),document.createTextNode('　起動・操作の確認：未検証'));
+    if(item.launch_status&&item.launch_status!=='unverified'){const raw=el('small',`（サーバーの値：${item.launch_status}）`,'tech-only');row.append(raw);}
+    box.append(row);
+  }
+  box.append(el('p','起動用のURLはまだ提供されていません。起動と操作の確認は未実施です。成果物の本文はこの画面からは読めません。','hint'));
+  card.append(box);
+  const actions=el('div',undefined,'actions');
+  for(const name of Array.isArray(progress.available_actions)?progress.available_actions:[]){
+    const entry=PROGRESS_ACTIONS[name];if(entry)actions.append(button(entry[0],()=>entry[1](job),name==='cancel_job'?'danger':'primary'));
+  }
+  if(actions.children.length)card.append(actions);
+  return card;
+}
+function renderJobProgress(){
+  const section=$('job-progress'),list=$('job-progress-list');if(!section||!list)return;
+  const jobs=state.jobs.filter(j=>j.p0_contract_version===1&&!['cancelled','accepted','accepted_with_pending_checks'].includes(j.status));
+  section.hidden=!jobs.length;list.replaceChildren(...jobs.map(progressCard));
+}
 function render() {
   $('connection').textContent=state.paused?'新規着手を一時停止中':'● ローカル接続中';
   $('connection').classList.toggle('paused',!!state.paused);
   $('pause').textContent=state.paused?'新規着手を再開':'新規着手を一時停止';
   renderCliUpdate();
+  renderJobProgress();
   const nextProviderVersion=JSON.stringify([state.providers,state.usage,state.config.roles,state.config.profiles,state.config.provider_settings,state.cli_update,state.claude_update,state.copilot_update]);
   if(nextProviderVersion!==providerVersion){
   providerVersion=nextProviderVersion;
@@ -969,8 +1030,10 @@ function renderDetail(task,version) {
   }
   if(['queued','failed','interrupted','blocked'].includes(task.status)&&!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status))body.append(button('担当・モデルを切り替える',()=>openModelSwitch(task.id)));
   for(const a of endedJob(task)?[]:pendingUser(task.id)){
-    if(a.payload.questions?.length){body.append(questionForm(a));continue;}
+    const summary=a.business_summary?el('p',a.business_summary,'business-summary'):null;
+    if(a.payload.questions?.length){if(summary)body.append(summary);body.append(questionForm(a));continue;}
     const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
+    if(summary)box.append(summary);
     if(a.kind==='ai_start')box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途G3計画承認が必要です。モデル利用量が発生します。','notice'));
     if(a.kind==='tool'&&a.payload?.guard)box.append(el('p','送信の防御：'+a.payload.guard.label+'。'+a.payload.guard.note+' 送信先・送る内容・依頼に必要かを確認してから許可してください。','notice'));
     if(a.kind==='completion'){
