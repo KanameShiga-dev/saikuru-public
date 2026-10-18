@@ -222,6 +222,29 @@ class EngineGuardTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertTrue(bash(command)['allow'])
 
+    def test_delete_and_regular_bash_still_require_approval_when_automatic_operations_is_off(self):
+        from team_engine import Context
+
+        class Asked(Exception):
+            pass
+
+        def ask(task, kind, payload):
+            raise Asked(payload)
+
+        self.engine.config['automatic_operations'] = False
+        job = self.engine.create_job('sample', 'local goal', self.temp.name, True)
+        task = self.engine.new_task(job, 'change', 'change file', 'builder')
+        ctx = Context(self.engine, task)
+        self.engine.active[task['id']] = ctx
+        self.engine.new_approval = ask
+        bash = lambda command: self.engine.tool_request(ctx.token, {
+            'task_id': task['id'], 'tool': 'Bash', 'input': {'command': command}})
+        for command, expected_manual in (('rm -rf build', True), ('python build.py', False)):
+            with self.subTest(command=command):
+                with self.assertRaises(Asked) as caught:
+                    bash(command)
+                self.assertEqual(caught.exception.args[0].get('force_manual', False), expected_manual)
+
     def test_outbound_overrides_automatic_approval(self):
         from pathlib import Path
         from team_engine import Context

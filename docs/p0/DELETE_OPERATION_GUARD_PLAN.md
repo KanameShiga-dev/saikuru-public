@@ -1,6 +1,6 @@
 # 削除・破壊操作ガード：統合確認と受入試験
 
-状態：Claude の `f0a2c2c` / `dec1e36` / `aa83086` を `p0/integration` にローカル cherry-pick 済み。Codex のレビューで見つけた `outbound_exceptions` の迂回は、`delete` / `dynamic` を例外対象外にする修正と回帰テストで塞いだ。2026-10-19に関連31件（`test_security_guard`、`tests.test_run_time_limit`、`tests.test_security_runtime_synthetic`）が成功。全テストスイート・E1通し・本番反映は未実施。pushなし。
+状態：Claude の `f0a2c2c` / `dec1e36` / `aa83086` を `p0/integration` にローカル cherry-pick 済み。Codex のレビューで見つけた `outbound_exceptions` の迂回は、`delete` / `dynamic` を例外対象外にする修正と回帰テストで塞いだ。2026-10-19に関連32件（`test_security_guard`、`tests.test_run_time_limit`、`tests.test_security_runtime_synthetic`）が成功。全テストスイート・E1通し・本番反映は未実施。pushなし。
 
 ## 目的
 
@@ -61,7 +61,7 @@
 - シェル変数・関数・ラッパー・`xargs`・スクリプト経由。
 - `Write` / `Edit` によるファイル内容の空化・置換。これはBash分類とは別で、特に `job.auto_execute=true` の直接許可経路を別に評価する。
 
-確認済み：`automatic_operations=true` の `Context.approve()` を通す合成Engine試験、削除・dynamicの管理者例外無効化、通常コマンドの従来どおりの自動許可。未確認：`automatic_operations=false` の経路、`Write` / `Edit` による空化・置換、実provider/runtimeでの実行結果。
+確認済み：`automatic_operations=true` の `Context.approve()` を通す合成Engine試験、`automatic_operations=false` で削除・通常Bashの両方が承認待ちになる経路、削除・dynamicの管理者例外無効化、通常コマンドの従来どおりの自動許可。未確認：`Write` / `Edit` による空化・置換を含む挙動試験、実provider/runtimeでの実行結果。コード経路上、承認済み `job.auto_execute` はプロジェクト内のWrite/Editを直接許可し、変更前ファイルを退避するが、内容の空化・置換を分類するチェックはない。これはBash guardの範囲外であり、許可済み作業範囲の意味と復旧可能性を別途評価する。
 
 ## 完了条件
 
