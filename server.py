@@ -286,7 +286,9 @@ class App:
         exposed['tasks'] = [
             ({'id': task['id'], 'job_id': task['job_id'], 'status': task['status'],
               'role': task.get('role'), 'after': task.get('after'),
-              'title': '保守対応待ち',
+              'title': '保守対応待ち', 'attempt': task.get('attempt', 0),
+              'instruction': '', 'result': None, 'agent_name': None, 'common_agents': [],
+              'profile': {'adapter': '', 'model': '', 'effort': ''},
               'summary': '開発エンジンの確認が必要です。途中成果は保存されています。'}
              if task['id'] in maintenance_tasks else task)
             for task in state['tasks']]
