@@ -1,6 +1,6 @@
 # 削除・破壊操作ガード：統合確認と受入試験
 
-状態：Claude の `f0a2c2c` / `dec1e36` を `p0/integration` にローカル cherry-pick 済み。Codex のレビューで見つけた `outbound_exceptions` の迂回は、`delete` / `dynamic` を例外対象外にする修正と回帰テストで塞いだ。テストは未実行。統合・push・本番反映は別途確認する。
+状態：Claude の `f0a2c2c` / `dec1e36` / `aa83086` を `p0/integration` にローカル cherry-pick 済み。Codex のレビューで見つけた `outbound_exceptions` の迂回は、`delete` / `dynamic` を例外対象外にする修正と回帰テストで塞いだ。2026-10-19に関連31件（`test_security_guard`、`tests.test_run_time_limit`、`tests.test_security_runtime_synthetic`）が成功。全テストスイート・E1通し・本番反映は未実施。pushなし。
 
 ## 目的
 
@@ -9,7 +9,7 @@
 ## 推奨する試験場所
 
 - `test_security_guard.py` の `OutboundGuardTests`：文字列分類と既存の偽陽性回帰を確認。
-- `test_security_guard.py` の `EngineGuardTests`：`automatic_operations=true` の合成Engineで、Bash経路が `force_manual` と `guard.category == 'delete'` を付けることを確認。実コマンドは実行しない。
+- `test_security_guard.py` の `EngineGuardTests`：`automatic_operations=true` の合成Engineで、実際の `Context.approve()` 経路が削除を承認待ちにし、通常コマンドを自動許可することを確認。管理者例外が `delete` / `dynamic` の強制確認を解除しないことも確認。実コマンドは実行しない。
 - 実行対象は `classify()` と合成Engineだけ。削除コマンド、Provider、OSコマンド、実プロジェクトのファイルには触れない。
 
 ## 1. 直接コマンドの検出（manual）
@@ -60,6 +60,8 @@
 - PowerShell変数、関数、独自エイリアス、`-EncodedCommand`。
 - シェル変数・関数・ラッパー・`xargs`・スクリプト経由。
 - `Write` / `Edit` によるファイル内容の空化・置換。これはBash分類とは別で、特に `job.auto_execute=true` の直接許可経路を別に評価する。
+
+確認済み：`automatic_operations=true` の `Context.approve()` を通す合成Engine試験、削除・dynamicの管理者例外無効化、通常コマンドの従来どおりの自動許可。未確認：`automatic_operations=false` の経路、`Write` / `Edit` による空化・置換、実provider/runtimeでの実行結果。
 
 ## 完了条件
 
