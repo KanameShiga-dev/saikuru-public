@@ -6,9 +6,14 @@ const jobSkills = new SkillPicker(document.getElementById('job-skills'));
 const roles = {planner:'計画',researcher:'調査',builder:'実装',reviewer:'レビュー'};
 const statuses = {queued:'待機',running:'実行中',awaiting_approval:'承認待ち',succeeded:'担当作業終了',handed_off:'未完了項目を残して引き継ぎ済み',failed:'失敗',cancelled:'中止',interrupted:'中断',blocked:'判断が必要'};
 const jobStatuses = {...statuses,planning:'計画中',awaiting_acceptance:'成果の確認待ち',accepted:'利用者が確認済み',accepted_with_pending_checks:'成果を受領・未完了項目あり'};
-function jobStatusLabel(job){return job?.g2_gate_version===1&&job.g2_status==='pending'?'AI計画生成の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
+function jobStatusLabel(job){return job?.g2_gate_version===1&&job.g2_status==='pending'?'AIによる計画作成の開始の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
 function el(tag, text, cls) { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; }
 function notice(text) { $('notice').textContent=text; }
+// P0 L1：標準画面（既定）と技術詳細の切り替え。選択はこのブラウザーにだけ保存し、読めなくても標準で動く。
+(()=>{const toggle=$('view-toggle');if(!toggle)return;let technical=false;
+  try{technical=localStorage.getItem('saikuru-view')==='technical';}catch(e){}
+  const apply=()=>{document.body.dataset.view=technical?'technical':'standard';toggle.setAttribute('aria-pressed',String(technical));toggle.textContent=technical?'技術詳細を隠す':'技術詳細を表示';};
+  toggle.addEventListener('click',()=>{technical=!technical;try{localStorage.setItem('saikuru-view',technical?'technical':'standard');}catch(e){}apply();});apply();})();
 function waitingReason(task){
  if(task.status!=='queued')return '';
  const job=state.jobs.find(j=>j.id===task.job_id),prior=state.tasks.find(t=>t.id===task.after);
@@ -299,9 +304,9 @@ function render() {
       const reason=stopReason(task);
       if(reason)card.append(el('p',reason.title,'summary'));
       else if(task.summary)card.append(el('p',task.summary,'summary'));
-      const meta=el('div',undefined,'meta');meta.append(el('span',`${roles[task.role]} · ${task.profile.adapter}`,'role-chip'));card.append(meta);
+      const meta=el('div',undefined,'meta'),chip=el('span',roles[task.role],'role-chip');chip.append(el('span',` · ${task.profile.adapter}`,'tech-only'));meta.append(chip);card.append(meta);
       if(task.common_agents?.length){const run=task.agent_run,labels={starting:'起動中',running:'実行中',completed:'実行完了',failed:'失敗',cancelled:'中止',held:'送る前に保留（秘密情報の確認）'};
-        card.append(el('p','共通Agent: '+task.common_agents.join('、')+' · '+(run?labels[run.status]||run.status:task.agent_name?'起動待ち':'旧方式の役割指示'),'hint'));}
+        card.append(el('p','共通Agent: '+task.common_agents.join('、')+' · '+(run?labels[run.status]||run.status:task.agent_name?'起動待ち':'旧方式の役割指示'),'hint tech-only'));}
       if(index===2&&!pending(task.id).some(a=>a.payload.questions?.length)){
         const entry=el('div',undefined,'task-entry'),help=el('button','回答方法のヘルプ','decision-help-button');help.type='button';
         help.setAttribute('aria-label',task.title+'の回答方法のヘルプ');
@@ -822,8 +827,8 @@ function renderDetail(task,version) {
   renderedDetailTask=task.id;
   const drafts={};$('detail-body').querySelectorAll('textarea').forEach(t=>drafts[t.id]=t.value);
   detailVersion=version;const job=state.jobs.find(j=>j.id===task.job_id);$('detail-title').textContent=task.title;
-  const body=$('detail-body');body.replaceChildren(el('p',`${roles[task.role]} / ${task.profile.adapter} / ${task.profile.model} / ${task.profile.effort} · 試行 ${task.attempt}`),el('p',`状態: ${statuses[task.status]||task.status} · 依頼の状態: ${jobStatusLabel(job)}`));
-  if(job.g2_gate_version===1)body.append(section('AI計画生成（G2）',`状態: ${job.g2_status==='pending'?'未承認・停止中':job.g2_status==='approved'?'承認済み・開始待ち':job.g2_status==='executing'?'承認済みの計画生成を実行中':job.g2_status==='consumed'?'承認済みの1回を使用済み':job.g2_status==='denied'?'拒否済み':'検証不能'}\nG2は計画生成1回のみを許可します。計画完了後は別のG3計画承認が必要です。`));
+  const body=$('detail-body');body.replaceChildren(el('p',`${roles[task.role]} / ${task.profile.adapter} / ${task.profile.model} / ${task.profile.effort} · 試行 ${task.attempt}`,'tech-only'),el('p',`状態: ${statuses[task.status]||task.status} · 依頼の状態: ${jobStatusLabel(job)}`));
+  if(job.g2_gate_version===1)body.append(section('AIによる計画作成の開始',`状態: ${job.g2_status==='pending'?'未承認・停止中':job.g2_status==='approved'?'承認済み・開始待ち':job.g2_status==='executing'?'承認済みの計画生成を実行中':job.g2_status==='consumed'?'承認済みの1回を使用済み':job.g2_status==='denied'?'拒否済み':'検証不能'}\nG2は計画生成1回のみを許可します。計画完了後は別のG3計画承認が必要です。`));
   const skillMode=job.skill_selection?.mode;
   if(job.evaluation?.mode)body.append(el('p','効果検証用の依頼：モード'+job.evaluation.mode+'（再利用の文脈だけを切り替え）'));
   if(skillMode!=='none'&&job.skill_selection?.names?.length)body.append(el('p','依頼時にプロジェクトへ追加したスキル（候補）: '+job.skill_selection.names.join('、')));
@@ -878,7 +883,7 @@ function renderDetail(task,version) {
       }
     }));body.append(panel);
   }
-  if(task.common_agents?.length)body.append(el('p','担当する共通Agent: '+task.common_agents.join('、'),'hint'));
+  if(task.common_agents?.length)body.append(el('p','担当する共通Agent: '+task.common_agents.join('、'),'hint tech-only'));
   const intake=state.jobs.find(j=>j.id===task.job_id)?.intake_classification;
   if(intake)body.append(section('依頼の一次分類',`${intake.label} / ${intake.provider}\n理由: ${intake.reason}\n分類は作業範囲や権限の承認ではありません。`));
   if(task.decision_record){const d=task.decision_record;body.append(section('判断レイヤーの記録',`動作: ${d.shadow?'シャドー（既存判断を維持）':'適用'}\nProvider: ${d.provider}\n状態: ${d.status}\n理由コード: ${d.reason_code}\n既存判断: ${d.baseline}\n候補: ${d.decision}\n採用: ${d.effective}\n差異: ${d.differs?'あり':'なし'}\n時間: ${d.latency_ms} ms`+(d.usage?'\n'+(d.provider==='ollama'?'ローカル':'API')+'トークン: '+JSON.stringify(d.usage):'\nトークン: 未取得')+(d.confidence!==undefined?'\n集中度（正解確率ではありません）: '+d.confidence:'')+(d.probabilities?'\n候補確率: '+JSON.stringify(d.probabilities):'')));}
@@ -940,7 +945,7 @@ function renderDetail(task,version) {
   if(['queued','failed','interrupted','blocked'].includes(task.status)&&!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status))body.append(button('担当・モデルを切り替える',()=>openModelSwitch(task.id)));
   for(const a of endedJob(task)?[]:pending(task.id)){
     if(a.payload.questions?.length){body.append(questionForm(a));continue;}
-    const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='ai_start'?'G2：AI計画生成の承認':a.kind==='plan'?'G3：作業計画を承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
+    const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
     if(a.kind==='ai_start')box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途G3計画承認が必要です。モデル利用量が発生します。','notice'));
     if(a.kind==='tool'&&a.payload?.guard)box.append(el('p','送信の防御：'+a.payload.guard.label+'。'+a.payload.guard.note+' 送信先・送る内容・依頼に必要かを確認してから許可してください。','notice'));
     if(a.kind==='completion'){

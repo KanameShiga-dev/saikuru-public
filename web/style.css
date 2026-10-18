@@ -138,3 +138,8 @@ select{max-width:100%;text-overflow:ellipsis}
 
 /* Warning text and icon accompany color; it is not an approval request. */
 .progress-warning{background:#fff3cd;color:#664d03;border:2px solid #b58100;border-radius:8px;padding:10px;margin:8px 0;text-align:left}.progress-warning p{margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}.progress-warning summary{cursor:pointer}
+
+/* P0 L1：標準画面と技術詳細の切り替え。既定は標準。技術的な情報（Provider・モデル・利用枠・内部ID）は tech-only の印で隠す。 */
+body:not([data-view="technical"]) .tech-only{display:none !important}
+.view-toggle[aria-pressed="true"]{background:#e8f0fe;border-color:#3b6fd4}
+.view-toggle:focus-visible{outline:3px solid #3b6fd4;outline-offset:2px}
