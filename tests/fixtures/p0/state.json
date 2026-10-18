@@ -1,0 +1,56 @@
+{
+  "jobs": [
+    {
+      "id": "synthetic-p0-job",
+      "title": "架空の商品検索",
+      "goal": "架空の商品を商品IDで検索できるWebシステムを作る",
+      "status": "running",
+      "p0_contract_version": 1,
+      "goal_contract": {
+        "original_request": "架空の商品を商品IDで検索できるWebシステムを作る",
+        "primary_goal": "商品IDから商品名と価格を調べられる",
+        "deliverables": ["商品データ", "検索画面"],
+        "acceptance_criteria": ["商品IDで検索できる", "存在しないIDには該当なしと表示する"],
+        "non_goals": [],
+        "constraints": ["架空データのみ"],
+        "completion_status": "in_progress"
+      },
+      "p0_progress": {
+        "completed": ["商品データの登録"],
+        "current": "検索画面の作成",
+        "remaining": ["画面の動作確認", "利用者による確認"],
+        "next_action": "検索画面を作成する",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": ["商品IDで検索できる", "存在しないIDには該当なしと表示する"]
+      }
+    },
+    {
+      "id": "synthetic-maintenance-job",
+      "title": "架空の依頼（復旧待ち）",
+      "goal": "架空の一覧画面を作る",
+      "status": "blocked",
+      "p0_contract_version": 1,
+      "p0_interruption": {
+        "interrupted_task_id": "synthetic-task-2",
+        "interruption_reason": "execution_environment",
+        "recovery_status": "maintenance_required",
+        "resume_target": "synthetic-task-2",
+        "failure_signature": "synthetic-error",
+        "attempt_count": 2
+      },
+      "p0_progress": {
+        "completed": ["計画の確認"],
+        "current": "実装を一時停止",
+        "remaining": ["一覧画面の作成", "動作確認"],
+        "next_action": "保守担当が開発エンジンを復旧する",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": ["一覧画面が動く"]
+      }
+    }
+  ],
+  "tasks": [
+    {"id": "synthetic-task-1", "job_id": "synthetic-p0-job", "title": "商品データの登録", "status": "succeeded", "role": "builder"},
+    {"id": "synthetic-task-2", "job_id": "synthetic-maintenance-job", "title": "一覧画面の作成", "status": "failed", "role": "builder"}
+  ],
+  "approvals": []
+}
