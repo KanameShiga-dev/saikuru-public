@@ -149,6 +149,7 @@ class P0ApiTests(unittest.TestCase):
         self.server.app.store.update(job['id'], p0_contract_version=1,
                                      goal_contract=initial(job['goal']))
         task = self.server.app.store.for_job('task', job['id'])[0]
+        self.server.app.store.update(task['id'], title='TEMP/TMP synthetic technical task')
         approval = self.server.app.engine.new_approval(task, 'question', {
             'summary': 'サンドボックスの起動設定を直す必要があります。',
             'questions': [{'id': 'technical', 'text': 'TEMP/TMPをどう変更しますか？',
@@ -167,6 +168,9 @@ class P0ApiTests(unittest.TestCase):
         self.assertEqual(self.server.app.store.get(approval['id'])['status'], 'pending')
         self.assertEqual(self.request('/api/decide', {'id': approval['id'], 'allow': False},
                                       maintainer=True)[0], 200)
+        status, after = self.request('/api/state')
+        self.assertEqual(status, 200)
+        self.assertNotIn('TEMP/TMP', json.dumps(after, ensure_ascii=False))
 
     def test_maintenance_failure_details_do_not_reach_standard_state(self):
         store = self.server.app.store

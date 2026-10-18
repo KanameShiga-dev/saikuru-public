@@ -113,9 +113,15 @@ def progress(job, tasks, approvals):
     contract = job.get('goal_contract') or {}
     interruption = job.get('p0_interruption') or {}
     maintenance_wait = interruption.get('recovery_status') == 'maintenance_required'
-    hidden_task = interruption.get('interrupted_task_id') if maintenance_wait else None
+    hidden_tasks = {item.get('task_id') for item in approvals
+                    if item.get('job_id') == job.get('id')
+                    and item.get('intended_role') == 'maintainer'}
+    if maintenance_wait:
+        hidden_tasks.add(interruption.get('interrupted_task_id'))
     def title(task):
-        return '保守対応待ち' if task.get('id') == hidden_task else task.get('title', '')
+        if task.get('id') in hidden_tasks:
+            return '保守対応待ち' if maintenance_wait else '保守関連の作業'
+        return task.get('title', '')
     owned = [task for task in tasks if task.get('job_id') == job.get('id')]
     completed = [title(task) for task in owned
                  if task.get('role') in ('builder', 'researcher')
