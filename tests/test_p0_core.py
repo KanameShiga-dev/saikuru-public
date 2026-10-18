@@ -184,6 +184,8 @@ class P0ApiTests(unittest.TestCase):
         self.assertNotIn('synthetic-technical-detail',
                          json.dumps(public, ensure_ascii=False))
         self.assertEqual(public['jobs'][0]['p0_progress']['current'], '保守対応待ち')
+        masked = next(item for item in public['tasks'] if item['id'] == task['id'])
+        self.assertEqual(masked['profile']['adapter'], '')
 
     def test_unrelated_optimization_becomes_nonblocking_backlog(self):
         store = self.server.app.store
