@@ -245,6 +245,7 @@ function renderDecisionBanner(items){
     if(item.detail)what.append(el('small',item.detail));
     if(item.completion)what.append(el('small','工程終了は実機検証済みの保証ではありません。成果物と検証結果を確認してください。'));
     const open=el('button','内容を確認','primary');open.type='button';open.onclick=()=>openNotifiedTask(item.task.id);
+    open.setAttribute('aria-label','内容を確認：'+(job?.title?job.title+'、':'')+item.task.title);open.dataset.focusKey='banner:'+item.task.id;
     li.append(what,open);return li;
   }));
 }
@@ -298,13 +299,14 @@ function deliverableRow(job,item){
   if(!item.path)return row;
   const shown=openedArtifacts.get(key);
   const label=shown?(shown.error?'再読み込み':'内容を閉じる'):'内容を読む';
-  row.append(button(label,async()=>{
+  const readButton=button(label,async()=>{
     if(shown&&!shown.error){openedArtifacts.delete(key);return;}
     try{
       const result=await api('/api/job/p0-artifact?job_id='+encodeURIComponent(job.id)+'&path='+encodeURIComponent(item.path));
       openedArtifacts.set(key,{content:String(result.content??''),truncated:result.truncated===true});
     }catch(error){openedArtifacts.set(key,{error:'内容を読み込めませんでした：'+error.message});}
-  },'secondary'));
+  },'secondary');
+  readButton.setAttribute('aria-label',`${label}（${job.title}／${item.path}）`);readButton.dataset.focusKey='artifact:'+key;row.append(readButton);
   if(shown?.error)row.append(el('p',shown.error,'form-error'));
   else if(shown){
     const text=el('pre',shown.content,'artifact-text');text.tabIndex=0;text.setAttribute('aria-label',`${item.path} の内容（読み取り専用の表示）`);
@@ -334,7 +336,7 @@ function progressCard(job){
   card.append(box);
   const actions=el('div',undefined,'actions');
   for(const name of Array.isArray(progress.available_actions)?progress.available_actions:[]){
-    const entry=PROGRESS_ACTIONS[name];if(entry)actions.append(button(entry[0],()=>entry[1](job),name==='cancel_job'?'danger':'primary'));
+    const entry=PROGRESS_ACTIONS[name];if(entry){const b=button(entry[0],()=>entry[1](job),name==='cancel_job'?'danger':'primary');b.setAttribute('aria-label',`${entry[0]}（${job.title}）`);b.dataset.focusKey='progress:'+job.id+':'+name;actions.append(b);}
   }
   if(actions.children.length)card.append(actions);
   return card;
@@ -405,7 +407,7 @@ function render() {
       }
     }
     for(const task of tasks){
-      const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card role-'+task.role+(index===2?' attention':''));
+      const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card role-'+task.role+(index===2?' attention':''));card.dataset.focusKey='card:'+task.id;
       const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatusLabel(job)):p0Phase(job)&&!pendingUser(task.id).length?p0Phase(job).label:maintenanceHeld(task)?'保守対応待ち':pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
       const head=el('div',undefined,'card-head');head.append(badge);if(job?.title)head.append(el('span',job.title,'job-title'));card.append(head,el('strong',task.title));
       const warnings=(job?.warning_issues||[]).filter(i=>i.task_id===task.id&&i.status==='open');
@@ -515,9 +517,9 @@ function completionEvidenceForm(approval){
   if(!choices.length)return null;
   const form=el('form',undefined,'detail-section'),select=el('select'),evidence=el('textarea'),confirmed=el('input'),message=el('p','','hint');
   choices.forEach((choice,index)=>{const option=el('option',choice.label);option.value=String(index);select.append(option);});
-  evidence.required=true;evidence.maxLength=2000;evidence.rows=3;
+  evidence.required=true;evidence.maxLength=2000;evidence.rows=3;evidence.id='evidence-'+approval.id;
   evidence.placeholder='実施日時、対象、方法、結果、確認できる場所など。秘密情報は入力しないでください。';
-  confirmed.type='checkbox';confirmed.required=true;
+  confirmed.type='checkbox';confirmed.required=true;confirmed.id='evidence-confirm-'+approval.id;
   const targetLabel=el('label','根拠を追加する未確認項目');targetLabel.append(select);
   const evidenceLabel=el('label','人が確認した検証根拠');evidenceLabel.append(evidence);
   const confirmLabel=el('label',undefined,'check');confirmLabel.append(confirmed,document.createTextNode('この検証を実施し、結果と根拠を確認しました。'));
@@ -933,6 +935,9 @@ const taskDetails=new Map(),taskDetailLoading=new Set();
 function mergeTaskDetails(){for(const t of state.tasks){const d=t.slim&&taskDetails.get(t.id);if(d)Object.assign(t,d,{slim:false});}}
 async function loadTaskDetail(task){if(taskDetailLoading.has(task.id))return;taskDetailLoading.add(task.id);try{taskDetails.set(task.id,await api('/api/tasks/detail?id='+encodeURIComponent(task.id)));mergeTaskDetails();const t=state.tasks.find(x=>x.id===task.id);if(t&&selected===t.id&&$('detail-dialog').open)renderDetail(t,detailVersion);}catch(e){notice(e.message);}finally{taskDetailLoading.delete(task.id);}}
 function renderDetail(task,version) {
+  const dialogHadFocus=$('detail-dialog').open&&$('detail-dialog').contains(document.activeElement)&&document.activeElement!==$('detail-dialog');
+  const focusedId=dialogHadFocus?document.activeElement.id:'';
+  const checkedBoxes={};$('detail-body').querySelectorAll('input[type=checkbox][id]').forEach(c=>checkedBoxes[c.id]=c.checked);
   if(task.slim){loadTaskDetail(task);$('detail-title').textContent=task.title;$('detail-body').replaceChildren(el('p','詳細を読み込み中…'));renderedDetailTask=null;return;}
   if(renderedDetailTask){const saved=detailFolds.get(renderedDetailTask);if(saved)$('detail-body').querySelectorAll(':scope > details[data-fold-key]').forEach(d=>saved.open[d.dataset.foldKey]=d.open);}
   renderedDetailTask=task.id;
@@ -1131,11 +1136,12 @@ function renderDetail(task,version) {
   }
   if(!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status)){const cancel=button('この依頼全体を中止',async()=>{if(confirm('実行中・待機中の作業を中止します。既存の変更は自動では戻しません。'))await api('/api/cancel',{id:job.id});},'danger');cancel.id='cancel-job';body.append(cancel);}
   body.querySelectorAll('textarea').forEach(t=>{if(drafts[t.id])t.value=drafts[t.id];});
+  body.querySelectorAll('input[type=checkbox][id]').forEach(c=>{if(checkedBoxes[c.id])c.checked=true;});
   foldDetailSections(body,task);
   // 新形式の依頼では、引き継ぎDBの編集欄と履歴は技術詳細に置く（旧形式の表示は変えない）。
   // 新形式の依頼では、担当・モデルの切り替えは一般画面に出さない（技術詳細で従来どおり使える）。
   if(job.p0_contract_version===1)for(const button of body.querySelectorAll('button'))if(button.textContent.trim()==='担当・モデルを切り替える')button.classList.add('tech-only');
-  if(job.p0_contract_version===1)for(const node of body.children){const head=node.textContent||'';if(head.startsWith('引き継ぎ情報を登録・訂正')||head.startsWith('引き継ぎDBの履歴'))node.classList.add('tech-only');}
+  if(job.p0_contract_version===1)for(const node of body.children){const head=node.textContent||'';if(head.startsWith('引き継ぎ情報を登録・訂正')||head.startsWith('引き継ぎDBの履歴')||head.startsWith('停止理由と次の操作')||head.startsWith('ボードから復旧する')||head.startsWith('成果物を差し戻す'))node.classList.add('tech-only');}
   const phase=p0Phase(job);
   if(phase){
     // 復旧中・保守対応待ち・安全上の確認待ちでは、技術的な修理の欄を標準で隠す（技術詳細では従来どおり表示）。中止と成果物は残す。
@@ -1146,9 +1152,34 @@ function renderDetail(task,version) {
     const status=section('いまの状況',phase.label+'\n'+phase.detail+(job.p0_progress?.next_action?'\n次の動作：'+job.p0_progress.next_action:''));
     status.classList.add('p0-status');status.setAttribute('role','status');body.prepend(status);
   }
+  // 描き直しで、操作中のボタンが差し替わりフォーカスを失ったときは、承認の枠の見出し（無ければ詳細の題名）へ移す。
+  if(dialogHadFocus&&(!$('detail-dialog').contains(document.activeElement)||document.activeElement===$('detail-dialog'))){
+    const same=focusedId&&document.getElementById(focusedId);
+    const target=same&&body.contains(same)?same:(body.querySelector('.approval-box h3')||$('detail-title'));
+    if(target!==same)target.tabIndex=-1;
+    target.focus();
+  }
 }
 // 2026-10-08 カードを開くたびに折りたたみを初期状態（停止理由を開く）から始める。以前の開閉を引き継ぐと、停止後も閉じたままになっていた。
-function openTask(id){selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
+// 定期的な描き直しで、フォーカスのあるボタンが差し替わっても、同じ印（data-focus-key）のボタンへフォーカスを戻す。
+function currentFocusKey(){return document.activeElement?.dataset?.focusKey||null;}
+let focusPending=false;   // 詳細を閉じた直後は、描き直しでフォーカスを失っても、戻り先（進み具合の見出し）へ戻す
+function restoreFocus(key){
+  if(document.activeElement&&document.activeElement!==document.body)return;
+  let target=key&&[...document.querySelectorAll('[data-focus-key]')].find(e=>e.dataset.focusKey===key&&e.offsetParent!==null);
+  if(!target&&focusPending){const progress=$('job-progress');target=progress&&!progress.hidden?$('job-progress-title'):$('board');}
+  if(target){target.focus({preventScroll:true});focusPending=false;}
+}
+let focusReturn=null;
+function openTask(id){focusReturn=document.activeElement?.dataset?.focusKey||null;selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
+// 詳細を閉じたら、開いたボタンの位置へフォーカスを戻す（画面の描き直しで要素が差し替わっても、印（data-focus-key）で探す）。
+// 見つからない（判断が済んで項目が消えた）ときは、進み具合の見出し、無ければ作業ボードへ戻す。
+$('detail-dialog').addEventListener('close',()=>{focusPending=true;setTimeout(()=>{focusPending=false;},4000);setTimeout(()=>{
+  if(document.activeElement&&document.activeElement!==document.body)return;
+  const keyed=focusReturn&&[...document.querySelectorAll('[data-focus-key]')].find(e=>e.dataset.focusKey===focusReturn&&e.offsetParent!==null);
+  const progress=$('job-progress'),fallback=progress&&!progress.hidden?$('job-progress-title'):$('board');
+  const target=keyed||fallback;if(target){target.focus();if(keyed)focusPending=false;}
+},0);});
 // 取得・送信を待つあいだは、操作を受け付けない「処理中」の表示を出す（定期更新は表示しない）。
 let busyCount=0,busyDialog=null,busyTimer=null,refreshing=null,blockNext=true;
 function showBusy(text){
@@ -1165,7 +1196,18 @@ function showBusy(text){
     if(!busyDialog.open)busyDialog.showModal();
   }
 }
-function hideBusy(){if(busyCount>0&&--busyCount===0){clearInterval(busyTimer);if(busyDialog.open)busyDialog.close();}}
+// 「処理中」の表示が閉じた後に、詳細の中でフォーカスを失っていたら、直前にフォーカスのあった要素（無ければ承認の枠の見出し）へ戻す。
+let lastDetailFocus='';
+$('detail-dialog').addEventListener('focusin',event=>{lastDetailFocus=event.target.id||'';});
+function restoreDetailFocus(){
+  const dialog=$('detail-dialog');if(!dialog.open)return;
+  const active=document.activeElement;if(active&&active!==document.body&&active!==dialog&&dialog.contains(active))return;
+  const body=$('detail-body'),same=lastDetailFocus&&document.getElementById(lastDetailFocus);
+  const target=same&&body.contains(same)?same:(body.querySelector('.approval-box h3')||$('detail-title'));
+  if(target!==same)target.tabIndex=-1;
+  target.focus();
+}
+function hideBusy(){if(busyCount>0&&--busyCount===0){clearInterval(busyTimer);if(busyDialog.open)busyDialog.close();setTimeout(restoreDetailFocus,0);}}
 function refresh(){
   if(refreshing){
     if(!blockNext)return refreshing;
@@ -1175,7 +1217,7 @@ function refresh(){
   refreshing=loadState().finally(()=>{refreshing=null;if(block)hideBusy();});
   return refreshing;
 }
-async function loadState(){try{state=await api('/api/state');mergeTaskDetails();render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
+async function loadState(){try{state=await api('/api/state');mergeTaskDetails();const focusKey=currentFocusKey();render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();restoreFocus(focusKey);}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
 const decisionNotificationObjects=new Map(),decisionPopupObjects=new Map();
 let seenDecisions=new Set();
 try{seenDecisions=new Set(JSON.parse(localStorage.getItem('agent-team-decision-seen')||'[]'));}catch(error){}
