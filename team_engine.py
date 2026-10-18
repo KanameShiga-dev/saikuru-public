@@ -223,6 +223,11 @@ def canonical(path):
 
 class Context:
 
+    # Class-level defaults: a Context built without __init__ (tests, helpers) still has a working run-time limit.
+    waited = 0.0
+
+    wait_began = None
+
     def __init__(self, engine, task):
 
         self.engine = engine

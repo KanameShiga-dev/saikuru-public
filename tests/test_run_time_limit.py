@@ -43,6 +43,12 @@ class RunTimeLimitTests(unittest.TestCase):
         with self.assertRaises(ProviderError):
             self.check(fake_context(started=0, waited=1500), at=1500 + 600 + 1260)
 
+    def test_a_context_built_without_init_still_has_the_wait_fields(self):
+        # Tests and helpers build a Context with object.__new__; approve() must not fail on a missing field.
+        ctx = object.__new__(Context)
+        self.assertEqual(ctx.waited, 0.0)
+        self.assertIsNone(ctx.wait_began)
+
 
 if __name__ == '__main__':
     unittest.main()
