@@ -23,7 +23,8 @@ class FixtureHandler(Handler):
     def do_GET(self):
         allowed = {'/', '/health', '/app.js', '/style.css', '/theme.css', '/shell.js',
                    '/attachments.js', '/skill-picker.js', '/api/state', '/api/mobile',
-                   '/api/tasks/detail', '/api/handoff', '/api/jobs/evaluation', '/api/jobs/archive'}
+                   '/api/tasks/detail', '/api/handoff', '/api/jobs/evaluation', '/api/jobs/archive',
+                   '/api/job/p0-artifact'}
         if urlparse(self.path).path not in allowed:
             return self.send(403, {'error': 'この隔離画面では受領確認だけを行えます。'})
         return super().do_GET()

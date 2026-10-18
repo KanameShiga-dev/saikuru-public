@@ -10,7 +10,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from eval.development_readiness.reacceptance_fixture import close, make_fixture
-from team_p0_contract import artifact_records, current_artifacts, initial, progress, validate_plan
+from team_p0_contract import artifact_records, current_artifacts, initial, p0_artifact_text, progress, validate_plan
 from team_recovery import p0_failure_category, p0_interruption, retry_local_read
 from team_store import Store
 
@@ -29,13 +29,32 @@ class P0ContractTests(unittest.TestCase):
         job = {'id': 'fictional-job', 'status': 'awaiting_acceptance',
                'p0_artifacts': [{'path': 'app/index.html', 'sha256': 'fictional'}]}
         receipt = {'job_id': job['id'], 'kind': 'completion', 'status': 'pending',
+                   'intended_role': 'end_user',
                    'payload': {'pending_items': [{'checks': ['Open the fictional app']}]}}
         projected = progress(job, [], [receipt])
+        self.assertEqual(projected['completion_status'], 'awaiting_user_acceptance')
         self.assertEqual(projected['available_actions'],
                          ['cancel_job', 'review_completion', 'record_completion_evidence'])
         self.assertEqual(projected['deliverable_access'], [
             {'path': 'app/index.html', 'method': 'project_relative_file',
-             'launch_status': 'unverified'}])
+             'launch_status': 'unverified',
+             'launch_hint': '起動手順は未登録です。成果物の内容を確認し、起動と操作は別途検証してください。'}])
+        receipt['intended_role'] = 'maintainer'
+        self.assertEqual(progress(job, [], [receipt])['available_actions'], ['cancel_job'])
+
+    def test_p0_artifact_text_reads_only_current_registered_small_text(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'lookup.py'
+            path.write_bytes(b'print("fictional item")\n')
+            job = {'project': folder, 'p0_contract_version': 1,
+                   'p0_artifacts': artifact_records(folder, ['lookup.py'])}
+            self.assertEqual(p0_artifact_text(job, 'lookup.py')['content'],
+                             'print("fictional item")\n')
+            with self.assertRaisesRegex(ValueError, '登録済み'):
+                p0_artifact_text(job, 'other.py')
+            path.write_bytes(b'print("changed")\n')
+            with self.assertRaisesRegex(ValueError, '変更'):
+                p0_artifact_text(job, 'lookup.py')
 
     def test_original_request_cannot_change_after_registration(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -164,6 +183,22 @@ class P0ApiTests(unittest.TestCase):
         except HTTPError as error:
             with error:
                 return error.code, json.loads(error.read())
+
+    def test_standard_api_reads_only_registered_current_p0_text(self):
+        job = self.server.app.store.all('job')[0]
+        path = Path(job['project']) / 'lookup.py'
+        path.write_bytes(b'print("fictional item")\n')
+        self.server.app.store.update(job['id'], p0_contract_version=1,
+                                     goal_contract=initial(job['goal']),
+                                     p0_artifacts=artifact_records(job['project'], ['lookup.py']))
+        address = '/api/job/p0-artifact?job_id=' + job['id'] + '&path=lookup.py'
+        status, payload = self.request(address)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['content'], 'print("fictional item")\n')
+        self.assertFalse(payload['truncated'])
+        self.assertEqual(self.request(address.replace('lookup.py', 'other.py'))[0], 400)
+        path.write_bytes(b'print("changed")\n')
+        self.assertEqual(self.request(address)[0], 400)
 
     def test_maintenance_question_is_not_a_user_approval(self):
         job = self.server.app.store.all('job')[0]
