@@ -61,7 +61,7 @@
 - シェル変数・関数・ラッパー・`xargs`・スクリプト経由。
 - `Write` / `Edit` によるファイル内容の空化・置換。これはBash分類とは別で、特に `job.auto_execute=true` の直接許可経路を別に評価する。
 
-確認済み：`automatic_operations=true` の `Context.approve()` を通す合成Engine試験、`automatic_operations=false` で削除・通常Bashの両方が承認待ちになる経路、削除・dynamicの管理者例外無効化、通常コマンドの従来どおりの自動許可。未確認：`Write` / `Edit` による空化・置換を含む挙動試験、実provider/runtimeでの実行結果。コード経路上、承認済み `job.auto_execute` はプロジェクト内のWrite/Editを直接許可し、変更前ファイルを退避するが、内容の空化・置換を分類するチェックはない。これはBash guardの範囲外であり、許可済み作業範囲の意味と復旧可能性を別途評価する。
+確認済み：`automatic_operations=true` の `Context.approve()` を通す合成Engine試験、`automatic_operations=false` で削除・通常Bashの両方が承認待ちになる経路、削除・dynamicの管理者例外無効化、通常コマンドの従来どおりの自動許可。未確認：`Write` / `Edit` による空化・置換を含む挙動試験、実provider/runtimeでの実行結果。コード経路上、承認済み `job.auto_execute` はプロジェクト内のWrite/Editを直接許可し、変更前ファイルを退避するが、内容の空化・置換を分類するチェックはない。ソース内にfile-backups用の復元APIは見当たらず、manifestと退避ファイルを使う個別復旧となる。これはBash guardの範囲外であり、許可済み作業範囲の意味と復旧可能性を別途評価する。
 
 ## 完了条件
 

@@ -73,6 +73,8 @@ Codex native command approvalは別経路で強制的に人の承認へ回るが
 
 対象が大きすぎる、通常ファイルでない、バックアップに失敗する等の場合は直接許可せず、通常の承認経路に戻る。`auto_execute=true` の直接許可では、明示範囲のディレクトリ・拡張子チェックまでは行わず、前段のプロジェクト内・保護領域等の検査を適用する。G3で明示した範囲に限定する経路は `approved_scope_edit()` 側。
 
+Claude等の `tool_request()` 経由の `Write` / `Edit` は別実装で、Builder・`job.auto_execute=true`・実体解決したプロジェクト内path・保護path外・既存ファイル10 MB以下等の条件を満たすと、変更前の `before.bin` と `manifest.json` を保存して許可する。入力内容の意味は解析しないため、空内容による上書きもこの経路では拒否されない。確認したソースには `file-backups` を指定して元ファイルを復元するAPIは見当たらず、manifestと控えからの個別復旧が必要になる。対象プロジェクトの作業許可と、内容が常に安全である保証は区別する。
+
 `approved_scope_edit()` の現在の条件は、Builderであること、jobが停止状態でないこと、現在の祖先Plannerのplan承認が1件だけありapprovedであること、`SCOPE.md` の `Root:` が対象プロジェクトと一致すること、`Allowed after human G3 approval:` が1行あること。許可するのは `app/**`、`tests/**`、`docs/**`、`data/**`、`evidence/**`、`.local/test-tmp/**`、または `README.md` の明示指定と、関数内の許可拡張子・リンク・保護パス条件を満たす追加・更新だけ。削除・移動は対象外。
 
 `team_auto_edit.py::auto_edit_reason()` はCodex native file-change向けの限定解析を実装しているが、通常の `Context.approve()` ではnative file-changeを先に `force_manual=true` にする。現行経路でこの関数が自動許可を行うとは扱わず、native変更の承認は画面で確認する。
