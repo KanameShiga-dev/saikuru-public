@@ -129,8 +129,8 @@ Claude の `d5ec52f` は新規ジョブの作成時判定を切り替え、`fb18
 
 1. P0オフのコード実装は `d0260f9`（設定切替）・`df63470`（従来形式の進捗表示）で統合済み。Provider切替は2026-10-15に決定済みの範囲として扱い、新たな承認待ちに戻さない。
 2. Claude報告では固定コミット `3151b2b` の関連151件中、既知の7件（`7d9a00d` 時点でも同名で失敗）以外は合格。これは報告値であり、このターンでCodexが再実行した結果ではない。
-3. 次の確認は、本番コード・データの隔離複製で、AI呼出しなしに新規依頼→G2 pending承認記録→G2承認→G3 `plan` 承認発行を通すこと。Claudeが実施予定として報告しており、結果待ち。
-4. 本番への `p0_contract_enabled=false` 適用は利用者が承認済みだが、実行は未実施。先行する本番複製の予行演習後、利用者自身が端末で実行する手順を使う。予行演習は本番反映そのものではない。
+3. Claude報告の本番コード・データ複製での予行演習はPASSED（apply、新規legacy依頼とG2 pending、起動、rollback。原本との差分0、configバイト一致）。これは報告値で、Codexは再実施していない。G2承認後のG3 `plan` 発行は別途合成テストで確認済み。
+4. `p0_contract_enabled=false` の本番適用は未実施で、最終承認待ち。Claude報告では `deploy_p0off.py`（plan/apply/rollback、本番稼働中は拒否）を作成済みで、実際のサービス停止・apply・起動は利用者が端末で行う。ツール本体は現在の `p0/integration` と作業領域内に見つからず、Codexによるコードレビューは未実施。予行演習は本番反映そのものではない。
 5. 案Aの再開機能は別作業で、API/UI/認可テスト（正常・不正Origin・無Cookie・状態不一致・二重送信・モデル変更）が未完了。P0を再度有効化する場合は、機能準備後に本番設定変更を別途判断する。
 
 ## 4. このレビューで確認したコード上の根拠
@@ -141,7 +141,7 @@ Claude の `d5ec52f` は新規ジョブの作成時判定を切り替え、`fb18
 - `server.py`: `authorized()` は通常UI Cookie、`maintenance_authorized()` は別の `X-Saikuru-Maintenance` 能力。`/api/maintenance/state`・保守承認・P0再試行・P0担当モデル変更を分離している。
 - `server.py`: UI POSTはCookieと `X-Agent-Team-UI` を要求するが、`common()` はOrigin欠落を拒否しない。新しい再開APIでは同一Originを必須にする必要がある。
 - `server.py`: HTTPサーバーは `127.0.0.1` にbindする。
-- `team_config.py`: configの `automatic_operations` は型検証されるが、現時点で `p0_contract_enabled` は未定義。
+- `team_config.py`: `p0_contract_enabled` は既定 `true` で、設定値の型検証対象。`false` は新規ジョブのP0契約適用を止める。既存ジョブの契約は変換しない。
 
 ## 5. 既知のリスク（本番反映前に明示）
 
@@ -151,7 +151,7 @@ Claude の `d5ec52f` は新規ジョブの作成時判定を切り替え、`fb18
 
 ## 6. 未確認
 
-- Claude報告にある本番データ複製での438ファイル差分・起動確認は、ここでは再実施していない。報告内容として扱い、現行作業ツリーでの再現証拠とは区別する。
+- Claude報告にある本番データ複製の438ファイル差分確認と予行演習（apply・legacy依頼/G2 pending・起動・rollback、差分0、configバイト一致、PASSED）は、ここでは再実施していない。報告内容として扱い、現行作業ツリーでの再現証拠とは区別する。
 - `tests/test_p0_off_gates.py` はP0オフ時のpending G2 `ai_start` 記録と、G2承認後のpending G3 `plan` 発行を合成テストで直接確認する。Claude報告ではP0オフゲート11件、関連24件が成功。このターンでCodexはテストを再実行していない。実AIによる計画生成・G3承認後の実作業は未確認。
-- 実ProviderによるE1完走、本番8790への設定変更・反映、UIセッション再開の実装と隔離API試験は未実施。
+- 実ProviderによるE1完走、本番8790への設定変更・反映、UIセッション再開の実装と隔離API試験は未実施。本番適用ツール `deploy_p0off.py` はClaude報告では作成済みだが、この作業領域に存在せず未レビュー。
 - `p0/integration` には案Dの実装（`d0260f9`, `df63470`）、P0オフのゲートテスト（`29b0846`）、その受入根拠の記録（`c00c948`）がある。これらの統合は本番の設定・DB・ランタイム変更を意味しない。
