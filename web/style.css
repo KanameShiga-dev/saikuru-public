@@ -208,3 +208,13 @@ body:not([data-view="technical"]) .tech-only{display:none !important}
 .job-deliverables .deliverable-row>p{flex:1 1 220px;margin:0}
 .job-deliverables .deliverable-row>button{flex:0 0 auto;margin:0}
 .job-deliverables .deliverable-row>pre,.job-deliverables .deliverable-row>p.hint,.job-deliverables .deliverable-row>p.form-error{flex:1 1 100%}
+/* 操作の承認：見出しと値を交互の背景で並べる。技術詳細は閉じておく。 */
+.tool-facts{display:grid;grid-template-columns:max-content 1fr;margin:8px 0;border:1px solid var(--line-strong);border-radius:6px;overflow:hidden}
+.tool-facts dt,.tool-facts dd{margin:0;padding:8px 12px;border-bottom:1px solid var(--line)}
+.tool-facts dt{font-weight:700;background:var(--blue-bg)}
+.tool-facts dd{background:var(--surface);overflow-wrap:anywhere}
+.tool-facts dt:nth-of-type(even),.tool-facts dd:nth-of-type(even){filter:brightness(.97)}
+.tool-facts dt:last-of-type,.tool-facts dd:last-of-type{border-bottom:0}
+.tool-raw{margin:8px 0}
+.tool-raw>summary{cursor:pointer;font-weight:600}
+@media (max-width:640px){.tool-facts{grid-template-columns:1fr}.tool-facts dt{border-bottom:0}}

@@ -290,6 +290,52 @@
           }
         ]
       }
+    },
+    {
+      "id": "ui-tool-local",
+      "title": "架空の検索アプリ（自分のPC内の確認）",
+      "goal": "架空の依頼",
+      "status": "running",
+      "p0_contract_version": 1,
+      "p0_progress": {
+        "completed": [
+          "計画の確認"
+        ],
+        "current": "動作確認",
+        "remaining": [
+          "報告"
+        ],
+        "next_action": "操作の許可を待つ",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": [],
+        "available_actions": [
+          "cancel_job"
+        ],
+        "deliverable_access": []
+      }
+    },
+    {
+      "id": "ui-tool-external",
+      "title": "架空の取得処理（外部への接続）",
+      "goal": "架空の依頼",
+      "status": "running",
+      "p0_contract_version": 1,
+      "p0_progress": {
+        "completed": [
+          "計画の確認"
+        ],
+        "current": "動作確認",
+        "remaining": [
+          "報告"
+        ],
+        "next_action": "操作の許可を待つ",
+        "completion_status": "in_progress",
+        "unmet_acceptance_criteria": [],
+        "available_actions": [
+          "cancel_job"
+        ],
+        "deliverable_access": []
+      }
     }
   ],
   "tasks": [
@@ -355,6 +401,20 @@
       "job_id": "ui-unknown",
       "title": "実装",
       "status": "running",
+      "role": "builder"
+    },
+    {
+      "id": "t-tool-local",
+      "job_id": "ui-tool-local",
+      "title": "動作確認",
+      "status": "awaiting_approval",
+      "role": "builder"
+    },
+    {
+      "id": "t-tool-external",
+      "job_id": "ui-tool-external",
+      "title": "データ取得",
+      "status": "awaiting_approval",
       "role": "builder"
     }
   ],
@@ -433,6 +493,57 @@
       },
       "created_at": 1792000000,
       "updated_at": 1792000000
+    },
+    {
+      "kind": "tool",
+      "status": "pending",
+      "category": "RISK",
+      "intended_role": "authorized_person",
+      "requires_explicit_consent": true,
+      "business_summary": "AI利用または操作の範囲を確認してください。",
+      "created_at": 1792000000,
+      "updated_at": 1792000000,
+      "expires_at": 1792000900,
+      "id": "ap-tool-local",
+      "task_id": "t-tool-local",
+      "job_id": "ui-tool-local",
+      "payload": {
+        "source": "claude",
+        "operation": "Bash",
+        "details": {
+          "command": "cd \"C:/synthetic/project\" && python -m app.server",
+          "timeout": 120000,
+          "run_in_background": true
+        },
+        "cwd": "C:\\synthetic\\project"
+      }
+    },
+    {
+      "kind": "tool",
+      "status": "pending",
+      "category": "RISK",
+      "intended_role": "authorized_person",
+      "requires_explicit_consent": true,
+      "business_summary": "AI利用または操作の範囲を確認してください。",
+      "created_at": 1792000000,
+      "updated_at": 1792000000,
+      "expires_at": 1792000900,
+      "id": "ap-tool-external",
+      "task_id": "t-tool-external",
+      "job_id": "ui-tool-external",
+      "payload": {
+        "source": "claude",
+        "operation": "Bash",
+        "details": {
+          "command": "curl -s https://data.example.com/items.json -o items.json && rm old.json"
+        },
+        "cwd": "D:\\elsewhere",
+        "guard": {
+          "category": "network",
+          "label": "外部との通信",
+          "note": "外部への影響がある操作のため、自動承認の設定でも利用者の確認が必要です。"
+        }
+      }
     }
   ]
 }

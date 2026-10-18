@@ -271,6 +271,68 @@ function progressList(title,items,mark,cls){
   if(!items.length){box.append(el('p','なし','hint'));return box;}
   const list=el('ul');for(const item of items)list.append(el('li',`${mark} ${item}`));box.append(list);return box;
 }
+// 操作の承認（kind==='tool'）を、利用者が判断できる形で出す。説明はコマンドの文字列から機械的に読み取った事実だけ。
+// AIによる説明ではなく、安全の保証でもない。読み取れないものは「読み取れません」と書き、コマンドの全文を折りたたみに残す。
+const GENERIC_APPROVAL_SUMMARY='AI利用または操作の範囲を確認してください。';
+const BACKSLASH=String.fromCharCode(92);
+function normalizePath(path){return String(path||'').split(BACKSLASH).join('/').replace(/\/+$/,'').toLowerCase();}
+function insideApprovedRoots(path){
+  const target=normalizePath(path);
+  return !!target&&(state.config?.approved_roots||[]).map(normalizePath).some(root=>root&&(target===root||target.startsWith(root+'/')));
+}
+function commandUrls(text){return [...String(text).matchAll(/https?:\/\/[^\s"'<>)\]]+/gi)].map(m=>m[0]);}
+function urlHost(url){return (url.match(/^https?:\/\/([^\/?#:]+|\[[^\]]+\])/i)||[])[1]||'';}
+function isLoopbackHost(host){return ['127.0.0.1','localhost','[::1]'].includes(String(host).toLowerCase());}
+function describeCommand(command,background){
+  // 先頭の「作業フォルダへ移動」は、何をするかの判定から外す（場所は別の項目で出す）。
+  const text=String(command||'').replace(/^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*/i,'');
+  let match=text.match(/^\s*python[0-9.]*\s+(?:-[A-Za-z]+\s+)*-m\s+([A-Za-z0-9_.]+)/i);
+  if(match){
+    if(match[1]==='unittest')return 'テストを実行します（python -m unittest）。';
+    if(match[1]==='pip')return 'Pythonのパッケージを操作します（python -m pip）。外部から取得する場合があります。';
+    return `プログラム「${match[1]}」を起動します（python -m ${match[1]}）。`+(background?'起動したまま、次の作業に進みます。':'終わるまで待ちます。');
+  }
+  if(/(urllib|requests\.|httpx|aiohttp|http\.client|^\s*curl\b|Invoke-WebRequest|Invoke-RestMethod)/i.test(text)){
+    const hosts=[...new Set(commandUrls(text).map(urlHost))];
+    if(hosts.length&&hosts.every(isLoopbackHost))return `自分のPC内のアプリ（${hosts.join('、')}）へ接続して、応答を確認します。`;
+    if(hosts.length)return `ネットワークへ接続します（${hosts.join('、')}）。`;
+    return 'ネットワークへ接続するコマンドです。接続先はコマンドの文字列から読み取れません。';
+  }
+  match=text.match(/^\s*git\s+(status|diff|log|show|branch)\b/i);
+  if(match)return `Gitの状態を確認します（git ${match[1]}）。`;
+  match=text.match(/^\s*(?:python[0-9.]*|py|node)\s+(?:-[A-Za-z]+\s+)*("[^"]+"|'[^']+'|[^\s-][^\s]*)/i);
+  if(match)return `スクリプト ${match[1]} を実行します。`;
+  return null;
+}
+const RISKY_WORDS=/(?:^|[\s;&|(])(?:rm|rmdir|del|erase|rd|mv|move|Remove-Item|Move-Item|Set-Content|Out-File|truncate)(?=[\s;&|)]|$)|shutil\.rmtree|os\.remove|os\.unlink|\bgit\s+(?:reset|clean|push|checkout\s+--)/i;
+function toolApprovalView(a){
+  const payload=a.payload||{},details=payload.details||{},command=details.command,wrap=el('div',undefined,'tool-approval');
+  const rows=[];
+  const bash=payload.operation==='Bash'&&typeof command==='string';
+  const said=bash?describeCommand(command,details.run_in_background===true):null;
+  rows.push(['何をするか',said||(bash?'内容を読み取れません。下の「技術詳細」でコマンドの全文を確認してください。':`「${payload.operation||'不明な操作'}」の実行を求めています。`)]);
+  const target=details.file_path||details.path||details.notebook_path;
+  if(target)rows.push(['対象のファイル',String(target)+(insideApprovedRoots(target)?'（作業範囲の中）':'（作業範囲の外：要確認）')]);
+  if(payload.cwd)rows.push(['実行する場所',String(payload.cwd)+(insideApprovedRoots(payload.cwd)?'（作業範囲の中）':'（作業範囲の外：要確認）')]);
+  if(bash){
+    const hosts=[...new Set(commandUrls(command).map(urlHost))];
+    rows.push(['通信先',hosts.length?(hosts.every(isLoopbackHost)?'自分のPC内だけ（外部には出ません）':'外部：'+hosts.filter(h=>!isLoopbackHost(h)).join('、')):
+      payload.guard?.category==='network'?'通信を伴う可能性があります（通信先はコマンドの文字列から読み取れません）':'コマンドの文字列に、通信先の記載はありません']);
+    const risky=command.match(RISKY_WORDS);
+    rows.push(['削除・上書き',risky?`削除・上書きを示す語が含まれています：${risky[0].trim()}（内容を確認してください）`:'削除・上書きを示す語は、コマンドの文字列に見つかりません']);
+  }
+  rows.push(['許可すると','この操作が1回だけ実行されます。次に同じ操作が必要になれば、もう一度確認します。']);
+  rows.push(['拒否すると','この操作は実行されません。担当は別の方法を試すか、停止する場合があります。']);
+  const list=el('dl',undefined,'tool-facts');
+  for(const [label,value] of rows)list.append(el('dt',label),el('dd',value));
+  wrap.append(list);
+  wrap.append(el('p','この説明は、コマンドの文字列から機械的に読み取ったものです。AIによる説明でも、安全の保証でもありません。','hint'));
+  const raw=el('details',undefined,'tool-raw');raw.append(el('summary','技術詳細：コマンドの全文と元のデータ'));
+  if(bash)raw.append(el('pre',command,'text-block'));
+  raw.append(el('pre',JSON.stringify(payload,null,2),'text-block'));
+  wrap.append(raw);
+  return wrap;
+}
 function openCompletion(job){
   const approval=state.approvals.find(a=>a.job_id===job.id&&a.kind==='completion'&&a.status==='pending'&&userDecision(a));
   if(!approval){notice('確認の準備がまだできていません。作業の工程が終わると、ここから確認できます。');return;}
@@ -1092,7 +1154,7 @@ function renderDetail(task,version) {
   }
   if(['queued','failed','interrupted','blocked'].includes(task.status)&&!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status))body.append(button('担当・モデルを切り替える',()=>openModelSwitch(task.id)));
   for(const a of endedJob(task)?[]:pendingUser(task.id)){
-    const summary=a.business_summary?el('p',a.business_summary,'business-summary'):null;
+    const summary=a.business_summary&&!(a.kind==='tool'&&a.business_summary===GENERIC_APPROVAL_SUMMARY)?el('p',a.business_summary,'business-summary'):null;
     // 利用者の判断欄の目印。折りたたみの枠に包まれた後でも、復旧中の表示が判断欄を隠さないために使う。
     if(summary)summary.dataset.userDecision='1';
     if(a.payload.questions?.length){if(summary)body.append(summary);const form=questionForm(a);form.dataset.userDecision='1';body.append(form);continue;}
@@ -1104,7 +1166,7 @@ function renderDetail(task,version) {
       box.append(el('p','レビュー結果の確認と依頼全体の正式受領は別操作です。レビュー確認だけでは受領状態を変更しません。','notice'));
       box.append(el('p','対象依頼：'+job.title,'hint'));
     }
-    box.append(el('div',a.kind==='tool'?JSON.stringify(a.payload,null,2):reportText(a.payload),'text-block'));
+    if(a.kind==='tool')box.append(toolApprovalView(a));else box.append(el('div',reportText(a.payload),'text-block'));
     if(a.kind==='completion'){
       box.append(previewPanel(job));
       const evidenceForm=completionEvidenceForm(a);if(evidenceForm)box.append(evidenceForm);
