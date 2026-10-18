@@ -192,6 +192,36 @@ class EngineGuardTests(unittest.TestCase):
         self.store.db.close()
         self.temp.cleanup()
 
+    def test_deletion_reaches_a_person_through_the_real_automatic_approval_path(self):
+        # 2026-10-19: with automatic_operations on, approve() approves everything that is not force_manual.
+        # This runs the real approve() (only the creation of an approval is replaced) for deletions and for ordinary work.
+        from team_engine import Context
+
+        class Asked(Exception):
+            pass
+
+        def ask(task, kind, payload):
+            raise Asked(payload)
+
+        job = self.engine.create_job('sample', 'local goal', self.temp.name, True)
+        task = self.engine.new_task(job, 'change', 'change file', 'builder')
+        ctx = Context(self.engine, task)
+        self.engine.active[task['id']] = ctx
+        self.engine.new_approval = ask
+        bash = lambda command: self.engine.tool_request(ctx.token, {'task_id': task['id'], 'tool': 'Bash', 'input': {'command': command}})
+        for command, category in (('rm -rf build', 'delete'), ('Remove-Item -Recurse -Force build', 'delete'),
+                                  ('git reset --hard HEAD~3', 'delete'), ('python -c "import shutil; shutil.rmtree(1)"', 'delete'),
+                                  ('powershell -EncodedCommand AAAA', 'dynamic')):
+            with self.subTest(command=command):
+                with self.assertRaises(Asked) as caught:
+                    bash(command)
+                payload = caught.exception.args[0]
+                self.assertTrue(payload['force_manual'])
+                self.assertEqual(payload['guard']['category'], category)
+        for command in ('python build.py', 'python -m unittest -v', 'git status --short'):
+            with self.subTest(command=command):
+                self.assertTrue(bash(command)['allow'])
+
     def test_outbound_overrides_automatic_approval(self):
         from pathlib import Path
         from team_engine import Context
