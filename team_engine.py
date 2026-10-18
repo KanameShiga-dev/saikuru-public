@@ -1265,7 +1265,7 @@ class Engine:
         from team_limited_routing import classify_intake
         intake = classify_intake(title, goal, self.config.get('decision', {}))
         from team_p0_contract import initial as initial_p0_contract
-        p0_development = not document_source and route == 'full'
+        p0_development = not document_source and route == 'full' and self.config.get('p0_contract_enabled', True) is not False
 
         with self.store.atomic():
 
