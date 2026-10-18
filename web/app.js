@@ -1145,11 +1145,14 @@ function renderDetail(task,version) {
   const phase=p0Phase(job);
   if(phase){
     // 復旧中・保守対応待ち・安全上の確認待ちでは、技術的な修理の欄を標準で隠す（技術詳細では従来どおり表示）。中止と成果物は残す。
+    const hasUserDecision=pendingUser(task.id).length>0;
     for(const node of [...body.children]){
-      if(node.id==='cancel-job'||node.querySelector?.('#cancel-job')||node.querySelector?.('h3')?.textContent==='この依頼の成果物')continue;
+      if(node.id==='cancel-job'||node.querySelector?.('#cancel-job')||node.querySelector?.('h3')?.textContent==='この依頼の成果物'||
+         (hasUserDecision&&(node.classList.contains('approval-box')||node.classList.contains('business-summary'))))continue;
       node.classList.add('tech-only');
     }
-    const status=section('いまの状況',phase.label+'\n'+phase.detail+(job.p0_progress?.next_action?'\n次の動作：'+job.p0_progress.next_action:''));
+    const detail=hasUserDecision?'操作の確認待ちがあります。下の承認欄をご確認ください。':phase.detail;
+    const status=section('いまの状況',phase.label+'\n'+detail+(job.p0_progress?.next_action?'\n次の動作：'+job.p0_progress.next_action:''));
     status.classList.add('p0-status');status.setAttribute('role','status');body.prepend(status);
   }
   // 描き直しで、操作中のボタンが差し替わりフォーカスを失ったときは、承認の枠の見出し（無ければ詳細の題名）へ移す。
