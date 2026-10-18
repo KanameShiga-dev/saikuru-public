@@ -138,6 +138,20 @@ def progress(job, tasks, approvals):
                               if approval.get('job_id') == job.get('id')
                               and approval.get('kind') == 'completion'
                               and approval.get('status') == 'pending'), None)
+    latest_receipt = next((approval for approval in reversed(approvals)
+                           if approval.get('job_id') == job.get('id')
+                           and approval.get('kind') == 'completion'), None)
+    actions = []
+    if job.get('status') not in ('cancelled', 'accepted', 'accepted_with_pending_checks'):
+        actions.append('cancel_job')
+    if latest_completion:
+        actions.append('review_completion')
+    if (latest_receipt and latest_receipt.get('payload', {}).get('pending_items')
+            and ((job.get('status') == 'awaiting_acceptance'
+                  and latest_receipt.get('status') == 'pending')
+                 or (job.get('status') == 'accepted_with_pending_checks'
+                     and latest_receipt.get('status') == 'approved'))):
+        actions.append('record_completion_evidence')
     if job.get('status') in ('accepted', 'accepted_with_pending_checks'):
         unmet = []
         next_action = '受領済み'
@@ -164,4 +178,10 @@ def progress(job, tasks, approvals):
         'next_action': next_action,
         'completion_status': contract.get('completion_status', 'in_progress'),
         'unmet_acceptance_criteria': unmet,
+        'available_actions': actions,
+        'deliverable_access': [
+            {'path': item['path'], 'method': 'project_relative_file',
+             'launch_status': 'unverified'}
+            for item in job.get('p0_artifacts') or []
+            if isinstance(item, dict) and isinstance(item.get('path'), str)],
     }
