@@ -39,6 +39,8 @@
 
 `p0/integration` の現在の作業ツリーには、`delete` と `dynamic` の分類規則が追加されている。削除操作（`rm` / `Remove-Item` / `git reset --hard` / `git clean` / `shutil.rmtree` 等）と、実行内容を隠す一部の表現（PowerShell encoded command、`exec` / `eval` / `compile` / `__import__`、Base64 decode 等）は人の確認へ回す。これはコマンド文字列の分類であり、下記の未対応例を含め、削除・破壊操作全般を保証して防ぐものではない。
 
+分類はプログラム引数や引用文字列の意味までは解析しない。安全な文字列確認でも、`python -c "print('rm')"`、`echo "git reset --hard"`、`Write-Output "Remove-Item is a PowerShell command"` は `delete` 扱いとなり、人の確認へ回ることを確認した。通常処理の説明・検索・生成コマンドで同様の文字列を含む場合も確認が増える可能性がある。
+
 この実装で未対応として報告された例は、上書き（`mv` / `cp` / リダイレクト / `Set-Content` / `open(..., 'w')`）、`ri` 等の別名、変数経由のコマンド名、`getattr`、`python cleanup.py` 等のスクリプト内部である。別名・関数・変数展開、動的実行、難読化も静的分類を迂回し得る。コードレビューで見つかった管理者例外の抜け道は、統合側で `delete` / `dynamic` を `outbound_exceptions` の対象外にする修正と回帰テストを追加した。これらはローカル未実行のため、動作確認は未完了として扱う。
 
 Codex native command approvalは別経路で強制的に人の承認へ回るが、Claude等の `tool_request()` 経由のBashには同じ強制が常に適用されるわけではない。`job.auto_execute=true` による通常の `Write` / `Edit` の直接許可も、このコマンド分類とは別の経路である。
