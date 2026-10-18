@@ -4483,7 +4483,9 @@ class Engine:
                 if not exception:
                     return ctx.approve(dict(payload, force_manual=True,
                                             guard={'category': category, 'label': label,
-                                                   'note': '外部への影響がある操作のため、自動承認の設定でも利用者の確認が必要です。'}))
+                                                   'note': {'delete': '削除・上書きできる操作のため、自動承認の設定でも利用者の確認が必要です。',
+                                                            'dynamic': '実行内容をコマンドの文字列から判断できないため、自動承認の設定でも利用者の確認が必要です。'}.get(
+                                                       category, '外部への影響がある操作のため、自動承認の設定でも利用者の確認が必要です。')}))
 
             reason = auto_read_reason(payload, ctx.project)
 

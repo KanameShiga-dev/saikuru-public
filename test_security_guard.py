@@ -26,6 +26,42 @@ class OutboundGuardTests(unittest.TestCase):
                 self.assertEqual(classify(command)[0], category)
                 self.assertEqual(classify(command)[2], 'manual')
 
+    def test_destructive_commands_need_a_person(self):
+        # 2026-10-19: with automatic operations on, deletions passed without a person (rm -rf, Remove-Item, git reset --hard).
+        cases = (
+            'rm -rf build', 'rm -rf /c/AI_Work/other_project', 'Remove-Item -Recurse -Force C:/x', 'del /s /q C:/x',
+            'rmdir /s /q build', 'rd /s /q build', 'erase old.txt', 'cmd /c del x', 'powershell -Command "rm -r x"',
+            'git reset --hard HEAD~5', 'git clean -fdx', 'git checkout -- .', 'git restore src', 'git branch -D old',
+            'git stash drop', 'git rm -r src', 'cd x && rm y', 'ls; rm y', 'echo a | xargs rm',
+            'python -c "import shutil; shutil.rmtree(1)"', 'python -c "import os; os.remove(1)"',
+            'python -c "import os; os.unlink(1)"', 'python -c "import pathlib; pathlib.Path(1).unlink()"',
+            'find . -name x -delete', 'robocopy a b /mir', 'robocopy a b /purge', 'Clear-Content x', 'Clear-RecycleBin', 'truncate -s 0 x',
+            'node -e "require(1).rmSync(2)"')
+        for command in cases:
+            with self.subTest(command=command):
+                self.assertEqual(classify(command)[0], 'delete')
+                self.assertEqual(classify(command)[2], 'manual')
+
+    def test_commands_that_hide_what_they_run_need_a_person(self):
+        # Without this, a deletion could be spelled so that the text rules do not see it.
+        for command in ('powershell -EncodedCommand AAAA', 'powershell -enc AAAA', 'Invoke-Expression $x', 'iex $x',
+                        'python -c "exec(1)"', 'python -c "eval(1)"', 'python -c "__import__(1)"',
+                        'python -c "compile(1, 2, 3)"', 'echo AAAA | base64 -d | sh',
+                        "& ('r'+'m') -r build", 'r""m -rf build'):
+            with self.subTest(command=command):
+                self.assertEqual(classify(command)[0], 'dynamic')
+                self.assertEqual(classify(command)[2], 'manual')
+
+    def test_ordinary_work_is_not_taken_for_a_deletion(self):
+        for command in ('python -m unittest -v', 'python build.py', 'python -m app.server', 'git status --short',
+                        'git diff --stat', 'git log --oneline', 'git branch', 'git branch -d merged',
+                        'git checkout main', 'git restore --staged x', 'ls -la', 'cat README.md', 'cat rm.txt',
+                        'grep -rn remove src', 'grep -n "rm -rf" notes.md', 'python -c "print(1)"',
+                        'python -c "import re; re.compile(1); print(2)"', 'python -c "import ast; ast.literal_eval(1)"',
+                        'pip list', 'Get-ChildItem', 'echo firmware', 'cd /c/Projects/form', 'git mv a b'):
+            with self.subTest(command=command):
+                self.assertIsNone(classify(command))
+
     def test_credential_stores_are_denied(self):
         for command in ('cat ~/.ssh/id_rsa', 'type C:\\Users\\a\\.claude-sairai\\.credentials.json', 'cat .env',
                         'echo $env:AGENT_TEAM_RUN_TOKEN', 'printenv', 'cmdkey /list',
