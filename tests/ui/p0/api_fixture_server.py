@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 from server import App, DataLock, Handler
 from team_config import default_config
 from team_engine import Engine
+from team_p0_contract import artifact_records
 from team_store import Store
 
 
@@ -33,7 +34,8 @@ class ReadOnlyHandler(Handler):
     def do_GET(self):
         allowed = {'/', '/health', '/app.js', '/style.css', '/theme.css',
                    '/shell.js', '/attachments.js', '/skill-picker.js',
-                   '/api/state', '/api/notifications', '/api/tasks/detail'}
+                   '/api/state', '/api/notifications', '/api/tasks/detail',
+                   '/api/job/p0-artifact'}
         if urlparse(self.path).path not in allowed:
             return self.send(403, {'error': '架空データの画面確認用です。'})
         return super().do_GET()
@@ -63,6 +65,15 @@ def make_server(port, base):
         for job in fixture['jobs']:
             row = {key: value for key, value in job.items() if key != 'p0_progress'}
             row['project'] = str(project.resolve())
+            if row.get('p0_artifacts'):
+                paths = [item['path'] for item in row['p0_artifacts']]
+                for name in paths:
+                    target = project / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if not target.exists():
+                        target.write_bytes(b'<!doctype html><title>Fictional artifact</title>\n'
+                                           b'<p>Fictional lookup preview only.</p>\n')
+                row['p0_artifacts'] = artifact_records(project, paths)
             app.store.put('job', row)
         for task in fixture['tasks']:
             row = dict(task)
