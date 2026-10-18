@@ -6,7 +6,28 @@ const jobSkills = new SkillPicker(document.getElementById('job-skills'));
 const roles = {planner:'計画',researcher:'調査',builder:'実装',reviewer:'レビュー'};
 const statuses = {queued:'待機',running:'実行中',awaiting_approval:'承認待ち',succeeded:'担当作業終了',handed_off:'未完了項目を残して引き継ぎ済み',failed:'失敗',cancelled:'中止',interrupted:'中断',blocked:'判断が必要'};
 const jobStatuses = {...statuses,planning:'計画中',awaiting_acceptance:'成果の確認待ち',accepted:'利用者が確認済み',accepted_with_pending_checks:'成果を受領・未完了項目あり'};
-function jobStatusLabel(job){return job?.g2_gate_version===1&&job.g2_status==='pending'?'AIによる計画作成の開始の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
+// P0 L2：復旧と保守の状態は、サーバーの p0_interruption と承認の category / intended_role だけで分ける。
+// 画面側で障害の種類を推測しない。未知の値は「保守対応待ち」とし、成功や判断待ちとは扱わない。
+const P0_PHASES={
+  retrying:{key:'retrying',label:'復旧中',detail:'采来が自動で復旧を試みています。完了すると、止まった作業から再開します。あなたの操作は不要です。'},
+  maintenance_required:{key:'maintenance_required',label:'保守対応待ち',detail:'作業の成果は保存されています。保守担当が対応します。あなたの操作は不要です。'},
+  safety_blocked:{key:'safety_blocked',label:'安全上の確認待ち',detail:'安全のため作業を止めました。作業の成果は保存されています。権限のある担当者の確認が必要です。'}
+};
+function p0Phase(job){
+  if(job?.p0_contract_version!==1)return null;
+  const status=job.p0_interruption?.recovery_status;
+  if(!status)return null;
+  if(status==='retrying')return P0_PHASES.retrying;
+  if(job.status!=='blocked')return null;
+  return P0_PHASES[status]||P0_PHASES.maintenance_required;
+}
+// 利用者に判断を求める承認か。category の無い旧形式の承認は従来どおり扱う。保守・技術・改善の項目と、保守担当宛ての項目は含めない。
+function userDecision(a){
+  if(!a.category)return true;
+  if(a.intended_role==='maintainer'||a.intended_role==='none')return false;
+  return ['BUSINESS','ACCEPTANCE'].includes(a.category)||(a.category==='RISK'&&a.intended_role==='authorized_person');
+}
+function jobStatusLabel(job){const phase=p0Phase(job);if(phase)return phase.label;return job?.g2_gate_version===1&&job.g2_status==='pending'?'AIによる計画作成の開始の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
 function el(tag, text, cls) { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; }
 function notice(text) { $('notice').textContent=text; }
 // P0 L1：標準画面（既定）と技術詳細の切り替え。選択はこのブラウザーにだけ保存し、読めなくても標準で動く。
@@ -17,6 +38,7 @@ function notice(text) { $('notice').textContent=text; }
 function waitingReason(task){
  if(task.status!=='queued')return '';
  const job=state.jobs.find(j=>j.id===task.job_id),prior=state.tasks.find(t=>t.id===task.after);
+ const phase=p0Phase(job);if(phase)return phase.detail;
  if(job?.status==='blocked'){
   if(prior?.result?.status==='needs_changes')return '直前のレビューに未解決の指摘があります。自動修正上限で依頼が停止中のため、修正後の再レビューを待っています。';
   return '依頼全体が停止中です。停止した担当の理由を確認してください。';
@@ -87,6 +109,9 @@ async function apiCall(path, data, retried=false) {
 async function action(fn) { if(busy)return; busy=true; try{await fn();await refresh();}catch(e){notice(e.message);}finally{busy=false;} }
 function button(text, fn, cls) { const b=el('button',text,cls);b.type='button';b.addEventListener('click',()=>action(fn));return b; }
 function pending(id) { return state.approvals.filter(a=>a.task_id===id&&a.status==='pending'); }
+function pendingUser(id){return pending(id).filter(userDecision);}
+// 承認待ちがあるが、利用者に判断を求めるものではない（保守・技術・改善）。利用者の判断欄には出さない。
+function maintenanceHeld(task){return pending(task.id).length>0&&pendingUser(task.id).length===0;}
 function endedJob(task){return ['cancelled','accepted','accepted_with_pending_checks'].includes(state.jobs.find(j=>j.id===task.job_id)?.status);}
 function stopReason(task){
   const summary=task.summary||'',claude=task.profile?.adapter==='claude'||/^Claude Code:/i.test(summary);
@@ -118,7 +143,7 @@ function stopCause(task,job){
   if(task.status==='interrupted')return '原因：担当の実行が中断されました。';
   return '原因：依頼が停止しています（'+jobStatusLabel(job)+'）。';
 }
-function group(task) { if(endedJob(task))return 3; if(isStalledReview(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
+function group(task) { if(endedJob(task))return 3; const phase=p0Phase(state.jobs.find(j=>j.id===task.job_id));if(phase&&!pendingUser(task.id).length)return phase.key==='retrying'?1:0; if(maintenanceHeld(task))return 0; if(isStalledReview(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
 const completedFolds=new Map();
 function completedTime(task){
   const job=state.jobs.find(j=>j.id===task.job_id);
@@ -295,7 +320,7 @@ function render() {
     }
     for(const task of tasks){
       const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card role-'+task.role+(index===2?' attention':''));
-      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatusLabel(job)):pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
+      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatusLabel(job)):p0Phase(job)&&!pendingUser(task.id).length?p0Phase(job).label:maintenanceHeld(task)?'保守対応待ち':pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
       const head=el('div',undefined,'card-head');head.append(badge);if(job?.title)head.append(el('span',job.title,'job-title'));card.append(head,el('strong',task.title));
       const warnings=(job?.warning_issues||[]).filter(i=>i.task_id===task.id&&i.status==='open');
       if(warnings.length){const note=el('div',undefined,'progress-warning');note.append(el('strong',`⚠ 警告 ${warnings.length}件・作業は継続`));for(const issue of warnings)note.append(el('p',issue.summary));card.append(note);}
@@ -840,7 +865,7 @@ function renderDetail(task,version) {
     const choices=el('div',undefined,'actions');
     const jump=(label,target)=>choices.append(button(label,()=>{const dest=body.querySelector(target);if(!dest){notice('対象の操作欄がありません。担当の報告と履歴を確認してください。');return;}revealSection(dest);dest.scrollIntoView({block:'center'});const focus=dest.querySelector('button,textarea,input')||dest;focus.focus();}));
     if(isStalledReview(task))jump('範囲を指定して修正を依頼','#manual-review-repair');
-    else if(pending(task.id).length)jump('判断材料を読んで回答','.approval-box');
+    else if(pendingUser(task.id).length)jump('判断材料を読んで回答','.approval-box');
     else {jump('原因と復旧方法を確認','#recovery-advice');jump('補足・差し戻しを入力','#retry-note');}
     jump('中止の確認へ','#cancel-job');
     choices.append(button('保留して閉じる',()=>{$('detail-dialog').close();notice('保留しました。依頼は停止したままで、判断待ちにも残ります。');}));
@@ -943,7 +968,7 @@ function renderDetail(task,version) {
       catch(error){message.textContent=error.message;}finally{submit.disabled=false;}});
   }
   if(['queued','failed','interrupted','blocked'].includes(task.status)&&!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status))body.append(button('担当・モデルを切り替える',()=>openModelSwitch(task.id)));
-  for(const a of endedJob(task)?[]:pending(task.id)){
+  for(const a of endedJob(task)?[]:pendingUser(task.id)){
     if(a.payload.questions?.length){body.append(questionForm(a));continue;}
     const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
     if(a.kind==='ai_start')box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途G3計画承認が必要です。モデル利用量が発生します。','notice'));
@@ -1018,6 +1043,18 @@ function renderDetail(task,version) {
   if(!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status)){const cancel=button('この依頼全体を中止',async()=>{if(confirm('実行中・待機中の作業を中止します。既存の変更は自動では戻しません。'))await api('/api/cancel',{id:job.id});},'danger');cancel.id='cancel-job';body.append(cancel);}
   body.querySelectorAll('textarea').forEach(t=>{if(drafts[t.id])t.value=drafts[t.id];});
   foldDetailSections(body,task);
+  // 新形式の依頼では、引き継ぎDBの編集欄と履歴は技術詳細に置く（旧形式の表示は変えない）。
+  if(job.p0_contract_version===1)for(const node of body.children){const head=node.textContent||'';if(head.startsWith('引き継ぎ情報を登録・訂正')||head.startsWith('引き継ぎDBの履歴'))node.classList.add('tech-only');}
+  const phase=p0Phase(job);
+  if(phase){
+    // 復旧中・保守対応待ち・安全上の確認待ちでは、技術的な修理の欄を標準で隠す（技術詳細では従来どおり表示）。中止と成果物は残す。
+    for(const node of [...body.children]){
+      if(node.id==='cancel-job'||node.querySelector?.('#cancel-job')||node.querySelector?.('h3')?.textContent==='この依頼の成果物')continue;
+      node.classList.add('tech-only');
+    }
+    const status=section('いまの状況',phase.label+'\n'+phase.detail+(job.p0_progress?.next_action?'\n次の動作：'+job.p0_progress.next_action:''));
+    status.classList.add('p0-status');status.setAttribute('role','status');body.prepend(status);
+  }
 }
 // 2026-10-08 カードを開くたびに折りたたみを初期状態（停止理由を開く）から始める。以前の開閉を引き継ぐと、停止後も閉じたままになっていた。
 function openTask(id){selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
@@ -1105,7 +1142,7 @@ function notificationButton(){
 }
 function decisionItems(){
   return state.tasks.filter(t=>!endedJob(t)).flatMap(task=>{
-    const approvals=pending(task.id);
+    const approvals=pendingUser(task.id);
     const completion=approvals.find(a=>a.kind==='completion');
     if(completion){
       const job=state.jobs.find(j=>j.id===task.job_id);
@@ -1115,11 +1152,11 @@ function decisionItems(){
         voice:'依頼全体の作業工程が終了しました。成果を確認してください。',completion:true}];
     }
     if(approvals.length)return [{task,key:approvals.map(a=>a.id).sort().join(':'),label:'判断・確認をお願いします'}];
-    if(['blocked','failed','interrupted'].includes(task.status)){const reason=stopReason(task);return [{task,key:`${task.id}:${task.attempt}:${task.status}:${reason?.code||'generic'}`,label:reason?.title||(task.status==='blocked'?'判断が必要です':'作業が停止しています'),detail:reason?.detail,voice:reason?.title}];}
+    if(!p0Phase(state.jobs.find(j=>j.id===task.job_id))&&['blocked','failed','interrupted'].includes(task.status)){const reason=stopReason(task);return [{task,key:`${task.id}:${task.attempt}:${task.status}:${reason?.code||'generic'}`,label:reason?.title||(task.status==='blocked'?'判断が必要です':'作業が停止しています'),detail:reason?.detail,voice:reason?.title}];}
     return [];
   }).concat(state.jobs.filter(job=>!['cancelled','accepted','accepted_with_pending_checks'].includes(job.status)).flatMap(job=>{
     const review=stalledReview(job);
-    return review?[{task:review,key:'repair-limit:'+review.id,label:'自動修正の上限に達し、判断が必要です',
+    return review&&!p0Phase(job)?[{task:review,key:'repair-limit:'+review.id,label:'自動修正の上限に達し、判断が必要です',
       detail:'レビュー指摘が残っています。修正範囲を指定して再依頼するか、成果の扱いを判断してください。',voice:'自動修正の上限に達しました。判断が必要です。'}]:[];
   }));
 }
