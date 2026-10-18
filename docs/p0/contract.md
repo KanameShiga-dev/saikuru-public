@@ -31,11 +31,15 @@ New approvals carry `category`, `intended_role`, `business_summary`, and `requir
 
 The P0 backend currently classifies technical repair questions as `MAINTENANCE` and separates them with the `SAIKURU_MAINTENANCE_TOKEN` capability. An operator supplies the token through the process environment at startup; the server removes it from the child process environment. Maintainer requests send it in `X-Saikuru-Maintenance`. `/api/maintenance/state` requires that capability. `/api/state`, `/api/tasks/detail`, and detailed `/api/jobs/archive` redact maintenance task and question diagnostics for standard sessions. The normal session cookie remains required for ordinary user actions. Deployment must provision the maintenance capability before relying on this route.
 
+In standard `/api/state`, a maintenance task keeps `id`, `job_id`, `status`, `role`, `after`, `attempt`, safe `title`/`summary`, and empty structural values for `instruction`, `result`, `agent_name`, `common_agents`, and `profile`. The standard job omits `p0_interruption.failure_signature` and `.interruption_reason`. Technical details stay in the maintenance endpoint. An unresolved maintenance task is never an end-user approval, even when its task status is `failed` or `blocked`.
+
 ## Interruption and progress
 
 `job.p0_interruption`, when present, carries `interrupted_task_id`, `interruption_reason`, `recovery_status`, `resume_target`, and a bounded failure signature/count. A transient local operation may be retried only when it is known to be idempotent. AI invocations and uncertain writes are never replayed automatically. The job resumes the same pending task after successful recovery; previously succeeded tasks remain succeeded.
 
 `job.p0_progress` is a server projection derived from the current approved plan, task state, artifacts, and validation evidence. It contains `completed`, `current`, `remaining`, `next_action`, `completion_status`, and `unmet_acceptance_criteria`. The standard UI displays these fields, not internal G2/G3 codes. Unknown evidence is displayed as unverified, never as success. The server decides whether a completion approval can be issued and formally accepted; the UI cannot make that decision.
+
+When no task is running or stopped, `current` is the next queued task and `remaining` excludes that current task. Maintenance titles are replaced with a safe label in this projection, including after a maintenance question has been resolved.
 
 Builder reports for P0 jobs include `artifacts`, a list of project-relative files. The server stores paths and SHA-256 hashes in `job.p0_artifacts`, rejecting paths outside the project and secret or internal-data paths. The final review and formal receipt recheck those files. The completion approval retains pending launch/operation and approved acceptance checks until the user records evidence for each through the existing completion-evidence API. Evidence submission creates a new approval; the user must acknowledge its current review and explicitly accept it.
 
