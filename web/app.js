@@ -384,7 +384,7 @@ function jobCounts(job){
     if(total>0)return {done,total};
   }
   const tasks=(state.tasks||[]).filter(t=>t.job_id===job.id&&t.status!=='cancelled');
-  return tasks.length?{done:tasks.filter(t=>['succeeded','handed_off'].includes(t.status)).length,total:tasks.length}:null;
+  return tasks.length?{done:tasks.filter(t=>t.status==='succeeded').length,total:tasks.length}:null;
 }
 function needsUserDecision(job){return (state.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a));}
 function deliverableGroup(job,access){
@@ -417,10 +417,11 @@ function progressCard(job){
   if(job.p0_contract_version!==1){
     // 従来形式の依頼：完成の契約や受入条件は持たない。担当の作業の状態だけを、事実として並べる。
     const works=(state.tasks||[]).filter(t=>t.job_id===job.id&&t.status!=='cancelled');
-    const finished=works.filter(t=>['succeeded','handed_off'].includes(t.status)).map(t=>t.title);
+    const finished=works.filter(t=>t.status==='succeeded').map(t=>t.title);
+    const handedOff=works.filter(t=>t.status==='handed_off').map(t=>`${t.title}（${statuses[t.status]||t.status}）`);
     const rest=works.filter(t=>!['succeeded','handed_off'].includes(t.status)).map(t=>`${t.title}（${statuses[t.status]||t.status}）`);
     const lists=el('div',undefined,'progress-lists');
-    lists.append(progressList('完了した作業',finished,'✓','done'),progressList('残りの作業',rest,'○','todo'));
+    lists.append(progressList('完了した作業',finished,'✓','done'),progressList('残りの作業',rest,'○','todo'),progressList('未完了で引き継いだ作業',handedOff,'↗','todo'));
     body.append(lists,el('p','従来形式の依頼です。完成の判定や成果物の確認は、各作業の画面で行います。','hint'));
     row.append(body);
     row.open=openJobRows.has(job.id);
