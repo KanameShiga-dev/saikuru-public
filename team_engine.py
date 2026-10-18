@@ -3337,6 +3337,11 @@ class Engine:
                     agent_outcome, failure_code = 'held', 'g2_authorization'
                     return
                 ctx.check()
+            # Completed local tasks can mention their loopback launch URL in the
+            # handoff context. Preserve the report in storage, but do not send
+            # that address (or a possible URL query) to the next provider.
+            from team_egress_guard import redact_loopback_urls
+            prompt = redact_loopback_urls(prompt)
             result = ADAPTERS[task['profile']['adapter']]().run(ctx, prompt, schema)
             if task['role'] == 'planner':
                 with self.store.atomic():

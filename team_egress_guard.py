@@ -13,7 +13,13 @@ HOME_PATH = re.compile(r'(?i)(?:^|(?<=[\s"\'=:]))(?:~|/home|/Users)[\\/]+[^\\/\s
 USER_PROFILE_ENV = re.compile(r'(?i)%USERPROFILE%')
 UNC_PATH = re.compile(r'(?<!\\)\\\\[^\\/\s]+\\[^\\/\s]+')
 LOOPBACK_URL = re.compile(r'(?i)\bhttps?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/\?#]|$)')
+LOOPBACK_REFERENCE = re.compile(r'(?i)\bhttps?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s"\'<>]*')
 BLOCK_MARKER = '[EGRESS_BLOCKED: protected output withheld]'
+
+
+def redact_loopback_urls(text):
+    """Keep local launch evidence in storage while withholding its URL from models."""
+    return LOOPBACK_REFERENCE.sub('[LOCAL_LOOPBACK_URL]', text)
 
 
 def _strings(value):

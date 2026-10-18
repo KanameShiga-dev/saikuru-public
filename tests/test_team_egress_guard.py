@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from consultation_read_tools import BLOCKED, safe_path, screen_model_read
 from team_attachments import provider_input
 from team_egress_guard import (BLOCK_MARKER, batch_block_reason, findings,
-                               require_safe_egress, sanitize_tool_output)
+                               redact_loopback_urls, require_safe_egress, sanitize_tool_output)
 from egress_batch_hook import decision as batch_decision
 
 
@@ -26,6 +26,16 @@ class EgressGuardTests(unittest.TestCase):
     def test_other_absolute_project_paths_are_not_rejected(self):
         self.assertEqual(findings(r'Inspect C:\Projects\demo\src\main.py'), [])
         require_safe_egress(r'Inspect C:\Projects\demo\src\main.py')
+
+    def test_local_launch_url_is_redacted_before_model_input(self):
+        source = 'Launch http://127.0.0.1:8000/?token=fictional and https://localhost:8877/api.'
+        clean = redact_loopback_urls(source)
+        self.assertNotIn('127.0.0.1', clean)
+        self.assertNotIn('localhost', clean)
+        self.assertNotIn('fictional', clean)
+        self.assertEqual(findings(clean), [])
+        self.assertIn('[LOCAL_LOOPBACK_URL]', clean)
+        self.assertIn('loopback_url', findings(source))
 
     def test_sensitive_categories_are_blocked_without_echoing_values(self):
         cases = [
