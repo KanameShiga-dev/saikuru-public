@@ -152,6 +152,12 @@ class Store:
             finally:
                 self.depth -= 1
 
+    def job_events(self, job_id, event_type):
+        with self.lock:
+            rows = self.db.execute("SELECT body FROM events WHERE json_extract(body,'$.job_id')=? AND json_extract(body,'$.type')=? ORDER BY seq",
+                                   (job_id, event_type))
+            return [json.loads(row[0]) for row in rows]
+
     def events(self, count=100):
         with self.lock:
             rows = self.db.execute('SELECT seq, body FROM events ORDER BY seq DESC LIMIT ?', (count,))

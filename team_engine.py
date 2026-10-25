@@ -165,8 +165,12 @@ REPAIR_RULE = ('\n\n【統括からの指示】指摘を修正したあと、元
                '完了条件に書かれたコマンドは書かれた形のまま実行する。既存のファイルと衝突する場合は、既存ファイルを上書き・削除せず、'
                '必要なファイルを一時フォルダに写してそこで実行し、その旨を記録する。'
                '今回の担当範囲の必須検証を実行できない場合は、理由と必要な判断をquestionsで示してblockedで返す。'
+               '指摘への対応を利用者の判断に委ねる点（ファイル名の変更・既存ファイルの扱い・条件の緩和など）があるときも、doneにせず、選択肢つきのquestionsを付けてblockedで返す。'
                '検証指示は利用者・プロジェクトの禁止事項や担当の道具制限を上書きしない。'
                '利用者が別担当へ明示的に割り当てた検証は、担当と未実施を記録し、その検証だけを理由に今回の工程を停止しない。')
+EVIDENCE_GATE_NOTE = ('\n\n【統括からの指示（証拠の点検）】前回の報告には、采来が記録した検証の実行（テスト・確認コマンド）がありませんでした。'
+                      '元の依頼と計画にある検証を、現行版に対してこの担当の道具で実際に実行し、結果をchecksに記録してください。'
+                      '実行できない場合は、理由と必要な判断をquestionsで示してblockedで返してください。')
 
 CODE_TEST_REUSE_RULE = (
     '\nコードを変更する依頼では、初回の実装時に受入条件と既存動作に対応するテストコードを作成または拡充する。'
@@ -223,6 +227,11 @@ def canonical(path):
 
 class Context:
 
+    # Class-level defaults: a Context built without __init__ (tests, helpers) still has a working run-time limit.
+    waited = 0.0
+
+    wait_began = None
+
     def __init__(self, engine, task):
 
         self.engine = engine
@@ -246,6 +255,12 @@ class Context:
         self.cancel = threading.Event()
 
         self.started = now()
+
+        # Seconds spent waiting for a person's decision. The run-time limit counts working time only (2026-10-18:
+        # a task waiting for approvals was stopped by the 30-minute limit although nothing was running).
+        self.waited = 0.0
+
+        self.wait_began = None
 
         self.token = secrets.token_urlsafe(32)
 
@@ -606,7 +621,11 @@ class Context:
 
             raise Cancelled('利用者またはサービス停止により中断しました。')
 
-        if now() - self.started > self.engine.config['task_timeout_seconds']:
+        began = self.wait_began
+
+        working = now() - self.started - self.waited - ((now() - began) if began else 0)
+
+        if working > self.engine.config['task_timeout_seconds']:
 
             raise ProviderError('実行時間の上限に達しました。変更を確認してから再試行してください。')
 
@@ -725,6 +744,8 @@ class Context:
 
         self.engine.store.update(self.task['id'], status='awaiting_approval')
 
+        self.wait_began = now()
+
         try:
 
             while True:
@@ -748,6 +769,10 @@ class Context:
                 self.cancel.wait(.25)
 
         finally:
+
+            self.waited += now() - self.wait_began
+
+            self.wait_began = None
 
             with self.engine.store.lock:
 
@@ -1153,6 +1178,9 @@ class Engine:
                 task['goal_links'] = list(parent['goal_links'])
                 task['goal_id'] = job['id']
 
+        if isinstance(task['auto_return'], dict) and 'switched_attempt' in task['auto_return']:
+            task['auto_return']['switched_attempt'] = task.get('attempt', 0)   # counted from this task's own runs
+
         return self.store.put('task', task)
 
 
@@ -1244,7 +1272,7 @@ class Engine:
         from team_limited_routing import classify_intake
         intake = classify_intake(title, goal, self.config.get('decision', {}))
         from team_p0_contract import initial as initial_p0_contract
-        p0_development = not document_source and route == 'full'
+        p0_development = not document_source and route == 'full' and self.config.get('p0_contract_enabled', True) is not False
 
         with self.store.atomic():
 
@@ -1720,6 +1748,12 @@ class Engine:
             if approval['kind'] == 'completion' and allow:
 
                 raise ValueError('正式受領は承認操作と分離しました。受領確認欄から明示的に実行してください。')
+
+            if (approval['kind'] == 'completion' and not allow
+                    and job.get('p0_contract_version') == 1
+                    and not str(note or '').strip()):
+
+                raise ValueError('差し戻しの理由を入力してください。')
 
             if approval['attempt'] != task['attempt'] or (approval['kind'] == 'tool' and now() > approval['expires_at']):
 
@@ -2678,6 +2712,14 @@ class Engine:
         self._record_progress_warnings(task, result)
 
         review_job = self.store.get(task['job_id'], 'job')
+        if review_job.get('p0_contract_version') == 1:
+            if not str(result.get('summary') or '').strip():
+                raise ProviderError('担当の報告に実施内容と到達点がありません。', 'format')
+            if task['role'] != 'planner' and result.get('status') == 'done':
+                checks = result.get('checks')
+                if result.get('stage_complete') is not True or not isinstance(checks, list) or not checks \
+                        or any(not isinstance(check, str) or not check.strip() for check in checks):
+                    raise ProviderError('完了報告には工程完了と、確認項目ごとの結果が必要です。', 'format')
         if task['role'] == 'reviewer' and review_job.get('p0_contract_version') == 1:
             reasons = result.get('blocking_reasons') or []
             allowed = (set((review_job.get('goal_contract') or {}).get('deliverables') or []) |
@@ -2860,6 +2902,14 @@ class Engine:
                               'checks': pending})
         return items
 
+    def _repair_handed_off(self, review):
+        """True when the repair this review checks was reported as not fixable by its assignee (status handoff)."""
+        try:
+            fix = self.store.get(review.get('review_cycle') or review.get('after'), 'task')
+        except ValueError:
+            return False
+        return fix['role'] == 'builder' and bool(fix.get('repair')) and (fix.get('result') or {}).get('status') == 'handoff'
+
     def _finish(self, task, result):
 
         with self.store.atomic():
@@ -2964,6 +3014,18 @@ class Engine:
                                       blocking_reasons=list(result.get('blocking_reasons') or []) + [
                                           {'requirement': '現在の完成物が存在する', 'impact': issue}])
 
+            # 2026-10-14 (user decision): a repair that reports done without any run 采来 recorded, in a job whose
+            # verification is command based, goes back to the same assignee once instead of costing a review round.
+            if (task['role'] == 'builder' and current.get('repair') and result.get('status') == 'done'
+                    and not current.get('evidence_gate_retried')):
+                runs = self.store.job_events(job['id'], 'operation_result')
+                if runs and not any(e.get('task_id') == task['id'] for e in runs):
+                    self.store.update(task['id'], status='queued', instruction=current['instruction'] + EVIDENCE_GATE_NOTE,
+                                      result=None, summary='', evidence_gate_retried=True, attempt=current['attempt'] + 1)
+                    self.store.event('evidence_gate_retry', '修正の報告に、采来が記録した検証の実行がありません。'
+                                     'レビューの前に、同じ担当へ検証の実行を1回だけ依頼しました。', task['id'], job['id'])
+                    return
+
             self.store.update(task['id'], result=result, summary=result['summary'], status='succeeded', finished_at=now())
 
             if result.get('status') == 'blocked' and ('Computer Use was not approved' in json.dumps(result, ensure_ascii=False) or 'Computer Useの承認' in result['summary']):
@@ -3034,8 +3096,20 @@ class Engine:
 
             elif task['role'] == 'reviewer':
 
+                unfixable = result['status'] == 'needs_changes' and self._repair_handed_off(task)
+                if unfixable:
+                    # 2026-10-14 (user decision): the repair assignee already said it cannot fix this within its tools
+                    # and permissions; another automatic repair would repeat the same round. Stop for the user.
+                    self.store.update(task['id'], next_action=
+                        '修正担当が「この担当では直せない」と報告したあとも差し戻しになりました。'
+                        '指摘が依頼の範囲か、修正担当の道具で直せるかを確認し、修正範囲を指定して修正するか、未完了項目を残して受け入れてください。')
+                    self.store.update(job['id'], status='blocked')
+                    self.store.event('repair_unfixable', '修正担当が直せないと報告した指摘で再び差し戻しになったため、自動修正を止めました。利用者の判断が必要です。',
+                                     task['id'], job['id'])
+
                 # A concrete document finding also enters the bounded repair loop.
-                if result['status'] == 'needs_changes' and task['repair'] < self.config['max_repairs']:
+                elif result['status'] == 'needs_changes' and task['repair'] < self.config['max_repairs']:
+
 
                     for following in self.store.all('task'):
 
@@ -3331,6 +3405,11 @@ class Engine:
                     agent_outcome, failure_code = 'held', 'g2_authorization'
                     return
                 ctx.check()
+            # Completed local tasks can mention their loopback launch URL in the
+            # handoff context. Preserve the report in storage, but do not send
+            # that address (or a possible URL query) to the next provider.
+            from team_egress_guard import redact_loopback_urls
+            prompt = redact_loopback_urls(prompt)
             result = ADAPTERS[task['profile']['adapter']]().run(ctx, prompt, schema)
             if task['role'] == 'planner':
                 with self.store.atomic():
@@ -3344,8 +3423,8 @@ class Engine:
                     self.store.event('g2_execution_consumed', '承認済みの計画生成1回を消費しました。',
                                      task['id'], task['job_id'], {'revision': current_job['g2_revision'],
                                      'attempt': task['attempt']})
-            # 2026-10-09 (user decision): every provider's report passes the same schema gate, so the items do not
-            # depend on the model. Claude/Codex enforce the schema in their CLI; Copilot is repaired in its adapter.
+            # Every provider's report passes this schema gate, regardless of its CLI's native output controls or
+            # adapter-level JSON recovery. A syntactically readable report is not enough to mark a task complete.
             from team_adapters import schema_errors
             report_errors = schema_errors(result, schema)
             if report_errors:
@@ -3634,6 +3713,13 @@ class Engine:
                         self._failover(task, job, 'usage_limit', task['retry_at'])
                     continue  # waiting for a provider usage limit to reset (or started on Copilot next tick)
 
+                # 2026-10-19 (user request): a provider whose allowance is known to be used up is not tried first;
+                # the task moves to the other provider before it starts, and the user is told (_failover).
+                if (task['profile'].get('adapter') in self.PROVIDER_NAMES
+                        and self._known_exhausted(task['profile'], (getattr(self, 'usage_snapshot', None) or (lambda: {}))())
+                        and self._failover(task, job, 'usage_limit', before_start=True)):
+                    continue
+
                 if task.get('failure_code') == 'copilot_auth_wait' and task['profile'].get('adapter') == 'copilot':
                     if job.get('p0_contract_version') == 1:
                         self.store.update(task['id'], status='blocked', failure_code='copilot_auth',
@@ -3865,7 +3951,11 @@ class Engine:
 
             normal = copy.deepcopy(self.config['profiles'][self.config['roles'][task['role']]])
 
-            policy = {'normal_profile': normal, 'fallback_profile': copy.deepcopy(profile), 'minimum_percent': 10} if auto_return and profile != normal else None
+            # switched_attempt (2026-10-19): the chosen model runs at least once before an automatic return. The usage view
+            # wrongly showed Copilot at ~40% after its monthly quota was used up, and every switch to Claude was undone
+            # within a second, before the task had run on Claude at all.
+            policy = ({'normal_profile': normal, 'fallback_profile': copy.deepcopy(profile), 'minimum_percent': 10,
+                       'switched_attempt': task['attempt']} if auto_return and profile != normal else None)
 
             if include_waiting:
 
@@ -3907,9 +3997,11 @@ class Engine:
 
                 history = item.get('model_history', []) + [{'profile': item['profile'], 'at': now(), 'attempt': item['attempt']}]
 
+                item_policy = dict(copy.deepcopy(policy), switched_attempt=item['attempt']) if policy else None
+
                 self.store.update(item['id'], profile=copy.deepcopy(profile), profile_id='task-override', model_history=history,
 
-                                  auto_return=copy.deepcopy(policy))
+                                  auto_return=item_policy)
 
             self.store.event('model_switched', f"担当モデルを{profile['adapter']} / {profile['model']} / {profile['effort']}へ変更（{len(targets)}件）。", task_id, job['id'])
 
@@ -3924,6 +4016,33 @@ class Engine:
     PROVIDER_NAMES = {'claude': 'Claude', 'copilot': 'GitHub Copilot'}
     FAILOVER_REASONS = {'claude_auth': 'Claude のログインが切れた', 'copilot_auth': 'GitHub Copilot のログインが切れた',
                         'usage_limit': '利用上限に達した'}
+
+    @staticmethod
+    def _known_exhausted(profile, snapshot):
+        """2026-10-19: True only when the measured usage clearly shows this provider's allowance at 0% (Copilot: this
+        month refused with quota_exceeded, or 0% left; Claude: a short or weekly window at 0%). Unknown is not
+        exhausted: the task then starts as before (a refusal consumes nothing)."""
+        value = snapshot.get(profile.get('adapter'), {})
+        if value.get('status') != 'ok' or value.get('stale', True):
+            return False
+        provider = profile.get('adapter')
+        rows = value.get('rows', [])
+        if provider == 'claude':
+            model = profile.get('model', '').casefold()
+            family = next((name for name in ('opus', 'sonnet', 'haiku') if name in model), None)
+            rows = [row for row in rows if row.get('id') == 'claude'
+                    or family and family in row.get('id', '').casefold()]
+        for row in rows:
+            windows = [row.get('monthly')] if profile.get('adapter') == 'copilot' else [row.get('short'), row.get('weekly')]
+            for window in windows:
+                if not isinstance(window, dict):
+                    continue
+                if window.get('resets_at') and window['resets_at'] <= now():
+                    continue  # A previous window's zero is not evidence about the new window.
+                remaining = window.get('remaining_percent')
+                if window.get('exhausted') or type(remaining) in (int, float) and remaining == 0:
+                    return True
+        return False
 
     def _provider_ready(self, profile, snapshot):
         """Can a task start on this profile now? Claude: signed in and not held, usage left when measured.
@@ -3949,7 +4068,7 @@ class Engine:
         return (recovery_ready(snapshot, normal, policy['minimum_percent'])
                 or bool(policy.get('retry_at')) and now() >= policy['retry_at'])
 
-    def _failover(self, task, job, reason, retry_at=None):
+    def _failover(self, task, job, reason, retry_at=None, before_start=False):
         """2026-10-15 (user decision): a queued task that cannot run on Claude or GitHub Copilot (reason 'claude_auth',
         'copilot_auth' or 'usage_limit') continues on the other one, when the project is classed Public or Internal,
         the other provider is enabled for the role and usable now. Returns True when switched. Otherwise the task keeps
@@ -3968,10 +4087,17 @@ class Engine:
         reason_text = self.FAILOVER_REASONS[reason]
         if reason == 'usage_limit':
             reason_text = self.PROVIDER_NAMES[source] + ' の' + reason_text
+        lead = reason_text + 'ため、'
+        if before_start:
+            # 2026-10-19 (user request): known to be used up, so switched before starting (no failed attempt first).
+            reason_text = self.PROVIDER_NAMES[source] + ' の利用枠を使い切っている'
+            lead = reason_text + 'ため、始める前に'
         other = self.PROVIDER_NAMES['copilot' if source == 'claude' else 'claude']
         previous = task.get('auto_return') or {}
         why = None
-        if target is None:
+        if not self.config.get('auto_failover', True):
+            why = 'チーム設定で自動の切り替えがオフになっています'
+        elif target is None:
             why = 'この担当（' + task['role'] + '）は ' + other + ' に対応していないか、' + other + ' が設定で無効です'
         elif data_class not in FAILOVER_DATA_CLASSES:
             why = ('プロジェクトのデータ分類が「' + (data_class or '不明') + '」のため、別のサービスへは自動で送りません'
@@ -3981,6 +4107,8 @@ class Engine:
         elif (previous.get('reason') and previous.get('normal_profile', {}).get('adapter') == target['adapter']
               and not self._failover_ready(previous, snapshot)):
             why = other + ' から切り替えてきたばかりで、' + other + ' はまだ使えません'   # no ping-pong
+        if why and before_start:
+            return False   # not switched: the task starts as before; a refusal is recorded by the usual failure path
         if why:
             told = getattr(self, '_failover_told', set())
             self._failover_told = told
@@ -4002,8 +4130,8 @@ class Engine:
                                                             'attempt': current['attempt'], 'reason': 'failover_' + reason}]
             self.store.update(task['id'], profile=copy.deepcopy(target), profile_id='failover', model_history=history,
                               auto_return=policy, retry_at=None, failure_code=None,
-                              summary=reason_text + 'ため、' + other + '（' + target['model'] + '）で続けます。')
-        message = (reason_text + 'ため、' + task['role'] + ' 担当を ' + other + '（' + target['model']
+                              summary=lead + other + '（' + target['model'] + '）に切り替えて続けます。')
+        message = (lead + task['role'] + ' 担当を ' + other + '（' + target['model']
                    + '）に切り替えて続けます。データ分類：' + data_class + '。'
                    + self.PROVIDER_NAMES[source] + ' が使えるようになったら、まだ始まっていない担当から元に戻します。')
         self.store.event('model_failover', message, task['id'], job['id'])
@@ -4070,6 +4198,10 @@ class Engine:
             elif task['profile'] != policy.get('fallback_profile') or not recovery_ready(snapshot, normal, policy['minimum_percent']):
 
                 continue
+
+            elif 'switched_attempt' in policy and task['attempt'] <= policy['switched_attempt']:
+
+                continue  # a user's switch: not before the chosen model has run once (see switch_model)
 
             with self.store.atomic():
 
@@ -4424,7 +4556,10 @@ class Engine:
             if guard is not None:
                 category, label, action = guard
                 exception = None
-                if action == 'manual':
+                # Deletion and dynamic-execution findings are never waived by outbound exceptions.
+                # Those exceptions are intended for narrowly approved outbound operations, not local data loss
+                # or commands whose effects cannot be determined from their text.
+                if action == 'manual' and category not in ('delete', 'dynamic'):
                     try:
                         from team_dlp import load_policy
                         exception = excepted(data.get('command', ''), category, load_policy())
@@ -4443,7 +4578,9 @@ class Engine:
                 if not exception:
                     return ctx.approve(dict(payload, force_manual=True,
                                             guard={'category': category, 'label': label,
-                                                   'note': '外部への影響がある操作のため、自動承認の設定でも利用者の確認が必要です。'}))
+                                                   'note': {'delete': '削除・上書きできる操作のため、自動承認の設定でも利用者の確認が必要です。',
+                                                            'dynamic': '実行内容をコマンドの文字列から判断できないため、自動承認の設定でも利用者の確認が必要です。'}.get(
+                                                       category, '外部への影響がある操作のため、自動承認の設定でも利用者の確認が必要です。')}))
 
             reason = auto_read_reason(payload, ctx.project)
 

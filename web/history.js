@@ -40,12 +40,11 @@ function renderList(){
   const list=filtered();
   $('status').textContent=list.length+'件の依頼。入口が記録されていない過去の依頼は新規依頼と断定しません。';
   $('jobs').replaceChildren(...list.map(j=>{
-    const tasks=state.tasks.filter(t=>t.job_id===j.id);
     const row=node('div',undefined,'jobrow'),pick=node('input');pick.type='checkbox';pick.checked=picked.has(j.id);pick.setAttribute('aria-label',j.title+'を比較に選ぶ（最大5件）');pick.title='複数選んで待機状況を比べる（最大5件）';
     pick.onchange=()=>{if(pick.checked){if(picked.size>=5){pick.checked=false;status.textContent='複数選択は5件までです。';return;}picked.add(j.id);}else picked.delete(j.id);renderList();showPicked();};
     const b=node('button',undefined,'job');b.type='button';b.setAttribute('aria-current',String(picked.size?picked.has(j.id):j.id===selected));
     const top=node('div',undefined,'chips');top.append(chip(j.status),node('span',origins[j.origin.kind]||'入口未記録','tag'));
-    b.append(top,node('h2',j.title),node('div',`${projectName(j.document_source||j.origin.project||j.project)}・受付 ${md(j.created_at)} ${hm(j.created_at)}・工程 ${tasks.length}件`,'sub'));
+    b.append(top,node('h2',j.title),node('div',`${projectName(j.document_source||j.origin.project||j.project)}・受付 ${md(j.created_at)} ${hm(j.created_at)}・工程 ${j.task_count??0}件`,'sub'));
     b.onclick=()=>{picked.clear();selected=j.id;renderList();detail(j.id,true);};row.append(pick,b);return row;
   }));
   if(!list.length)$('jobs').append(node('p','条件に一致する依頼がありません。','hint'));

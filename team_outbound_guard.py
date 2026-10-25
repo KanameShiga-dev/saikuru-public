@@ -40,12 +40,25 @@ RULES = [
         r'|\bicacls\b[^;|\n]*/(?:grant|deny|setowner|reset)\b|\btakeown\b|\bSet-Acl\b|\brunas\b|-Verb\s+RunAs\b'
         r'|\bsecedit\b|\bgpupdate\b|\b(?:New|Set|Remove|Enable|Disable)-Local(?:User|Group\w*)\b|\bnet\s+(?:user|localgroup)\b'
         r'|\bSet-(?:Date|TimeZone)\b|\bsetx\b[^;|\n]*/m\b|\b(?:Stop-Computer|Restart-Computer|shutdown(?:\.exe)?)\b')),
+    # 2026-10-19: with automatic_operations on, only the categories above and below went to a person; a deletion
+    # (rm -rf, Remove-Item -Recurse, git reset --hard ...) was approved automatically, inside the project or not.
+    # Deleting and overwriting always go to a person. Redirections (>) are not matched: they are too common in ordinary work.
+    ('delete', '削除・破壊的な操作', re.compile(
+        r'(?i)(?<![\w.-])(?:rm|rmdir|rd|del|erase|unlink|shred|truncate)(?![\w.-])|\bRemove-Item\b|\bClear-(?:Content|RecycleBin|Disk)\b|\bFormat-Volume\b'
+        r'|\bgit\s+(?:reset\s+--hard|clean|restore(?!\s+--staged\b)|checkout\s+--|rm|stash\s+(?:drop|clear)|branch\s+(?-i:-D)|update-ref\s+-d|reflog\s+expire|gc\s+--prune)(?![\w-])'
+        r'|\bshutil\.rmtree\b|\brmtree\b|\bos\.(?:remove|unlink|rmdir|removedirs)\b|\.unlink\s*\(|\.rmdir\s*\('
+        r'|\bfs\.(?:rm|rmSync|unlink|unlinkSync|rmdir|rmdirSync)\b|\brmSync\b|\brimraf\b|\bfind\b[^;|\n]*\s-delete\b|\brobocopy\b[^;|\n]*/(?:mir|purge)\b')),
     ('network', '外部との通信', re.compile(
         r'(?i)\b(?:curl|wget|ssh|scp|sftp|ftp|telnet|rsync|ncat|netcat|socat)\b|(?:^|[\s;&|(])nc\s|\bInvoke-(?:WebRequest|RestMethod)\b'
         r'|(?:^|[\s;&|(])(?:iwr|irm)\s|\bStart-BitsTransfer\b|\bbitsadmin\b|\bcertutil\b.*-urlcache|Net\.WebClient|\bHttpClient\b'
         r'|Net\.Sockets|\bTcpClient\b|\burllib\b|\brequests\.(?:get|post|put|patch|delete|request|Session)\b|\bhttpx\b|\baiohttp\b'
         r'|\bhttp\.client\b|\bsocket\.(?:socket|create_connection)\b|\bfetch\s*\(|\bXMLHttpRequest\b|\bwebbrowser\b'
         r'|\bhttps?://(?!(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$))|\bStart-Process\s+["\']?https?://(?!(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$))')),
+    # A command that hides what it runs defeats the text rules, so it goes to a person too.
+    ('dynamic', '内容を判断できない実行（難読化・動的実行）', re.compile(
+        r'(?i)\bpowershell(?:\.exe)?\b[^;|\n]*\s-(?:enc|ec|encodedcommand)\b|\b(?:Invoke-Expression|iex)\b|(?<![\w.])(?:exec|eval|compile)\s*\('
+        r'|__import__|\bbase64\s+(?:-d|--decode)\b|\bFromBase64String\b'
+        r"""|[A-Za-z](?:""|'')[A-Za-z]|(?<!&)&\s*[($'"]""")),
 ]
 
 

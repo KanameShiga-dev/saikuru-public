@@ -26,6 +26,42 @@ class OutboundGuardTests(unittest.TestCase):
                 self.assertEqual(classify(command)[0], category)
                 self.assertEqual(classify(command)[2], 'manual')
 
+    def test_destructive_commands_need_a_person(self):
+        # 2026-10-19: with automatic operations on, deletions passed without a person (rm -rf, Remove-Item, git reset --hard).
+        cases = (
+            'rm -rf build', 'rm -rf /c/AI_Work/other_project', 'Remove-Item -Recurse -Force C:/x', 'del /s /q C:/x',
+            'rmdir /s /q build', 'rd /s /q build', 'erase old.txt', 'cmd /c del x', 'powershell -Command "rm -r x"',
+            'git reset --hard HEAD~5', 'git clean -fdx', 'git checkout -- .', 'git restore src', 'git branch -D old',
+            'git stash drop', 'git rm -r src', 'cd x && rm y', 'ls; rm y', 'echo a | xargs rm',
+            'python -c "import shutil; shutil.rmtree(1)"', 'python -c "import os; os.remove(1)"',
+            'python -c "import os; os.unlink(1)"', 'python -c "import pathlib; pathlib.Path(1).unlink()"',
+            'find . -name x -delete', 'robocopy a b /mir', 'robocopy a b /purge', 'Clear-Content x', 'Clear-RecycleBin', 'truncate -s 0 x',
+            'node -e "require(1).rmSync(2)"')
+        for command in cases:
+            with self.subTest(command=command):
+                self.assertEqual(classify(command)[0], 'delete')
+                self.assertEqual(classify(command)[2], 'manual')
+
+    def test_commands_that_hide_what_they_run_need_a_person(self):
+        # Without this, a deletion could be spelled so that the text rules do not see it.
+        for command in ('powershell -EncodedCommand AAAA', 'powershell -enc AAAA', 'Invoke-Expression $x', 'iex $x',
+                        'python -c "exec(1)"', 'python -c "eval(1)"', 'python -c "__import__(1)"',
+                        'python -c "compile(1, 2, 3)"', 'echo AAAA | base64 -d | sh',
+                        "& ('r'+'m') -r build", 'r""m -rf build'):
+            with self.subTest(command=command):
+                self.assertEqual(classify(command)[0], 'dynamic')
+                self.assertEqual(classify(command)[2], 'manual')
+
+    def test_ordinary_work_is_not_taken_for_a_deletion(self):
+        for command in ('python -m unittest -v', 'python build.py', 'python -m app.server', 'git status --short',
+                        'git diff --stat', 'git log --oneline', 'git branch', 'git branch -d merged',
+                        'git checkout main', 'git restore --staged x', 'ls -la', 'cat README.md', 'cat rm.txt',
+                        'grep -rn remove src', 'grep -n "rm -rf" notes.md', 'python -c "print(1)"',
+                        'python -c "import re; re.compile(1); print(2)"', 'python -c "import ast; ast.literal_eval(1)"',
+                        'pip list', 'Get-ChildItem', 'echo firmware', 'cd /c/Projects/form', 'git mv a b'):
+            with self.subTest(command=command):
+                self.assertIsNone(classify(command))
+
     def test_credential_stores_are_denied(self):
         for command in ('cat ~/.ssh/id_rsa', 'type C:\\Users\\a\\.claude-sairai\\.credentials.json', 'cat .env',
                         'echo $env:AGENT_TEAM_RUN_TOKEN', 'printenv', 'cmdkey /list',
@@ -156,6 +192,59 @@ class EngineGuardTests(unittest.TestCase):
         self.store.db.close()
         self.temp.cleanup()
 
+    def test_deletion_reaches_a_person_through_the_real_automatic_approval_path(self):
+        # 2026-10-19: with automatic_operations on, approve() approves everything that is not force_manual.
+        # This runs the real approve() (only the creation of an approval is replaced) for deletions and for ordinary work.
+        from team_engine import Context
+
+        class Asked(Exception):
+            pass
+
+        def ask(task, kind, payload):
+            raise Asked(payload)
+
+        job = self.engine.create_job('sample', 'local goal', self.temp.name, True)
+        task = self.engine.new_task(job, 'change', 'change file', 'builder')
+        ctx = Context(self.engine, task)
+        self.engine.active[task['id']] = ctx
+        self.engine.new_approval = ask
+        bash = lambda command: self.engine.tool_request(ctx.token, {'task_id': task['id'], 'tool': 'Bash', 'input': {'command': command}})
+        for command, category in (('rm -rf build', 'delete'), ('Remove-Item -Recurse -Force build', 'delete'),
+                                  ('git reset --hard HEAD~3', 'delete'), ('python -c "import shutil; shutil.rmtree(1)"', 'delete'),
+                                  ('powershell -EncodedCommand AAAA', 'dynamic')):
+            with self.subTest(command=command):
+                with self.assertRaises(Asked) as caught:
+                    bash(command)
+                payload = caught.exception.args[0]
+                self.assertTrue(payload['force_manual'])
+                self.assertEqual(payload['guard']['category'], category)
+        for command in ('python build.py', 'python -m unittest -v', 'git status --short'):
+            with self.subTest(command=command):
+                self.assertTrue(bash(command)['allow'])
+
+    def test_delete_and_regular_bash_still_require_approval_when_automatic_operations_is_off(self):
+        from team_engine import Context
+
+        class Asked(Exception):
+            pass
+
+        def ask(task, kind, payload):
+            raise Asked(payload)
+
+        self.engine.config['automatic_operations'] = False
+        job = self.engine.create_job('sample', 'local goal', self.temp.name, True)
+        task = self.engine.new_task(job, 'change', 'change file', 'builder')
+        ctx = Context(self.engine, task)
+        self.engine.active[task['id']] = ctx
+        self.engine.new_approval = ask
+        bash = lambda command: self.engine.tool_request(ctx.token, {
+            'task_id': task['id'], 'tool': 'Bash', 'input': {'command': command}})
+        for command, expected_manual in (('rm -rf build', True), ('python build.py', False)):
+            with self.subTest(command=command):
+                with self.assertRaises(Asked) as caught:
+                    bash(command)
+                self.assertEqual(caught.exception.args[0].get('force_manual', False), expected_manual)
+
     def test_outbound_overrides_automatic_approval(self):
         from pathlib import Path
         from team_engine import Context
@@ -183,3 +272,24 @@ class EngineGuardTests(unittest.TestCase):
         for path in ('SECURITY_POLICY.md', 'TOOL_POLICY.yaml', 'audit/2026-10.jsonl'):
             result = self.engine.tool_request(ctx.token, {'task_id': task['id'], 'tool': 'Write', 'input': {'file_path': path}})
             self.assertFalse(result['allow'], path)
+
+    def test_delete_and_dynamic_findings_cannot_be_waived_by_outbound_exceptions(self):
+        from unittest.mock import patch
+        from team_engine import Context
+        job = self.engine.create_job('sample', 'local goal', self.temp.name, True)
+        task = self.engine.new_task(job, 'change', 'change file', 'builder')
+        ctx = Context(self.engine, task)
+        self.engine.active[task['id']] = ctx
+        seen = []
+        ctx.approve = lambda payload: seen.append(payload) or {'allow': False, 'note': 'test'}
+        policy = {'outbound_exceptions': [
+            {'category': 'delete', 'contains': 'rm -rf build', 'reason': 'test exception'},
+            {'category': 'dynamic', 'contains': 'python -c "exec(1)"', 'reason': 'test exception'},
+        ]}
+        bash = lambda command: self.engine.tool_request(ctx.token, {
+            'task_id': task['id'], 'tool': 'Bash', 'input': {'command': command}})
+        with patch('team_dlp.load_policy', return_value=policy):
+            bash('rm -rf build')
+            bash('python -c "exec(1)"')
+        self.assertEqual([item['guard']['category'] for item in seen], ['delete', 'dynamic'])
+        self.assertTrue(all(item['force_manual'] for item in seen))

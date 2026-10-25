@@ -53,6 +53,8 @@ When no task is running or stopped, `current` is the next queued task and `remai
 
 Builder reports for P0 jobs include `artifacts`, a list of project-relative files. The server stores paths and SHA-256 hashes in `job.p0_artifacts`, rejecting paths outside the project and secret or internal-data paths. The final review and formal receipt recheck those files. The completion approval retains pending launch/operation and approved acceptance checks until the user records evidence for each through the existing completion-evidence API. Evidence submission creates a new approval; the user must acknowledge its current review and explicitly accept it.
 
+Rejecting a P0 completion approval requires a nonblank reason. The engine then creates a builder rework task followed by normal and security reviews, and returns the job to `running`. Without a reason, the API refuses the decision and leaves the approval pending. Legacy approval behavior is unchanged.
+
 Warnings and out-of-scope improvements reuse `job.warning_issues` and do not block execution. A blocking item must identify a user requirement or acceptance criterion, a concrete effect on the current result, or an immediate safety/authorization issue. The existing safety and approval gates always take precedence.
 
 ## Fixture and interface compatibility

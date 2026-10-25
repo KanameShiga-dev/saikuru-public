@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from consultation_read_tools import BLOCKED, safe_path, screen_model_read
 from team_attachments import provider_input
 from team_egress_guard import (BLOCK_MARKER, batch_block_reason, findings,
-                               require_safe_egress, sanitize_tool_output)
+                               redact_loopback_urls, require_safe_egress, sanitize_tool_output)
 from egress_batch_hook import decision as batch_decision
 
 
@@ -26,6 +26,16 @@ class EgressGuardTests(unittest.TestCase):
     def test_other_absolute_project_paths_are_not_rejected(self):
         self.assertEqual(findings(r'Inspect C:\Projects\demo\src\main.py'), [])
         require_safe_egress(r'Inspect C:\Projects\demo\src\main.py')
+
+    def test_local_launch_url_is_redacted_before_model_input(self):
+        source = 'Launch http://127.0.0.1:8000/?token=fictional and https://localhost:8877/api.'
+        clean = redact_loopback_urls(source)
+        self.assertNotIn('127.0.0.1', clean)
+        self.assertNotIn('localhost', clean)
+        self.assertNotIn('fictional', clean)
+        self.assertEqual(findings(clean), [])
+        self.assertIn('[LOCAL_LOOPBACK_URL]', clean)
+        self.assertIn('loopback_url', findings(source))
 
     def test_sensitive_categories_are_blocked_without_echoing_values(self):
         cases = [
@@ -51,6 +61,22 @@ class EgressGuardTests(unittest.TestCase):
         self.assertNotIn('fictional', clean['stdout'])
         self.assertNotIn('C:\\Users\\', clean['stdout'])
         self.assertEqual(findings(clean), [])
+
+    def test_loopback_url_in_tool_output_is_not_withheld_and_batch_continues(self):
+        value = {'file': {'content': 'Open http://127.0.0.1:8000/ or https://localhost:8877/api after starting.'}}
+        clean, labels, changed = sanitize_tool_output(value)
+        self.assertFalse(changed)
+        self.assertNotIn('loopback_url', labels)
+        self.assertEqual(clean, value)
+        self.assertEqual(batch_block_reason({'tool_calls': [{'tool_name': 'Read', 'tool_response': clean}]}), '')
+
+    def test_loopback_url_does_not_hide_a_real_secret_in_tool_output(self):
+        value = {'file': {'content': 'http://127.0.0.1:8000/ api_key=synthetic_secret_value_123'}}
+        clean, labels, _changed = sanitize_tool_output(value)
+        self.assertIn('secret', labels)
+        self.assertNotIn('synthetic_secret_value_123', str(clean))
+        self.assertIn('protected_output_withheld',
+                      batch_block_reason({'tool_calls': [{'tool_name': 'Read', 'tool_response': clean}]}))
 
     def test_unredactable_tool_output_is_withheld_and_batch_stops(self):
         value = {'stdout': 'api_key=synthetic_secret_value_123', 'stderr': '', 'interrupted': False}

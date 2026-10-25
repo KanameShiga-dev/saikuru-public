@@ -13,7 +13,13 @@ HOME_PATH = re.compile(r'(?i)(?:^|(?<=[\s"\'=:]))(?:~|/home|/Users)[\\/]+[^\\/\s
 USER_PROFILE_ENV = re.compile(r'(?i)%USERPROFILE%')
 UNC_PATH = re.compile(r'(?<!\\)\\\\[^\\/\s]+\\[^\\/\s]+')
 LOOPBACK_URL = re.compile(r'(?i)\bhttps?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/\?#]|$)')
+LOOPBACK_REFERENCE = re.compile(r'(?i)\bhttps?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s"\'<>]*')
 BLOCK_MARKER = '[EGRESS_BLOCKED: protected output withheld]'
+
+
+def redact_loopback_urls(text):
+    """Keep local launch evidence in storage while withholding its URL from models."""
+    return LOOPBACK_REFERENCE.sub('[LOCAL_LOOPBACK_URL]', text)
 
 
 def _strings(value):
@@ -67,9 +73,16 @@ def _redact_safe_user_paths(text):
     return USER_PROFILE_ENV.sub('[USER_PROFILE]', text)
 
 
+def tool_output_findings(value):
+    """findings() for returned tool output. A loopback URL (127.0.0.1, localhost) in a README or source file is
+    ordinary project text, not a leak, so it must not withhold the output or stop the session. Secrets, personal
+    data and profile paths are still withheld. Model input keeps the stricter findings()."""
+    return [label for label in findings(value) if label != 'loopback_url']
+
+
 def sanitize_tool_output(value):
     """Redact profile-directory labels; withhold other detected output wholesale."""
-    original_findings = findings(value)
+    original_findings = tool_output_findings(value)
 
     def redact(item):
         if isinstance(item, str):
@@ -83,7 +96,7 @@ def sanitize_tool_output(value):
         return item
 
     redacted = redact(value)
-    remaining = findings(redacted)
+    remaining = tool_output_findings(redacted)
     if remaining:
         labels = list(dict.fromkeys(original_findings + remaining))
         return _withhold(redacted), labels, True
@@ -116,6 +129,6 @@ def batch_block_reason(payload):
         response = call.get('tool_response')
         if any(BLOCK_MARKER in text for text in _strings(response)):
             labels.append('protected_output_withheld')
-        labels.extend(findings(response))
+        labels.extend(tool_output_findings(response))
     labels = list(dict.fromkeys(labels))
     return ', '.join(labels) if labels else ''

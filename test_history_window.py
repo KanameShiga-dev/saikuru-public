@@ -40,7 +40,8 @@ def make_app(days=None):
     app = SimpleNamespace(config=config, store=FakeStore(jobs, tasks, approvals), ENDED_JOB_STATUSES=App.ENDED_JOB_STATUSES, slim_task=App.slim_task, SLIM_FIELDS=App.SLIM_FIELDS,
                           health={}, engine=SimpleNamespace(paused=False), usage=SimpleNamespace(snapshot=lambda: {}),
                           cli_update=SimpleNamespace(snapshot=lambda: {}), claude_update=SimpleNamespace(snapshot=lambda: {}),
-                          copilot_update=SimpleNamespace(snapshot=lambda: {}), notifications=SimpleNamespace(snapshot=lambda: {}))
+                          copilot_update=SimpleNamespace(snapshot=lambda: {}), notifications=SimpleNamespace(snapshot=lambda: {}),
+                          MIN_RECENT_JOBS=0)
     app.history_days = lambda: App.history_days(app)
     return app
 
@@ -53,6 +54,12 @@ class HistoryWindowTest(unittest.TestCase):
         self.assertEqual([t['id'] for t in state['tasks']], ['t-new', 't-running'])
         self.assertEqual([a['id'] for a in state['approvals']], ['a-new', 'a-running'])
         self.assertEqual(state['history'], {'days': 7, 'hidden_jobs': 2})
+
+    def test_latest_finished_jobs_stay_even_when_older_than_the_window(self):
+        app = make_app()
+        app.MIN_RECENT_JOBS = 2
+        state = App.state(app)
+        self.assertEqual([j['id'] for j in state['jobs']], ['old-cancel', 'new', 'running'])
 
     def test_setting_widens_the_window(self):
         state = App.state(make_app(days=14))

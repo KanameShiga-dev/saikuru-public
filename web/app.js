@@ -6,12 +6,42 @@ const jobSkills = new SkillPicker(document.getElementById('job-skills'));
 const roles = {planner:'計画',researcher:'調査',builder:'実装',reviewer:'レビュー'};
 const statuses = {queued:'待機',running:'実行中',awaiting_approval:'承認待ち',succeeded:'担当作業終了',handed_off:'未完了項目を残して引き継ぎ済み',failed:'失敗',cancelled:'中止',interrupted:'中断',blocked:'判断が必要'};
 const jobStatuses = {...statuses,planning:'計画中',awaiting_acceptance:'成果の確認待ち',accepted:'利用者が確認済み',accepted_with_pending_checks:'成果を受領・未完了項目あり'};
-function jobStatusLabel(job){return job?.g2_gate_version===1&&job.g2_status==='pending'?'AI計画生成の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
+// P0 L2：復旧と保守の状態は、サーバーの p0_interruption と承認の category / intended_role だけで分ける。
+// 画面側で障害の種類を推測しない。未知の値は「保守対応待ち」とし、成功や判断待ちとは扱わない。
+const P0_PHASES={
+  retrying:{key:'retrying',label:'復旧中',detail:'采来が自動で復旧を試みています。完了すると、止まった作業から再開します。あなたの操作は不要です。'},
+  maintenance_required:{key:'maintenance_required',label:'保守対応待ち',detail:'作業の成果は保存されています。保守担当が対応します。あなたの操作は不要です。'},
+  safety_blocked:{key:'safety_blocked',label:'安全上の確認待ち',detail:'安全のため作業を止めました。作業の成果は保存されています。権限のある担当者の確認が必要です。'}
+};
+function p0Phase(job){
+  if(job?.p0_contract_version!==1)return null;
+  const status=job.p0_interruption?.recovery_status;
+  if(!status)return null;
+  if(status==='retrying')return P0_PHASES.retrying;
+  if(job.status!=='blocked')return null;
+  return P0_PHASES[status]||P0_PHASES.maintenance_required;
+}
+// 利用者に判断を求める承認か。category の無い旧形式の承認は従来どおり扱う。保守・技術・改善の項目と、保守担当宛ての項目は含めない。
+function userDecision(a){
+  if(!a.category)return true;
+  if(a.intended_role==='maintainer'||a.intended_role==='none')return false;
+  return ['BUSINESS','ACCEPTANCE'].includes(a.category)||(a.category==='RISK'&&a.intended_role==='authorized_person');
+}
+function jobStatusLabel(job){const phase=p0Phase(job);if(phase)return phase.label;
+  // 新形式の依頼が停止していて、利用者に判断を求める項目が無いとき、原因を推測せず「判断が必要」とは表示しない。
+  if(job?.p0_contract_version===1&&job.status==='blocked'&&!(state?.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a)))return '停止中（次の動作をご確認ください）';
+  return job?.g2_gate_version===1&&job.g2_status==='pending'?'AIによる計画作成の開始の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
 function el(tag, text, cls) { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; }
 function notice(text) { $('notice').textContent=text; }
+// P0 L1：標準画面（既定）と技術詳細の切り替え。選択はこのブラウザーにだけ保存し、読めなくても標準で動く。
+(()=>{const toggle=$('view-toggle');if(!toggle)return;let technical=false;
+  try{technical=localStorage.getItem('saikuru-view')==='technical';}catch(e){}
+  const apply=()=>{document.body.dataset.view=technical?'technical':'standard';toggle.setAttribute('aria-pressed',String(technical));toggle.textContent=technical?'技術詳細を隠す':'技術詳細を表示';};
+  toggle.addEventListener('click',()=>{technical=!technical;try{localStorage.setItem('saikuru-view',technical?'technical':'standard');}catch(e){}apply();});apply();})();
 function waitingReason(task){
  if(task.status!=='queued')return '';
  const job=state.jobs.find(j=>j.id===task.job_id),prior=state.tasks.find(t=>t.id===task.after);
+ const phase=p0Phase(job);if(phase)return phase.detail;
  if(job?.status==='blocked'){
   if(prior?.result?.status==='needs_changes')return '直前のレビューに未解決の指摘があります。自動修正上限で依頼が停止中のため、修正後の再レビューを待っています。';
   return '依頼全体が停止中です。停止した担当の理由を確認してください。';
@@ -54,7 +84,7 @@ function reviewResolutionHint(review,job){
  box.append(el('p','読み取り不可・未測定の指摘は、取得できない理由と後続の確認方法を明記します。未確認を確認済みに置き換えないでください。'));
  return box;
 }
-function date(t) { return new Date(t*1000).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+function date(t) { if(!(t>0))return '日時不明'; return new Date(t*1000).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 let sessionRecovery = null;
 async function recoverSession() {
   if(!sessionRecovery)sessionRecovery=(async()=>{
@@ -82,6 +112,9 @@ async function apiCall(path, data, retried=false) {
 async function action(fn) { if(busy)return; busy=true; try{await fn();await refresh();}catch(e){notice(e.message);}finally{busy=false;} }
 function button(text, fn, cls) { const b=el('button',text,cls);b.type='button';b.addEventListener('click',()=>action(fn));return b; }
 function pending(id) { return state.approvals.filter(a=>a.task_id===id&&a.status==='pending'); }
+function pendingUser(id){return pending(id).filter(userDecision);}
+// 承認待ちがあるが、利用者に判断を求めるものではない（保守・技術・改善）。利用者の判断欄には出さない。
+function maintenanceHeld(task){return pending(task.id).length>0&&pendingUser(task.id).length===0;}
 function endedJob(task){return ['cancelled','accepted','accepted_with_pending_checks'].includes(state.jobs.find(j=>j.id===task.job_id)?.status);}
 function stopReason(task){
   const summary=task.summary||'',claude=task.profile?.adapter==='claude'||/^Claude Code:/i.test(summary);
@@ -113,7 +146,7 @@ function stopCause(task,job){
   if(task.status==='interrupted')return '原因：担当の実行が中断されました。';
   return '原因：依頼が停止しています（'+jobStatusLabel(job)+'）。';
 }
-function group(task) { if(endedJob(task))return 3; if(isStalledReview(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
+function group(task) { if(endedJob(task))return 3; const phase=p0Phase(state.jobs.find(j=>j.id===task.job_id));if(phase&&!pendingUser(task.id).length)return phase.key==='retrying'?1:0; if(maintenanceHeld(task))return 0; if(isStalledReview(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
 const completedFolds=new Map();
 function completedTime(task){
   const job=state.jobs.find(j=>j.id===task.job_id);
@@ -212,6 +245,7 @@ function renderDecisionBanner(items){
     if(item.detail)what.append(el('small',item.detail));
     if(item.completion)what.append(el('small','工程終了は実機検証済みの保証ではありません。成果物と検証結果を確認してください。'));
     const open=el('button','内容を確認','primary');open.type='button';open.onclick=()=>openNotifiedTask(item.task.id);
+    open.setAttribute('aria-label','内容を確認：'+(job?.title?job.title+'、':'')+item.task.title);open.dataset.focusKey='banner:'+item.task.id;
     li.append(what,open);return li;
   }));
 }
@@ -229,11 +263,210 @@ function renderUsageChips(){
   }));
 }
 function openModelPanel(){const panel=document.querySelector('.information-panel');if(!panel)return;panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});panel.querySelector('summary')?.focus();}
+// P0 L3：依頼の進み具合。表示するのは p0_progress / goal_contract / deliverable_access の項目だけで、完成や権限は画面で判断しない。
+// 起動・操作の確認は、サーバーが確認済みを示す値を契約で定めるまで、常に「未検証」と表示する。
+const COMPLETION_LABELS={in_progress:'作業中（完成ではありません）',awaiting_user_acceptance:'あなたの確認待ち（受領前です）',accepted:'受領済み'};
+function progressList(title,items,mark,cls){
+  const box=el('div',undefined,'progress-group'+(cls?' '+cls:''));box.append(el('h4',`${title}（${items.length}件）`));
+  if(!items.length){box.append(el('p','なし','hint'));return box;}
+  const list=el('ul');for(const item of items)list.append(el('li',`${mark} ${item}`));box.append(list);return box;
+}
+// 操作の承認（kind==='tool'）を、利用者が判断できる形で出す。説明はコマンドの文字列から機械的に読み取った事実だけ。
+// AIによる説明ではなく、安全の保証でもない。読み取れないものは「読み取れません」と書き、コマンドの全文を折りたたみに残す。
+const GENERIC_APPROVAL_SUMMARY='AI利用または操作の範囲を確認してください。';
+const BACKSLASH=String.fromCharCode(92);
+function normalizePath(path){return String(path||'').split(BACKSLASH).join('/').replace(/\/+$/,'').toLowerCase();}
+function insideApprovedRoots(path){
+  const target=normalizePath(path);
+  return !!target&&(state.config?.approved_roots||[]).map(normalizePath).some(root=>root&&(target===root||target.startsWith(root+'/')));
+}
+function commandUrls(text){return [...String(text).matchAll(/https?:\/\/[^\s"'<>)\]]+/gi)].map(m=>m[0]);}
+function urlHost(url){return (url.match(/^https?:\/\/([^\/?#:]+|\[[^\]]+\])/i)||[])[1]||'';}
+function isLoopbackHost(host){return ['127.0.0.1','localhost','[::1]'].includes(String(host).toLowerCase());}
+function describeCommand(command,background){
+  // 先頭の「作業フォルダへ移動」は、何をするかの判定から外す（場所は別の項目で出す）。
+  const text=String(command||'').replace(/^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*/i,'');
+  let match=text.match(/^\s*python[0-9.]*\s+(?:-[A-Za-z]+\s+)*-m\s+([A-Za-z0-9_.]+)/i);
+  if(match){
+    if(match[1]==='unittest')return 'テストを実行します（python -m unittest）。';
+    if(match[1]==='pip')return 'Pythonのパッケージを操作します（python -m pip）。外部から取得する場合があります。';
+    return `プログラム「${match[1]}」を起動します（python -m ${match[1]}）。`+(background?'起動したまま、次の作業に進みます。':'終わるまで待ちます。');
+  }
+  if(/(urllib|requests\.|httpx|aiohttp|http\.client|^\s*curl\b|Invoke-WebRequest|Invoke-RestMethod)/i.test(text)){
+    const hosts=[...new Set(commandUrls(text).map(urlHost))];
+    if(hosts.length&&hosts.every(isLoopbackHost))return `コマンド文字列に自分のPC宛てのURL（${hosts.join('、')}）が記載されています。実際の接続先や処理の影響は、この表示だけでは確認できません。`;
+    if(hosts.length)return `コマンド文字列に外部URL（${hosts.join('、')}）が記載されています。実際の通信内容は、この表示だけでは確認できません。`;
+    return 'コマンド文字列に通信関連の記載があります。接続先や実際の処理は、この表示だけでは確認できません。';
+  }
+  match=text.match(/^\s*git\s+(status|diff|log|show|branch)\b/i);
+  if(match)return `Gitの状態を確認します（git ${match[1]}）。`;
+  match=text.match(/^\s*(?:python[0-9.]*|py|node)\s+(?:-[A-Za-z]+\s+)*("[^"]+"|'[^']+'|[^\s-][^\s]*)/i);
+  if(match)return `スクリプト ${match[1]} を実行します。`;
+  return null;
+}
+const RISKY_WORDS=/(?:^|[\s;&|(])(?:rm|rmdir|del|erase|rd|mv|move|Remove-Item|Move-Item|Set-Content|Out-File|truncate)(?=[\s;&|)]|$)|shutil\.rmtree|os\.remove|os\.unlink|\bgit\s+(?:reset|clean|push|checkout\s+--)/i;
+function toolApprovalView(a){
+  const payload=a.payload||{},details=payload.details||{},command=details.command,wrap=el('div',undefined,'tool-approval');
+  const rows=[];
+  const bash=payload.operation==='Bash'&&typeof command==='string';
+  const said=bash?describeCommand(command,details.run_in_background===true):null;
+  rows.push(['何をするか',said||(bash?'内容を読み取れません。下の「技術詳細」でコマンドの全文を確認してください。':`「${payload.operation||'不明な操作'}」の実行を求めています。`)]);
+  const target=details.file_path||details.path||details.notebook_path;
+  if(target)rows.push(['対象のファイル',String(target)+(insideApprovedRoots(target)?'（作業範囲の中）':'（作業範囲の外：要確認）')]);
+  if(payload.cwd)rows.push(['実行する場所',String(payload.cwd)+(insideApprovedRoots(payload.cwd)?'（作業範囲の中）':'（作業範囲の外：要確認）')]);
+  if(bash){
+    const hosts=[...new Set(commandUrls(command).map(urlHost))];
+    rows.push(['文字列に記載された通信先',hosts.length?(hosts.every(isLoopbackHost)?'自分のPC内の宛先が記載されています（実際の通信先は実行時の挙動で異なる場合があります）':'外部宛先が記載されています：'+hosts.filter(h=>!isLoopbackHost(h)).join('、')):
+      payload.guard?.category==='network'?'通信を伴う可能性があります（通信先はコマンドの文字列から読み取れません）':'コマンドの文字列に通信先の記載はありません（実行時通信の有無は別途確認が必要です）']);
+    const risky=command.match(RISKY_WORDS);
+    rows.push(['削除・上書き',risky?`削除・上書きを示す語が含まれています：${risky[0].trim()}（内容を確認してください）`:'削除・上書きを示す語は、コマンドの文字列に見つかりません']);
+  }
+  rows.push(['許可すると','この操作が1回だけ実行されます。次に同じ操作が必要になれば、もう一度確認します。']);
+  rows.push(['拒否すると','この操作は実行されません。担当は別の方法を試すか、停止する場合があります。']);
+  const list=el('dl',undefined,'tool-facts');
+  for(const [label,value] of rows)list.append(el('dt',label),el('dd',value));
+  wrap.append(list);
+  wrap.append(el('p','この説明は、コマンドの文字列から機械的に読み取ったものです。AIによる説明でも、安全の保証でもありません。','hint'));
+  const raw=el('details',undefined,'tool-raw');raw.append(el('summary','技術詳細：コマンドの全文と元のデータ'));
+  if(bash)raw.append(el('pre',command,'text-block'));
+  raw.append(el('pre',JSON.stringify(payload,null,2),'text-block'));
+  wrap.append(raw);
+  return wrap;
+}
+function openCompletion(job){
+  const approval=state.approvals.find(a=>a.job_id===job.id&&a.kind==='completion'&&a.status==='pending'&&userDecision(a));
+  if(!approval){notice('確認の準備がまだできていません。作業の工程が終わると、ここから確認できます。');return;}
+  openTask(approval.task_id);
+}
+function openCancel(job){
+  const tasks=state.tasks.filter(t=>t.job_id===job.id).sort((a,b)=>(b.updated_at||0)-(a.updated_at||0));
+  if(!tasks.length){notice('中止できる作業が見つかりません。');return;}
+  openTask(tasks[0].id);
+  setTimeout(()=>{const target=$('detail-body').querySelector('#cancel-job');if(target)revealSection(target);},300);
+}
+const PROGRESS_ACTIONS={
+  review_completion:['成果を確認する',openCompletion],
+  record_completion_evidence:['確認結果を記録する',openCompletion],
+  cancel_job:['この依頼を中止する…',openCancel]
+};
+// P0 L3：登録済みの成果物（テキスト）を、読み取り専用で表示する。内容は信頼できない入力として textContent だけで表示し、実行・描画しない。
+// 起動・操作の確認は引き続き「未検証」。表示した内容は、開いた時点のもの（再描画をまたいで保持し、閉じて開き直すと最新になる）。
+const openedArtifacts=new Map();
+function deliverableRow(job,item){
+  const row=el('div',undefined,'deliverable-row'),key=job.id+'|'+item.path;
+  const line=el('p');line.append(el('code',item.path||'（場所不明）'),document.createTextNode('　'),el('span','起動・操作は未検証','badge unverified'));
+  if(item.launch_status&&item.launch_status!=='unverified')line.append(el('small',`（サーバーの値：${item.launch_status}）`,'tech-only'));
+  row.append(line);
+  if(!item.path)return row;
+  const shown=openedArtifacts.get(key);
+  const label=shown?(shown.error?'再読み込み':'内容を閉じる'):'内容を読む';
+  const readButton=button(label,async()=>{
+    if(shown&&!shown.error){openedArtifacts.delete(key);return;}
+    try{
+      const result=await api('/api/job/p0-artifact?job_id='+encodeURIComponent(job.id)+'&path='+encodeURIComponent(item.path));
+      openedArtifacts.set(key,{content:String(result.content??''),truncated:result.truncated===true});
+    }catch(error){openedArtifacts.set(key,{error:'内容を読み込めませんでした：'+error.message});}
+  },'secondary');
+  readButton.setAttribute('aria-label',`${label}（${job.title}／${item.path}）`);readButton.dataset.focusKey='artifact:'+key;row.append(readButton);
+  if(shown?.error)row.append(el('p',shown.error,'form-error'));
+  else if(shown){
+    const text=el('pre',shown.content,'artifact-text');text.tabIndex=0;text.setAttribute('aria-label',`${item.path} の内容（読み取り専用の表示）`);
+    row.append(text,el('p','表示した時点の内容です。更新された場合は、閉じて開き直してください。'+(shown.truncated?'内容が長いため、一部のみ表示しています。':''),'hint'));
+  }
+  return row;
+}
+// 依頼の一覧は1件1行（名前・状態・進捗）。詳細は開いたときだけ出す。開閉は再描画をまたいで保持する。
+const openJobRows=new Set();
+function jobCounts(job){
+  const progress=job.p0_progress||{};
+  if(Array.isArray(progress.completed)||Array.isArray(progress.remaining)){
+    const done=(progress.completed||[]).length,total=done+(progress.current?1:0)+(progress.remaining||[]).length;
+    if(total>0)return {done,total};
+  }
+  const tasks=(state.tasks||[]).filter(t=>t.job_id===job.id&&t.status!=='cancelled');
+  return tasks.length?{done:tasks.filter(t=>t.status==='succeeded').length,total:tasks.length}:null;
+}
+function needsUserDecision(job){return (state.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a));}
+function deliverableGroup(job,access){
+  const group=el('details',undefined,'job-deliverables');
+  group.append(el('summary',`成果物（${access.length}件）`));
+  group.open=openJobRows.has(job.id+'|deliverables');
+  group.addEventListener('toggle',()=>{const key=job.id+'|deliverables';if(group.open)openJobRows.add(key);else openJobRows.delete(key);});
+  if(!access.length){group.append(el('p','登録された成果物はまだありません。','hint'));return group;}
+  group.append(el('p','起動・操作の確認は、まだどれも行われていません。内容を読めても、動作確認の代わりにはなりません。起動用のURLも未提供です。','hint'));
+  for(const item of access)group.append(deliverableRow(job,item));
+  return group;
+}
+function progressCard(job){
+  const progress=job.p0_progress||{},goal=job.goal_contract||{},counts=jobCounts(job);
+  const row=el('details',undefined,'job-row');row.dataset.jobId=job.id;
+  // 色は状態ごとに分ける。色だけに頼らず、状態の文字も必ず出す。
+  row.dataset.state=needsUserDecision(job)?'decision':p0Phase(job)?.key||job.status||'unknown';
+  const head=el('summary',undefined,'job-row-head');head.dataset.focusKey='jobrow:'+job.id;
+  const decision=needsUserDecision(job);
+  head.append(el('h3',job.title,'job-row-title'),el('span',decision?'あなたの判断が必要':jobStatusLabel(job),'badge'+(decision?' approval':'')));
+  if(counts){
+    const meter=el('span',undefined,'job-row-progress');
+    // 従来形式の依頼は、作業の数だけから数える。全作業が終わっていても、依頼が止まっていれば完了ではない
+    // （レビューの指摘が残る、判断待ちなど）。「全部完了」に見える割合は出さず、事実の文だけにする。
+    const allWorksDone=job.p0_contract_version!==1&&counts.done===counts.total;
+    if(allWorksDone){
+      meter.append(el('span',`作業${counts.total}件が終了（依頼は未完了）`,'job-row-count'));
+    }else{
+      meter.append(el('span',`${counts.total}工程中 ${counts.done}件完了`,'job-row-count'));
+      const bar=el('progress');bar.max=counts.total;bar.value=counts.done;bar.setAttribute('aria-label',`${job.title}：${counts.total}工程中${counts.done}件完了`);meter.append(bar);
+    }
+    head.append(meter);
+  }
+  row.append(head);
+  const body=el('div',undefined,'job-row-body');
+  body.append(el('p',`作るもの：${goal.primary_goal||job.goal||'未設定'}`,'summary'));
+  if(job.p0_contract_version!==1){
+    // 従来形式の依頼：完成の契約や受入条件は持たない。担当の作業の状態だけを、事実として並べる。
+    const works=(state.tasks||[]).filter(t=>t.job_id===job.id&&t.status!=='cancelled');
+    const finished=works.filter(t=>t.status==='succeeded').map(t=>t.title);
+    const handedOff=works.filter(t=>t.status==='handed_off').map(t=>`${t.title}（${statuses[t.status]||t.status}）`);
+    const rest=works.filter(t=>!['succeeded','handed_off'].includes(t.status)).map(t=>`${t.title}（${statuses[t.status]||t.status}）`);
+    const lists=el('div',undefined,'progress-lists');
+    lists.append(progressList('完了した作業',finished,'✓','done'),progressList('残りの作業',rest,'○','todo'),progressList('未完了で引き継いだ作業',handedOff,'↗','todo'));
+    body.append(lists,el('p','従来形式の依頼です。完成の判定や成果物の確認は、各作業の画面で行います。','hint'));
+    row.append(body);
+    row.open=openJobRows.has(job.id);
+    row.addEventListener('toggle',()=>{if(row.open)openJobRows.add(job.id);else openJobRows.delete(job.id);});
+    return row;
+  }
+  if(goal.deliverables?.length)body.append(el('p',`成果物（予定）：${goal.deliverables.join('、')}`,'hint'));
+  body.append(el('p',`現在の工程：${progress.current||'確認中'}`));
+  if(progress.next_action)body.append(el('p',`次の動作：${progress.next_action}`));
+  const lists=el('div',undefined,'progress-lists');
+  lists.append(progressList('完成済み',progress.completed||[],'✓','done'),progressList('残り',progress.remaining||[],'○','todo'));
+  body.append(lists);
+  const unmet=progress.unmet_acceptance_criteria||[];
+  body.append(progressList('まだ確認できていない受入条件',unmet,'○',unmet.length?'unmet':''));
+  const status=COMPLETION_LABELS[progress.completion_status]||'状態を確認中（完成とは扱いません）';
+  body.append(el('p',`完成の状況：${status}`,'completion-status'));
+  body.append(deliverableGroup(job,Array.isArray(progress.deliverable_access)?progress.deliverable_access:[]));
+  const actions=el('div',undefined,'actions');
+  for(const name of Array.isArray(progress.available_actions)?progress.available_actions:[]){
+    const entry=PROGRESS_ACTIONS[name];if(entry){const b=button(entry[0],()=>entry[1](job),name==='cancel_job'?'danger':'primary');b.setAttribute('aria-label',`${entry[0]}（${job.title}）`);b.dataset.focusKey='progress:'+job.id+':'+name;actions.append(b);}
+  }
+  if(actions.children.length)body.append(actions);
+  row.append(body);
+  row.open=openJobRows.has(job.id);
+  row.addEventListener('toggle',()=>{if(row.open)openJobRows.add(job.id);else openJobRows.delete(job.id);});
+  return row;
+}
+function renderJobProgress(){
+  const section=$('job-progress'),list=$('job-progress-list');if(!section||!list)return;
+  const jobs=state.jobs.filter(j=>!['cancelled','accepted','accepted_with_pending_checks'].includes(j.status));
+  section.hidden=!jobs.length;list.replaceChildren(...jobs.map(progressCard));
+}
 function render() {
   $('connection').textContent=state.paused?'新規着手を一時停止中':'● ローカル接続中';
   $('connection').classList.toggle('paused',!!state.paused);
   $('pause').textContent=state.paused?'新規着手を再開':'新規着手を一時停止';
   renderCliUpdate();
+  renderJobProgress();
   const nextProviderVersion=JSON.stringify([state.providers,state.usage,state.config.roles,state.config.profiles,state.config.provider_settings,state.cli_update,state.claude_update,state.copilot_update]);
   if(nextProviderVersion!==providerVersion){
   providerVersion=nextProviderVersion;
@@ -289,8 +522,8 @@ function render() {
       }
     }
     for(const task of tasks){
-      const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card role-'+task.role+(index===2?' attention':''));
-      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatusLabel(job)):pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
+      const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card role-'+task.role+(index===2?' attention':''));card.dataset.focusKey='card:'+task.id;
+      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatusLabel(job)):p0Phase(job)&&!pendingUser(task.id).length?p0Phase(job).label:maintenanceHeld(task)?'保守対応待ち':pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
       const head=el('div',undefined,'card-head');head.append(badge);if(job?.title)head.append(el('span',job.title,'job-title'));card.append(head,el('strong',task.title));
       const warnings=(job?.warning_issues||[]).filter(i=>i.task_id===task.id&&i.status==='open');
       if(warnings.length){const note=el('div',undefined,'progress-warning');note.append(el('strong',`⚠ 警告 ${warnings.length}件・作業は継続`));for(const issue of warnings)note.append(el('p',issue.summary));card.append(note);}
@@ -299,9 +532,9 @@ function render() {
       const reason=stopReason(task);
       if(reason)card.append(el('p',reason.title,'summary'));
       else if(task.summary)card.append(el('p',task.summary,'summary'));
-      const meta=el('div',undefined,'meta');meta.append(el('span',`${roles[task.role]} · ${task.profile.adapter}`,'role-chip'));card.append(meta);
+      const meta=el('div',undefined,'meta'),chip=el('span',roles[task.role],'role-chip');chip.append(el('span',` · ${task.profile.adapter}`,'tech-only'));meta.append(chip);card.append(meta);
       if(task.common_agents?.length){const run=task.agent_run,labels={starting:'起動中',running:'実行中',completed:'実行完了',failed:'失敗',cancelled:'中止',held:'送る前に保留（秘密情報の確認）'};
-        card.append(el('p','共通Agent: '+task.common_agents.join('、')+' · '+(run?labels[run.status]||run.status:task.agent_name?'起動待ち':'旧方式の役割指示'),'hint'));}
+        card.append(el('p','共通Agent: '+task.common_agents.join('、')+' · '+(run?labels[run.status]||run.status:task.agent_name?'起動待ち':'旧方式の役割指示'),'hint tech-only'));}
       if(index===2&&!pending(task.id).some(a=>a.payload.questions?.length)){
         const entry=el('div',undefined,'task-entry'),help=el('button','回答方法のヘルプ','decision-help-button');help.type='button';
         help.setAttribute('aria-label',task.title+'の回答方法のヘルプ');
@@ -339,8 +572,66 @@ function watchClaudeLogin(){
 function section(title,text) { const s=el('section',undefined,'detail-section');s.append(el('h3',title),el('div',text,'text-block'));return s; }
 const detailFolds=new Map();let renderedDetailTask=null;
 function revealSection(node){
+  const panel=node.closest?.('.detail-tab-panel');if(panel)activateDetailTab(panel.closest('#detail-body')||document,panel.dataset.tab);
   for(let parent=node.parentElement;parent;parent=parent.parentElement)if(parent.tagName==='DETAILS')parent.open=true;
 }
+// 2026-10-19 （利用者の要望）縦に長い詳細を、ジャンルごとのタブに分ける。区画の中身は作り終えたあとで振り分けるだけで、
+// 各区画の処理（回答・承認・再開など）は変えない。失敗・停止のあるタブは赤、確認待ち・注意のあるタブは黄にする。
+const DETAIL_TABS=[['action','対応'],['result','結果'],['request','依頼・指示'],['run','実行記録'],['usage','使用量'],['handoff','引き継ぎ']];
+const detailTabs=new Map();
+function detailTabOf(node){
+  const title=(node.querySelector?.(':scope > summary')?.textContent||node.querySelector?.(':scope > h3')?.textContent||node.textContent||'').trim().slice(0,60);
+  if(/CLIトークン|入力サイズ|参考情報の画像化/.test(title))return 'usage';
+  if(/Agentの実行情報|過去のAgent実行|判断レイヤー|共通Skill|一時モデル|担当する共通Agent|実行時に共通定義|旧方式/.test(title))return 'run';
+  if(/引き継ぎ情報を登録|引き継ぎDB/.test(title))return 'handoff';
+  if(/今回の作業|対象と元の依頼|過去の指示|一次分類|添付ファイル|指示ファイルの容量|効果検証用|スキル/.test(title))return 'request';
+  if(/担当の報告|^状況|成果物$|この依頼の成果物|Artifact|判断の履歴|引き継ぎ範囲|この依頼は終了/.test(title))return 'result';
+  return 'action';
+}
+function activateDetailTab(body,key){
+  const bar=body.querySelector?.('.detail-tabs');if(!bar)return;
+  for(const tab of bar.querySelectorAll('[role=tab]')){const on=tab.dataset.tab===key;tab.setAttribute('aria-selected',String(on));tab.tabIndex=on?0:-1;}
+  for(const panel of body.querySelectorAll('.detail-tab-panel'))panel.hidden=panel.dataset.tab!==key;
+  if(renderedDetailTask)detailTabs.set(renderedDetailTask,key);
+}
+function tabifyDetail(body,task){
+  const nodes=[...body.children],header=[];
+  // The first lines (担当・モデル・試行、状態) stay above the tabs.
+  while(nodes.length&&nodes[0].tagName==='P'&&header.length<2)header.push(nodes.shift());
+  const panels=new Map(DETAIL_TABS.map(([key])=>{const panel=el('div',undefined,'detail-tab-panel');panel.dataset.tab=key;panel.setAttribute('role','tabpanel');return [key,panel];}));
+  for(const node of nodes)panels.get(detailTabOf(node)).append(node);
+  const bar=el('div',undefined,'detail-tabs');bar.setAttribute('role','tablist');bar.setAttribute('aria-label','詳細の表示の切り替え');
+  const used=DETAIL_TABS.filter(([key])=>panels.get(key).children.length);
+  let alertKey=null,attentionKey=null;
+  for(const [key,label] of used){
+    const panel=panels.get(key),tab=el('button',label,'detail-tab');tab.type='button';tab.dataset.tab=key;tab.setAttribute('role','tab');
+    const tabId='detail-tab-'+key;tab.id=tabId;panel.id='detail-panel-'+key;panel.setAttribute('aria-labelledby',tabId);tab.setAttribute('aria-controls',panel.id);
+    const shownNodes=[...panel.children].filter(node=>document.body.dataset.view==='technical'||!node.classList.contains('tech-only'));
+    const has=selector=>shownNodes.some(node=>node.matches(selector)||node.querySelector(selector));
+    const alert=has('.failure-fold,.stop-fold,#failure-card,.failure-card');
+    const attention=!alert&&has('.approval-box,.stop-reason-box,.notice,#decision-guide');
+    if(alert){tab.classList.add('tab-alert');tab.title='失敗・停止があります';alertKey??=key;}
+    else if(attention){tab.classList.add('tab-attention');tab.title='確認待ち・注意があります';attentionKey??=key;}
+    tab.addEventListener('click',()=>activateDetailTab(body,key));
+    tab.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight'].includes(event.key))return;event.preventDefault();const tabs=[...bar.querySelectorAll('[role=tab]')].filter(t=>document.body.dataset.view==='technical'||!t.classList.contains('tech-only'));
+      const next=tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length];next.focus();activateDetailTab(body,next.dataset.tab);});
+    if([...panel.children].every(node=>node.classList.contains('tech-only')))tab.classList.add('tech-only');
+    bar.append(tab);
+  }
+  body.replaceChildren(...header,bar,...used.map(([key])=>panels.get(key)));
+  const visible=used.filter(([key])=>document.body.dataset.view==='technical'||!bar.querySelector('[data-tab="'+key+'"]').classList.contains('tech-only'));
+  const keys=visible.map(([key])=>key),saved=detailTabs.get(task.id);
+  if(!keys.includes(alertKey))alertKey=null;if(!keys.includes(attentionKey))attentionKey=null;
+  activateDetailTab(body,keys.includes(saved)?saved:(alertKey||attentionKey||(keys.includes('result')?'result':keys[0])));
+}
+$('view-toggle')?.addEventListener('click',()=>{
+  if(document.body.dataset.view==='technical')return;
+  const body=$('detail-body'),bar=body.querySelector('.detail-tabs');if(!bar)return;
+  if(bar.querySelector('[aria-selected="true"]')?.classList.contains('tech-only')){
+    const first=[...bar.querySelectorAll('[role=tab]')].find(tab=>!tab.classList.contains('tech-only'));
+    if(first)activateDetailTab(body,first.dataset.tab);
+  }
+});
 function foldDetailSections(body,task){
   const previous=detailFolds.get(task.id)||{signature:null,open:{}};
   const requests=endedJob(task)?[]:pending(task.id);
@@ -399,9 +690,9 @@ function completionEvidenceForm(approval){
   if(!choices.length)return null;
   const form=el('form',undefined,'detail-section'),select=el('select'),evidence=el('textarea'),confirmed=el('input'),message=el('p','','hint');
   choices.forEach((choice,index)=>{const option=el('option',choice.label);option.value=String(index);select.append(option);});
-  evidence.required=true;evidence.maxLength=2000;evidence.rows=3;
+  evidence.required=true;evidence.maxLength=2000;evidence.rows=3;evidence.id='evidence-'+approval.id;
   evidence.placeholder='実施日時、対象、方法、結果、確認できる場所など。秘密情報は入力しないでください。';
-  confirmed.type='checkbox';confirmed.required=true;
+  confirmed.type='checkbox';confirmed.required=true;confirmed.id='evidence-confirm-'+approval.id;
   const targetLabel=el('label','根拠を追加する未確認項目');targetLabel.append(select);
   const evidenceLabel=el('label','人が確認した検証根拠');evidenceLabel.append(evidence);
   const confirmLabel=el('label',undefined,'check');confirmLabel.append(confirmed,document.createTextNode('この検証を実施し、結果と根拠を確認しました。'));
@@ -817,13 +1108,16 @@ const taskDetails=new Map(),taskDetailLoading=new Set();
 function mergeTaskDetails(){for(const t of state.tasks){const d=t.slim&&taskDetails.get(t.id);if(d)Object.assign(t,d,{slim:false});}}
 async function loadTaskDetail(task){if(taskDetailLoading.has(task.id))return;taskDetailLoading.add(task.id);try{taskDetails.set(task.id,await api('/api/tasks/detail?id='+encodeURIComponent(task.id)));mergeTaskDetails();const t=state.tasks.find(x=>x.id===task.id);if(t&&selected===t.id&&$('detail-dialog').open)renderDetail(t,detailVersion);}catch(e){notice(e.message);}finally{taskDetailLoading.delete(task.id);}}
 function renderDetail(task,version) {
+  const dialogHadFocus=$('detail-dialog').open&&$('detail-dialog').contains(document.activeElement)&&document.activeElement!==$('detail-dialog');
+  const focusedId=dialogHadFocus?document.activeElement.id:'';
+  const checkedBoxes={};$('detail-body').querySelectorAll('input[type=checkbox][id]').forEach(c=>checkedBoxes[c.id]=c.checked);
   if(task.slim){loadTaskDetail(task);$('detail-title').textContent=task.title;$('detail-body').replaceChildren(el('p','詳細を読み込み中…'));renderedDetailTask=null;return;}
-  if(renderedDetailTask){const saved=detailFolds.get(renderedDetailTask);if(saved)$('detail-body').querySelectorAll(':scope > details[data-fold-key]').forEach(d=>saved.open[d.dataset.foldKey]=d.open);}
+  if(renderedDetailTask){const saved=detailFolds.get(renderedDetailTask);if(saved)$('detail-body').querySelectorAll('details[data-fold-key]').forEach(d=>saved.open[d.dataset.foldKey]=d.open);}
   renderedDetailTask=task.id;
   const drafts={};$('detail-body').querySelectorAll('textarea').forEach(t=>drafts[t.id]=t.value);
   detailVersion=version;const job=state.jobs.find(j=>j.id===task.job_id);$('detail-title').textContent=task.title;
-  const body=$('detail-body');body.replaceChildren(el('p',`${roles[task.role]} / ${task.profile.adapter} / ${task.profile.model} / ${task.profile.effort} · 試行 ${task.attempt}`),el('p',`状態: ${statuses[task.status]||task.status} · 依頼の状態: ${jobStatusLabel(job)}`));
-  if(job.g2_gate_version===1)body.append(section('AI計画生成（G2）',`状態: ${job.g2_status==='pending'?'未承認・停止中':job.g2_status==='approved'?'承認済み・開始待ち':job.g2_status==='executing'?'承認済みの計画生成を実行中':job.g2_status==='consumed'?'承認済みの1回を使用済み':job.g2_status==='denied'?'拒否済み':'検証不能'}\nG2は計画生成1回のみを許可します。計画完了後は別のG3計画承認が必要です。`));
+  const body=$('detail-body');body.replaceChildren(el('p',`${roles[task.role]} / ${task.profile.adapter} / ${task.profile.model} / ${task.profile.effort} · 試行 ${task.attempt}`,'tech-only'),el('p',`状態: ${statuses[task.status]||task.status} · 依頼の状態: ${jobStatusLabel(job)}`));
+  if(job.g2_gate_version===1)body.append(section('AIによる計画作成の開始',`状態: ${job.g2_status==='pending'?'未承認・停止中':job.g2_status==='approved'?'承認済み・開始待ち':job.g2_status==='executing'?'承認済みの計画生成を実行中':job.g2_status==='consumed'?'承認済みの1回を使用済み':job.g2_status==='denied'?'拒否済み':'検証不能'}\nこの承認で許可するのは、AIによる計画作成の1回だけです。計画ができた後は、別に開発計画の確認・承認が必要です。`));
   const skillMode=job.skill_selection?.mode;
   if(job.evaluation?.mode)body.append(el('p','効果検証用の依頼：モード'+job.evaluation.mode+'（再利用の文脈だけを切り替え）'));
   if(skillMode!=='none'&&job.skill_selection?.names?.length)body.append(el('p','依頼時にプロジェクトへ追加したスキル（候補）: '+job.skill_selection.names.join('、')));
@@ -835,7 +1129,7 @@ function renderDetail(task,version) {
     const choices=el('div',undefined,'actions');
     const jump=(label,target)=>choices.append(button(label,()=>{const dest=body.querySelector(target);if(!dest){notice('対象の操作欄がありません。担当の報告と履歴を確認してください。');return;}revealSection(dest);dest.scrollIntoView({block:'center'});const focus=dest.querySelector('button,textarea,input')||dest;focus.focus();}));
     if(isStalledReview(task))jump('範囲を指定して修正を依頼','#manual-review-repair');
-    else if(pending(task.id).length)jump('判断材料を読んで回答','.approval-box');
+    else if(pendingUser(task.id).length)jump('判断材料を読んで回答','.approval-box');
     else {jump('原因と復旧方法を確認','#recovery-advice');jump('補足・差し戻しを入力','#retry-note');}
     jump('中止の確認へ','#cancel-job');
     choices.append(button('保留して閉じる',()=>{$('detail-dialog').close();notice('保留しました。依頼は停止したままで、判断待ちにも残ります。');}));
@@ -878,7 +1172,7 @@ function renderDetail(task,version) {
       }
     }));body.append(panel);
   }
-  if(task.common_agents?.length)body.append(el('p','担当する共通Agent: '+task.common_agents.join('、'),'hint'));
+  if(task.common_agents?.length)body.append(el('p','担当する共通Agent: '+task.common_agents.join('、'),'hint tech-only'));
   const intake=state.jobs.find(j=>j.id===task.job_id)?.intake_classification;
   if(intake)body.append(section('依頼の一次分類',`${intake.label} / ${intake.provider}\n理由: ${intake.reason}\n分類は作業範囲や権限の承認ではありません。`));
   if(task.decision_record){const d=task.decision_record;body.append(section('判断レイヤーの記録',`動作: ${d.shadow?'シャドー（既存判断を維持）':'適用'}\nProvider: ${d.provider}\n状態: ${d.status}\n理由コード: ${d.reason_code}\n既存判断: ${d.baseline}\n候補: ${d.decision}\n採用: ${d.effective}\n差異: ${d.differs?'あり':'なし'}\n時間: ${d.latency_ms} ms`+(d.usage?'\n'+(d.provider==='ollama'?'ローカル':'API')+'トークン: '+JSON.stringify(d.usage):'\nトークン: 未取得')+(d.confidence!==undefined?'\n集中度（正解確率ではありません）: '+d.confidence:'')+(d.probabilities?'\n候補確率: '+JSON.stringify(d.probabilities):'')));}
@@ -938,16 +1232,20 @@ function renderDetail(task,version) {
       catch(error){message.textContent=error.message;}finally{submit.disabled=false;}});
   }
   if(['queued','failed','interrupted','blocked'].includes(task.status)&&!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status))body.append(button('担当・モデルを切り替える',()=>openModelSwitch(task.id)));
-  for(const a of endedJob(task)?[]:pending(task.id)){
-    if(a.payload.questions?.length){body.append(questionForm(a));continue;}
-    const box=el('section',undefined,'approval-box');box.append(el('h3',a.kind==='ai_start'?'G2：AI計画生成の承認':a.kind==='plan'?'G3：作業計画を承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
-    if(a.kind==='ai_start')box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途G3計画承認が必要です。モデル利用量が発生します。','notice'));
-    if(a.kind==='tool'&&a.payload?.guard)box.append(el('p','送信の防御：'+a.payload.guard.label+'。'+a.payload.guard.note+' 送信先・送る内容・依頼に必要かを確認してから許可してください。','notice'));
+  for(const a of endedJob(task)?[]:pendingUser(task.id)){
+    const summary=a.business_summary&&!(a.kind==='tool'&&a.business_summary===GENERIC_APPROVAL_SUMMARY)?el('p',a.business_summary,'business-summary'):null;
+    // 利用者の判断欄の目印。折りたたみの枠に包まれた後でも、復旧中の表示が判断欄を隠さないために使う。
+    if(summary)summary.dataset.userDecision='1';
+    if(a.payload.questions?.length){if(summary)body.append(summary);const form=questionForm(a);form.dataset.userDecision='1';body.append(form);continue;}
+    const box=el('section',undefined,'approval-box');box.dataset.userDecision='1';box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
+    if(summary)box.append(summary);
+    if(a.kind==='ai_start')box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途、開発計画の確認・承認が必要です。モデル利用量が発生します。','notice'));
+    if(a.kind==='tool'&&a.payload?.guard)box.append(el('p',(['delete','dynamic'].includes(a.payload.guard.category)?'安全のための確認：':'送信の防御：')+a.payload.guard.label+'。'+a.payload.guard.note+(['delete','dynamic'].includes(a.payload.guard.category)?' 対象と範囲が依頼に必要かを確認してから許可してください。':' 送信先・送る内容・依頼に必要かを確認してから許可してください。'),'notice'));
     if(a.kind==='completion'){
       box.append(el('p','レビュー結果の確認と依頼全体の正式受領は別操作です。レビュー確認だけでは受領状態を変更しません。','notice'));
       box.append(el('p','対象依頼：'+job.title,'hint'));
     }
-    box.append(el('div',a.kind==='tool'?JSON.stringify(a.payload,null,2):reportText(a.payload),'text-block'));
+    if(a.kind==='tool')box.append(toolApprovalView(a));else box.append(el('div',reportText(a.payload),'text-block'));
     if(a.kind==='completion'){
       box.append(previewPanel(job));
       const evidenceForm=completionEvidenceForm(a);if(evidenceForm)box.append(evidenceForm);
@@ -972,10 +1270,11 @@ function renderDetail(task,version) {
         const accept=button(hasPending?'未完了項目を明示して条件付き正式受領':'成果物を正式受領',async()=>{
           if(confirmation.value.trim()!=='正式受領'){notice('正式受領する場合は確認欄に「正式受領」と入力してください。');return;}
           await api('/api/jobs/formal-acceptance',{approval_id:a.id,confirmation:confirmation.value.trim(),note:input.value});
+          notice('正式受領しました。この依頼は終了しました。');
         },'primary');actions.append(accept);
       }
     }else{
-      actions.append(button(a.kind==='ai_start'?'G2を承認して計画生成を1回開始':'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value}),'primary'));
+      actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value}),'primary'));
     }
     box.append(actions);body.append(box);
   }
@@ -1012,10 +1311,67 @@ function renderDetail(task,version) {
   }
   if(!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status)){const cancel=button('この依頼全体を中止',async()=>{if(confirm('実行中・待機中の作業を中止します。既存の変更は自動では戻しません。'))await api('/api/cancel',{id:job.id});},'danger');cancel.id='cancel-job';body.append(cancel);}
   body.querySelectorAll('textarea').forEach(t=>{if(drafts[t.id])t.value=drafts[t.id];});
+  body.querySelectorAll('input[type=checkbox][id]').forEach(c=>{if(checkedBoxes[c.id])c.checked=true;});
   foldDetailSections(body,task);
+  // 新形式の依頼では、引き継ぎDBの編集欄と履歴は技術詳細に置く（旧形式の表示は変えない）。
+  // 新形式の依頼では、担当・モデルの切り替えは一般画面に出さない（技術詳細で従来どおり使える）。
+  if(job.p0_contract_version===1)for(const button of body.querySelectorAll('button'))if(button.textContent.trim()==='担当・モデルを切り替える')button.classList.add('tech-only');
+  if(job.p0_contract_version===1)for(const node of body.children){const head=node.textContent||'';if(head.startsWith('依頼の一次分類')||head.startsWith('引き継ぎ情報を登録・訂正')||head.startsWith('引き継ぎDBの履歴')||head.startsWith('停止理由と次の操作')||head.startsWith('ボードから復旧する')||head.startsWith('成果物を差し戻す'))node.classList.add('tech-only');}
+  const phase=p0Phase(job);
+  if(phase){
+    // 復旧中・保守対応待ち・安全上の確認待ちでは、技術的な修理の欄を標準で隠す（技術詳細では従来どおり表示）。中止と成果物は残す。
+    const hasUserDecision=pendingUser(task.id).length>0;
+    for(const node of [...body.children]){
+      if(node.id==='cancel-job'||node.querySelector?.('#cancel-job')||node.querySelector?.('h3')?.textContent==='この依頼の成果物'||
+         (hasUserDecision&&(node.matches?.('[data-user-decision]')||node.querySelector?.('[data-user-decision]'))))continue;
+      node.classList.add('tech-only');
+    }
+    const detail=hasUserDecision?'操作の確認待ちがあります。下の承認欄をご確認ください。':phase.detail;
+    const status=section('いまの状況',phase.label+'\n'+detail+(job.p0_progress?.next_action?'\n次の動作：'+job.p0_progress.next_action:''));
+    status.classList.add('p0-status');status.setAttribute('role','status');body.prepend(status);
+  }
+  tabifyDetail(body,task);
+  // 描き直しで、操作中のボタンが差し替わりフォーカスを失ったときは、承認の枠の見出し（無ければ詳細の題名）へ移す。
+  if(dialogHadFocus&&(!$('detail-dialog').contains(document.activeElement)||document.activeElement===$('detail-dialog'))){
+    const same=focusedId&&document.getElementById(focusedId);
+    const target=same&&body.contains(same)?same:((approvalSummary(body)||body.querySelector('.approval-box h3'))||$('detail-title'));
+    if(target!==same)target.tabIndex=-1;
+    revealSection(target);target.focus();
+  }
 }
 // 2026-10-08 カードを開くたびに折りたたみを初期状態（停止理由を開く）から始める。以前の開閉を引き継ぐと、停止後も閉じたままになっていた。
-function openTask(id){selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();}
+// 定期的な描き直しで、フォーカスのあるボタンが差し替わっても、同じ印（data-focus-key）のボタンへフォーカスを戻す。
+function currentFocusKey(){return document.activeElement?.dataset?.focusKey||null;}
+let focusPending=false;   // 詳細を閉じた直後は、描き直しでフォーカスを失っても、戻り先（進み具合の見出し）へ戻す
+function restoreFocus(key){
+  if(document.activeElement&&document.activeElement!==document.body)return;
+  let target=key&&[...document.querySelectorAll('[data-focus-key]')].find(e=>e.dataset.focusKey===key&&e.offsetParent!==null);
+  if(!target&&focusPending){const progress=$('job-progress');target=progress&&!progress.hidden?$('job-progress-title'):$('board');}
+  if(target){target.focus({preventScroll:true});focusPending=false;}
+}
+let focusReturn=null;
+function openTask(id){focusReturn=document.activeElement?.dataset?.focusKey||null;selected=id;detailVersion='';detailFolds.delete(id);detailTabs.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();
+  // 利用者の判断を待つ作業を開いたときは、最初のフォーカスを承認欄に置く（閉じるボタンから十数回Tabを押さずに済む）。
+  if(pendingUser(id).length)focusApproval();}
+// 承認欄の見出し（折りたたみの要約）。折りたたんだ後は h3 が要約に移るため、要約を探す。
+function approvalSummary(body){
+  const box=body.querySelector('.approval-box,[data-user-decision]');
+  return box?.closest('details.detail-fold')?.querySelector(':scope > summary')||null;
+}
+function focusApproval(){
+  const body=$('detail-body'),box=body.querySelector('.approval-box,[data-user-decision]');if(!box)return false;
+  const target=approvalSummary(body)||box.querySelector('textarea,button')||box;
+  if(target===box)box.tabIndex=-1;
+  revealSection(target);target.focus();return true;
+}
+// 詳細を閉じたら、開いたボタンの位置へフォーカスを戻す（画面の描き直しで要素が差し替わっても、印（data-focus-key）で探す）。
+// 見つからない（判断が済んで項目が消えた）ときは、進み具合の見出し、無ければ作業ボードへ戻す。
+$('detail-dialog').addEventListener('close',()=>{focusPending=true;setTimeout(()=>{focusPending=false;},4000);setTimeout(()=>{
+  if(document.activeElement&&document.activeElement!==document.body)return;
+  const keyed=focusReturn&&[...document.querySelectorAll('[data-focus-key]')].find(e=>e.dataset.focusKey===focusReturn&&e.offsetParent!==null);
+  const progress=$('job-progress'),fallback=progress&&!progress.hidden?$('job-progress-title'):$('board');
+  const target=keyed||fallback;if(target){target.focus();if(keyed)focusPending=false;}
+},0);});
 // 取得・送信を待つあいだは、操作を受け付けない「処理中」の表示を出す（定期更新は表示しない）。
 let busyCount=0,busyDialog=null,busyTimer=null,refreshing=null,blockNext=true;
 function showBusy(text){
@@ -1032,7 +1388,18 @@ function showBusy(text){
     if(!busyDialog.open)busyDialog.showModal();
   }
 }
-function hideBusy(){if(busyCount>0&&--busyCount===0){clearInterval(busyTimer);if(busyDialog.open)busyDialog.close();}}
+// 「処理中」の表示が閉じた後に、詳細の中でフォーカスを失っていたら、直前にフォーカスのあった要素（無ければ承認の枠の見出し）へ戻す。
+let lastDetailFocus='';
+$('detail-dialog').addEventListener('focusin',event=>{lastDetailFocus=event.target.id||'';});
+function restoreDetailFocus(){
+  const dialog=$('detail-dialog');if(!dialog.open)return;
+  const active=document.activeElement;if(active&&active!==document.body&&active!==dialog&&dialog.contains(active))return;
+  const body=$('detail-body'),same=lastDetailFocus&&document.getElementById(lastDetailFocus);
+  const target=same&&body.contains(same)?same:((approvalSummary(body)||body.querySelector('.approval-box h3'))||$('detail-title'));
+  if(target!==same)target.tabIndex=-1;
+  revealSection(target);target.focus();
+}
+function hideBusy(){if(busyCount>0&&--busyCount===0){clearInterval(busyTimer);if(busyDialog.open)busyDialog.close();setTimeout(restoreDetailFocus,0);}}
 function refresh(){
   if(refreshing){
     if(!blockNext)return refreshing;
@@ -1042,7 +1409,7 @@ function refresh(){
   refreshing=loadState().finally(()=>{refreshing=null;if(block)hideBusy();});
   return refreshing;
 }
-async function loadState(){try{state=await api('/api/state');mergeTaskDetails();render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
+async function loadState(){try{state=await api('/api/state');mergeTaskDetails();const focusKey=currentFocusKey();render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();restoreFocus(focusKey);}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
 const decisionNotificationObjects=new Map(),decisionPopupObjects=new Map();
 let seenDecisions=new Set();
 try{seenDecisions=new Set(JSON.parse(localStorage.getItem('agent-team-decision-seen')||'[]'));}catch(error){}
@@ -1100,7 +1467,7 @@ function notificationButton(){
 }
 function decisionItems(){
   return state.tasks.filter(t=>!endedJob(t)).flatMap(task=>{
-    const approvals=pending(task.id);
+    const approvals=pendingUser(task.id);
     const completion=approvals.find(a=>a.kind==='completion');
     if(completion){
       const job=state.jobs.find(j=>j.id===task.job_id);
@@ -1110,11 +1477,11 @@ function decisionItems(){
         voice:'依頼全体の作業工程が終了しました。成果を確認してください。',completion:true}];
     }
     if(approvals.length)return [{task,key:approvals.map(a=>a.id).sort().join(':'),label:'判断・確認をお願いします'}];
-    if(['blocked','failed','interrupted'].includes(task.status)){const reason=stopReason(task);return [{task,key:`${task.id}:${task.attempt}:${task.status}:${reason?.code||'generic'}`,label:reason?.title||(task.status==='blocked'?'判断が必要です':'作業が停止しています'),detail:reason?.detail,voice:reason?.title}];}
+    if(!p0Phase(state.jobs.find(j=>j.id===task.job_id))&&['blocked','failed','interrupted'].includes(task.status)){const reason=stopReason(task);return [{task,key:`${task.id}:${task.attempt}:${task.status}:${reason?.code||'generic'}`,label:reason?.title||(task.status==='blocked'?'判断が必要です':'作業が停止しています'),detail:reason?.detail,voice:reason?.title}];}
     return [];
   }).concat(state.jobs.filter(job=>!['cancelled','accepted','accepted_with_pending_checks'].includes(job.status)).flatMap(job=>{
     const review=stalledReview(job);
-    return review?[{task:review,key:'repair-limit:'+review.id,label:'自動修正の上限に達し、判断が必要です',
+    return review&&!p0Phase(job)?[{task:review,key:'repair-limit:'+review.id,label:'自動修正の上限に達し、判断が必要です',
       detail:'レビュー指摘が残っています。修正範囲を指定して再依頼するか、成果の扱いを判断してください。',voice:'自動修正の上限に達しました。判断が必要です。'}]:[];
   }));
 }
@@ -1200,12 +1567,12 @@ $('new-job').addEventListener('click',()=>{if(!state)return;
   $('project-select').replaceChildren(...state.config.approved_roots.map(p=>new Option(p,p)));
   const auto=$('new-dialog').querySelector('input[name="auto_execute"]'),autoLabel=auto?.closest('label');
   const autoText=autoLabel&&[...autoLabel.childNodes].find(n=>n.nodeType===Node.TEXT_NODE);
-  if(autoText)autoText.nodeValue=' G3計画承認後の後続作業を自動で進める設定（計画生成・計画承認の確認は省略されません）';
-  if(autoLabel?.nextElementSibling)autoLabel.nextElementSibling.textContent='G1登録ではAIを起動しません。G2で計画生成を承認し、生成後にG3で計画を承認してください。';
+  if(autoText)autoText.nodeValue=' 開発計画の承認後の作業を自動で進める設定（計画生成・計画承認の確認は省略されません）';
+  if(autoLabel?.nextElementSibling)autoLabel.nextElementSibling.textContent='依頼の受付ではAIを起動しません。AIによる計画作成の開始を承認し、計画ができたら開発計画を確認・承認してください。';
   const consent=$('new-dialog').querySelector('input[name="consent"]'),consentLabel=consent?.closest('label');
   const consentText=consentLabel&&[...consentLabel.childNodes].find(n=>n.nodeType===Node.TEXT_NODE);
   if(consentText)consentText.nodeValue=' 依頼内容・添付ファイルを隔離ジョブ管理DBへ登録することを確認しました。登録だけではAIへ送信されません。';
-  const submit=$('new-dialog').querySelector('form button[type="submit"]');if(submit)submit.textContent='依頼を登録してG2待ちにする';
+  const submit=$('new-dialog').querySelector('form button[type="submit"]');if(submit)submit.textContent='依頼を登録して、計画作成の開始の承認を待つ';
   $('new-dialog').showModal();checkJobInstructionSize();jobSkills.load(api);
 });
 let folderState=null, folderBusy=false, folderGeneration=0;
@@ -1286,9 +1653,11 @@ const jobFields={
   evaluation:{label:'効果検証（検証モード）',el:()=>$('job-evaluation-mode'),open:()=>{$('job-evaluation').open=true;}},
   attachments:{label:'参考ファイルを添付',el:()=>$('job-attachments')},
   route:{label:'軽い経路の評価',el:()=>$('job-route'),open:()=>{routingBox.open=true;}},
-  consent:{label:'AIへの送信の確認',el:()=>$('job-form').elements.consent},
+  consent:{label:'確認のチェック',el:()=>$('job-form').elements.consent},
   other:{label:'送信・接続'}};
 $('job-form').noValidate=true;
+// 同意のチェック欄の文言は画面の状態（隔離ジョブ管理の確認など）で書き換わる。エラー文は、実際の文言を引用する。
+function consentLabelText(){return ($('job-form').elements.consent?.closest('label')?.textContent||'').trim()||'依頼内容・添付ファイルと必要な作業情報をAIに送信し、CLIの利用枠を使うことを確認しました。';}
 function checkJobForm(form,f,docs){
   const issues=[],add=(field,problem,fix)=>issues.push({field,problem,fix});
   if(!String(f.get('title')||'').trim())add('title','入力されていません。','依頼の内容が分かる短い名前を入力してください（例：単位変換モジュールの作成）。');
@@ -1306,7 +1675,7 @@ function checkJobForm(form,f,docs){
     if(docs||!f.has('auto_execute')||f.get('evaluation_mode')!=='A'||!f.has('evaluation_confirmed'))add('route','軽い経路の開始条件を満たしていません。','開発・作業、自動実行、検証モードA、検証用データの確認を選んでください。');
     if(!/^[^\\/]+\.py$/i.test(String(f.get('light_scope_file')||''))||!String(f.get('light_acceptance')||'').trim())add('route','対象ファイルか合格条件が不足しています。','単一のPythonファイル名と具体的な合格条件を入力してください。');
   }
-  if(!f.has('consent'))add('consent','チェックが入っていません。','内容を確認のうえ、「依頼内容・添付ファイルと必要な作業情報をAIに送信し、CLIの利用枠を使うことを確認しました。」にチェックを入れてください。');
+  if(!f.has('consent'))add('consent','チェックが入っていません。','内容を確認のうえ、「'+consentLabelText()+'」にチェックを入れてください。');
   return issues;
 }
 function jobServerIssue(error){
@@ -1354,7 +1723,7 @@ $('job-form').addEventListener('submit',e=>{e.preventDefault();const f=new FormD
 clearJobIssues();const issues=checkJobForm(e.target,f,docs);if(issues.length){showJobIssues(issues);return;}
 if(!docs&&DOCUMENT_REQUEST.test(String(f.get('title'))+' '+String(f.get('goal')))&&!confirm('資料（PowerPoint・Word・PDFなど）を作る依頼のようです。\n\n「依頼の種類」を「資料作成」にすると、図・表付きの資料を作る道具で進められます。開発・作業の依頼では、資料用の道具は使えません。\n\nこのまま開発・作業の依頼として出しますか？（キャンセルで入力に戻ります）'))return;
 action(async()=>{try{await submitJob(f,docs,e.target);}catch(error){showJobIssues([jobServerIssue(error)]);throw error;}});});
-async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const route=f.get('route')||'full';const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,validation_commands:docs?[]:String(f.get('validation_commands')||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{}) ,...(route==='light_eval'?{route,light_scope_file:f.get('light_scope_file'),light_acceptance:f.get('light_acceptance')}: {})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、G2承認待ちの依頼を2件登録しました。':'依頼を登録しました。AI計画生成はG2承認待ちで停止中です。')+(created.prepared?.length?' '+created.prepared.join(' '):''));}
+async function submitJob(f,docs,form){const skills=jobSkills.value();const attachment_ids=await jobImages.upload(api);const route=f.get('route')||'full';const created=await sendWithInputGuard(api,'/api/jobs',{title:f.get('title'),goal:f.get('goal'),project:f.get('project'),auto_execute:f.has('auto_execute'),consent:f.has('consent'),attachment_ids,validation_commands:docs?[]:String(f.get('validation_commands')||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),...skills,...(docs?{kind:'documentation',document_format:f.get('document_format')}:{}),...(f.get('evaluation_mode')?{evaluation_mode:f.get('evaluation_mode'),evaluation_confirmed:f.has('evaluation_confirmed')}:{}),...(f.get('token_reduction')==='compare'?{token_reduction_compare:true,evaluation_confirmed:f.has('evaluation_confirmed')}:f.get('token_reduction')?{token_reduction:f.get('token_reduction')}:{}) ,...(route==='light_eval'?{route,light_scope_file:f.get('light_scope_file'),light_acceptance:f.get('light_acceptance')}: {})});$('new-dialog').close();form.reset();syncJobKind();jobImages.clear();jobSkills.reset();notice((created.comparison?'トークン削減の比較のため、計画作成の開始の承認待ちの依頼を2件登録しました。':'依頼を登録しました。AIによる計画作成は、開始の承認待ちで停止中です。')+(created.prepared?.length&&document.body.dataset.view==='technical'?' '+created.prepared.join(' '):''));}
 $('pause').addEventListener('click',()=>action(()=>api('/api/pause',{paused:!state.paused})));
 $('stop').addEventListener('click',()=>action(async()=>{if(confirm('全ての実行中の依頼を中止し、新規着手を停止しますか？'))await api('/api/stop',{});}));
 $('backup').addEventListener('click',()=>action(async()=>{const r=await api('/api/backup',{});notice('DBのバックアップを保存しました: data/'+r.file+'、data/'+r.handoff_file);}));
@@ -1475,6 +1844,13 @@ $('settings-open').addEventListener('click',()=>{
   creditsLabel.append(credits);creditsLabel.hidden=!enabledProviders().includes('copilot');
   providerBox.append(creditsLabel,el('p','使用しないプロバイダは、担当の選択肢・利用枠表示・残量取得から外れます。GitHub Copilotは計画・実装・レビュー担当と相談で使えます（道具は采来の確認付きのものだけ。調査担当は不可）。残り％は采来から実行した分の消費で計算します。Copilotのモデル名の（約○クレジット/回）は、短い問いかけ1回の実測値です。実際の作業では、読み込む資料の量や回答の長さに応じて数倍〜数十倍になります。','hint'));
   $('profile-inputs').append(providerBox);
+  // 2026-10-19 Claude ⇔ GitHub Copilot の自動の切り替えのオン・オフ（既定はオン）。
+  const failoverBox=el('fieldset',undefined,'provider-choice');failoverBox.append(el('legend','自動の切り替え'));
+  const failoverLabel=el('label',undefined,'check'),failover=el('input');failover.type='checkbox';failover.name='auto-failover';failover.id='auto-failover';
+  failover.checked=state.config.auto_failover!==false;
+  failoverLabel.append(failover,el('span','Claude と GitHub Copilot を自動で切り替える（ログイン切れ・利用上限・枠切れのとき）'));
+  failoverBox.append(failoverLabel,el('p','担当が止まったとき、または使うサービスの枠を使い切っていると分かっているときに、もう一方のサービスで続けます（始める前の切り替えは通知します）。自動で切り替えるのは、データ分類が公開・社内の依頼だけです。オフにすると切り替えずに待機または停止します。中止や手動の切り替えを判断したいときはオフにしてください。','hint'));
+  $('profile-inputs').append(failoverBox);
   for(const role of Object.keys(roles)){
     const p=state.config.profiles[state.config.roles[role]],row=el('div',undefined,'profile-row');row.append(el('span',roles[role]));
     const provider=el('select');provider.name=role+'-adapter';provider.setAttribute('aria-label',roles[role]+'の担当');provider.append(new Option(providerShortLabels[p.adapter],p.adapter));provider.value=p.adapter;
@@ -1547,6 +1923,7 @@ $('profiles-form').addEventListener('submit',e=>{
   for(const role of Object.keys(roles))data[role]={adapter:f.get(role+'-adapter'),model:f.get(role+'-model'),effort:f.get(role+'-effort')};
   const credits=String(f.get('copilot-credits')||'').trim();
   data.provider_settings={enabled:checkedProviders(),copilot_monthly_credits:credits?Number(credits):null};
+  data.auto_failover=f.has('auto-failover');
   $('models-save').disabled=true;
   api('/api/profiles',data).then(async()=>{await refresh();notice('今後作成するタスクのモデル設定を保存しました。');$('settings-dialog').close();}).catch(e=>{$('models-message').textContent=e.message;}).finally(modelSaveState);
 });

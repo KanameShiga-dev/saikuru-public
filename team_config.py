@@ -122,6 +122,9 @@ def default_config():
     return {
         'schema_version': 1,
         'automatic_operations': False,
+        # Whether a new development request carries the P0 contract (a stopped P0 job needs a maintenance credential to
+        # resume). Default on; a one-person production folder keeps it off until it can be resumed from the screen.
+        'p0_contract_enabled': True,
         'computer_use_allowed': False,
         'decision': {'provider': 'ollama', 'model': 'tev1:0.8b', 'shadow': True},
         'local_summary': {'mode': 'shadow', 'model': 'gemma4:latest',
@@ -130,6 +133,7 @@ def default_config():
         'security_review': 'always',
         'review_context_mode': 'off',
         'document_review_relaxed': False,
+        'auto_failover': True,   # Claude <-> Copilot automatic switch (2026-10-19: the user can turn it off)
         'task_timeout_seconds': 1800,
         'approval_timeout_seconds': 900,
         'max_repairs': 2,
@@ -189,10 +193,14 @@ def validate_config(config):
             root = Path(route_eval['root']).resolve()
             if ROOT.resolve().is_relative_to(root) or root == (ROOT / 'data').resolve():
                 raise ValueError('軽い経路の評価ルートに通常サービスのフォルダは使えません。')
+    if type(config.get('p0_contract_enabled', True)) is not bool:
+        raise ValueError('p0_contract_enabled は真偽値で指定してください。')
     if type(config.get('automatic_operations', False)) is not bool:
         raise ValueError('操作自動承認の設定は真偽値で指定してください。')
     if type(config.get('document_review_relaxed', False)) is not bool:
         raise ValueError('document_review_relaxed は真偽値を指定してください。')
+    if type(config.get('auto_failover', True)) is not bool:
+        raise ValueError('自動の切り替えの設定は真偽値で指定してください。')
     review_context_mode = config.get('review_context_mode', 'off')
     if review_context_mode not in ('off', 'shadow', 'on'):
         raise ValueError('レビュー文脈の評価モードが不正です。')

@@ -107,10 +107,77 @@ def decode_result(text):
     try:
         value = json.loads(text)
     except (json.JSONDecodeError, TypeError) as exc:
-        raise ProviderError('結果が指定のJSON形式ではありません。自動では次のタスクへ進めません。') from exc
+        raise ProviderError('結果が指定のJSON形式ではありません。自動では次のタスクへ進めません。',
+                            'format') from exc
     if not isinstance(value, dict):
-        raise ProviderError('結果はJSONオブジェクトである必要があります。')
+        raise ProviderError('結果はJSONオブジェクトである必要があります。', 'format')
     return value
+
+
+def report_format_instruction(schema, include_schema=False):
+    """The same final-report contract for all provider prompts."""
+    instruction = ('\n\n---\n最終報告は指定されたJSONスキーマに合うJSONオブジェクトだけで返してください。'
+                   '必須項目をすべて含め、値がない文字列は空文字、配列は空配列、'
+                   '真偽値は事実に合わせて true または false にしてください。'
+                   '未確認のことを完了とせず、前置き・説明文・コードブロックは付けないでください。')
+    properties = schema.get('properties') or {}
+    if 'tasks' in properties:
+        instruction += (' summaryには計画の目的と範囲を、tasksには後続が実行できる担当種別・作業内容を記してください。'
+                        '未確定事項はquestionsに、引き継ぐ事実はcontext_updatesに根拠とともに記してください。')
+    elif 'status' in properties:
+        instruction += (' statusは実際の結果、summaryは実施内容と到達点、checksは確認項目ごとの結果と根拠、'
+                        'pending_checksは必要だが未確認の項目を記してください。'
+                        'stage_completeは担当工程が完了した場合だけtrueにしてください。'
+                        '停止や差し戻しにはblocking_reasonsで必須条件と支障を示し、'
+                        '判断が必要ならquestionまたはquestionsに具体的に記してください。')
+        if 'artifacts' in properties:
+            instruction += ' artifactsには作成・変更した成果物の相対パスを記してください。'
+        if 'test_files' in properties:
+            instruction += ' test_filesとtest_change_reasonにはテストの場所と変更理由を記してください。'
+    return instruction + ('\nJSONスキーマ:\n' + json.dumps(schema, ensure_ascii=False)
+                          if include_schema else '')
+
+
+def decode_text_report(text, schema):
+    """Accept only a complete schema-compatible JSON object from final text."""
+    try:
+        result = copilot_answer(text, schema)
+    except ProviderError as exc:
+        raise ProviderError('完了報告をJSONとして回収できませんでした。作業の成果は保持しています。',
+                            'format') from exc
+    errors = schema_errors(result, schema)
+    if errors:
+        raise ProviderError('完了報告に必要な項目がありません（' + '、'.join(errors[:8])[:400]
+                            + '）。作業の成果は保持しています。', 'format')
+    return result
+
+
+def allow_automatic_format_retry(ctx):
+    """P0 requires a new user decision before another paid model turn."""
+    job = ctx.engine.store.get(ctx.task['job_id'], 'job')
+    return job.get('p0_contract_version') != 1
+
+
+def decode_claude_result(message, schema, assistant_text=''):
+    """Recover a complete report when Claude omits structured_output.
+
+    The CLI can put its JSON report in result, sometimes inside a code fence or
+    short explanation. Only a full schema match is accepted; prose and partial
+    objects must never be promoted to a successful task result.
+    """
+    output = message.get('structured_output')
+    if isinstance(output, dict) and not schema_errors(output, schema):
+        return output
+    last_error = None
+    for text in (message.get('result', ''), assistant_text):
+        if not text:
+            continue
+        try:
+            return decode_text_report(text, schema)
+        except ProviderError as exc:
+            last_error = exc
+    raise last_error or ProviderError('Claudeの完了報告を受信できませんでした。作業の成果は保持しています。',
+                                     'format')
 
 
 class CodexAdapter:
@@ -229,6 +296,7 @@ class CodexAdapter:
                 except ProviderError as exc:
                     raise ProviderError('CodexのWindowsサンドボックスの起動確認に失敗しました。モデル実行は開始していません。詳細: ' + str(exc)[:800], 'codex_sandbox') from exc
             from team_attachments import provider_input
+            prompt += report_format_instruction(schema)
             request('turn/start', {'threadId': thread_id, 'input': provider_input(ctx, prompt, 'codex'),
                                   'effort': profile['effort'], 'outputSchema': schema})
             final = ''
@@ -243,7 +311,7 @@ class CodexAdapter:
                     turn = params.get('turn', {})
                     if turn.get('status') != 'completed':
                         raise ProviderError('Codexのターンが完了しませんでした: ' + str(turn.get('error') or turn.get('status'))[:1500])
-                    return decode_result(final)
+                    return decode_text_report(final, schema)
         finally:
             process.close()
 
@@ -341,6 +409,7 @@ class ClaudeAdapter:
                   '--model', profile['model'], '--effort', profile['effort'],
                   '--settings', json.dumps(settings), '--json-schema', json.dumps(schema),
                   '--no-session-persistence']
+        prompt += report_format_instruction(schema)
         # Images (user attachments or reference images drawn by 采来) need the structured input.
         structured = bool(getattr(ctx, 'attachment_ids', []) or getattr(ctx, 'reference_images', None))
         if structured:
@@ -359,6 +428,7 @@ class ClaudeAdapter:
                 process.proc.stdin.write(prompt)
             process.proc.stdin.close()
             artifact_calls = {}
+            last_assistant_text = ''
             while True:
                 msg = process.receive(ctx)
                 kind = msg.get('type')
@@ -376,6 +446,10 @@ class ClaudeAdapter:
                 elif kind == 'assistant':
                     if hasattr(ctx, 'observe_message'):
                         ctx.observe_message(msg.get('message', {}))
+                    text_blocks = [block.get('text', '') for block in msg.get('message', {}).get('content', [])
+                                   if isinstance(block, dict) and block.get('type') == 'text']
+                    if text_blocks:
+                        last_assistant_text = '\n'.join(text_blocks)
                     for block in msg.get('message', {}).get('content', []):
                         if block.get('type') == 'tool_use':
                             ctx.event('処理: ' + str(block.get('name', 'tool')))
@@ -398,8 +472,23 @@ class ClaudeAdapter:
                         raise ProviderError('Claude共通Agentの起動確認を受け取れませんでした。')
                     if msg.get('is_error') or msg.get('subtype') != 'success':
                         raise ProviderError('Claude Code: ' + str(msg.get('result') or msg.get('errors') or msg.get('subtype'))[:1500])
-                    output = msg.get('structured_output')
-                    return output if isinstance(output, dict) else decode_result(msg.get('result', ''))
+                    try:
+                        return decode_claude_result(msg, schema, last_assistant_text)
+                    except ProviderError as exc:
+                        if exc.code == 'format':
+                            ctx.event('報告形式を回収できませんでした（構造化結果='
+                                      + ('有' if isinstance(msg.get('structured_output'), dict) else '無')
+                                      + '、結果の長さ=' + str(len(str(msg.get('result') or '')))
+                                      + '、最終本文の長さ=' + str(len(last_assistant_text)) + '）。')
+                            denied = msg.get('permission_denials')
+                            ctx.event('終了情報（内容は含まない）: subtype=' + str(msg.get('subtype'))[:40]
+                                      + ' stop_reason=' + str(msg.get('stop_reason'))[:40]
+                                      + ' terminal_reason=' + str(msg.get('terminal_reason'))[:40]
+                                      + ' num_turns=' + str(msg.get('num_turns'))[:10]
+                                      + ' 拒否された道具='
+                                      + (','.join(str(d.get('tool_name', '?'))[:30] for d in denied[:8] if isinstance(d, dict))
+                                         if isinstance(denied, list) and denied else 'なし'))
+                        raise
         finally:
             if process is not None:
                 process.close()
@@ -507,8 +596,8 @@ def schema_errors(value, schema, path=''):
 def copilot_answer(text, schema=None):
     """Copilot has no output-schema option, so the model may add a preface, a closing remark or a code fence around
     the JSON (2026-10-09: a security review failed only because of that). Take the JSON object from the text: the
-    whole text if it is one, otherwise the object in the text that best matches the schema (only the schema's keys,
-    the most of them; the last one on a tie). Missing keys are checked later by the engine as before."""
+    whole text if it is one, otherwise the object that best matches the schema. A complete match wins; extra keys
+    are allowed by the schema gate. Missing keys are checked later by the engine as before."""
     text = (text or '').strip()
     if text.startswith('```'):
         text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
@@ -517,7 +606,7 @@ def copilot_answer(text, schema=None):
     except ProviderError:
         pass
     keys = set((schema or {}).get('properties') or [])
-    decoder, best, best_score, index = json.JSONDecoder(), None, 0, text.find('{')
+    decoder, best, best_score, index = json.JSONDecoder(), None, (-1, 0), text.find('{')
     while index >= 0:
         try:
             value, end = decoder.raw_decode(text, index)
@@ -525,12 +614,14 @@ def copilot_answer(text, schema=None):
             index = text.find('{', index + 1)
             continue
         if isinstance(value, dict) and value:
-            score = len(keys & set(value)) if keys else len(value)
-            if (not keys or set(value) <= keys) and score >= best_score and score > 0:
+            known = len(keys & set(value)) if keys else len(value)
+            score = (int(bool(schema) and not schema_errors(value, schema)), known)
+            if known and score >= best_score:
                 best, best_score = value, score
         index = text.find('{', end)
     if best is None:
-        raise ProviderError('結果が指定のJSON形式ではありません。自動では次のタスクへ進めません。')
+        raise ProviderError('結果が指定のJSON形式ではありません。自動では次のタスクへ進めません。',
+                            'format')
     return best
 
 
@@ -606,9 +697,7 @@ class CopilotAdapter:
         session_id = str(uuid.uuid4())
         command = ctx.command + common + ['--session-id', session_id, '--available-tools=' + (','.join(allowed) or '__none__')] + mcp
         text = (ctx.agent_system_instructions + extra + '\n\n---\n\n' + prompt
-                + '\n\n---\n最終回答は、次のJSONスキーマに適合するJSONオブジェクトだけを出力してください。'
-                  'すべての項目を省略せずに含めてください（該当がなければ空文字・空の配列）。'
-                  '前置き・説明文・コードブロックは付けないでください。\n' + json.dumps(schema, ensure_ascii=False))
+                + report_format_instruction(schema, include_schema=True))
         env = os.environ.copy()
         env['COPILOT_AUTO_UPDATE'] = 'false'
         try:
@@ -623,6 +712,9 @@ class CopilotAdapter:
                 result, errors = None, ['結果（JSONとして読めない）']
             if not errors:
                 return result
+            if not allow_automatic_format_retry(ctx):
+                raise ProviderError('報告の形式を回収できませんでした（' + '、'.join(errors[:8])[:300]
+                                    + '）。成果は保持しました。追加のモデル実行は利用者の判断を待ちます。', 'format')
             # 2026-10-09 (user decision): the report must carry the same items whatever the model. Copilot has no
             # output-schema option, so a missing or malformed item is not filled in by 采来: the same model, in the
             # same conversation and without tools, is asked once to output its own report again in full.
@@ -659,6 +751,7 @@ class CopilotAdapter:
         require_safe_egress(text, 'copilot')
         process = None
         final, credits, premium = '', None, None
+        session_error = ''
         self._spent = (None, None)
         # Token counts are only in the CLI's usage file, written as the process ends (2026-10-09).
         usage_file = Path(cwd) / ('usage-' + uuid.uuid4().hex + '.json')
@@ -673,7 +766,8 @@ class CopilotAdapter:
                     msg = process.receive(ctx)
                 except ProviderError as exc:
                     detail = ''.join(process.stderr).strip()
-                    raise ProviderError('GitHub Copilot: ' + (detail[-800:] or str(exc))) from exc
+                    reason = ' '.join(part for part in (session_error, detail[-800:]) if part)
+                    raise ProviderError('GitHub Copilot: ' + (reason or str(exc))) from exc
                 kind = msg.get('type')
                 data = msg.get('data') or {}
                 if kind == 'tool.execution_start':
@@ -685,6 +779,14 @@ class CopilotAdapter:
                         ctx.count_tool(tool)  # agent_run.tool_calls, as for Claude
                 elif kind == 'assistant.message' and data.get('content'):
                     final = data['content']
+                elif kind == 'session.error':
+                    # 2026-10-19: the reason (e.g. "You have exceeded your monthly quota", errorCode quota_exceeded)
+                    # must reach the engine, or a usage limit / sign-in loss looks like a plain failure and the
+                    # Claude <-> Copilot failover never starts.
+                    session_error = ' '.join(str(data.get(k) or '') for k in ('message', 'errorCode', 'errorType')).strip()[:500]
+                    if data.get('errorCode') == 'quota_exceeded' or 'monthly quota' in str(data.get('message', '')):
+                        from team_usage import mark_copilot_exhausted
+                        mark_copilot_exhausted()   # the screen shows 0% (采来 counts only its own runs otherwise)
                 elif kind == 'session.usage_checkpoint':
                     if isinstance(data.get('totalNanoAiu'), (int, float)):
                         credits = data['totalNanoAiu'] / 1e9
@@ -695,7 +797,8 @@ class CopilotAdapter:
                     if isinstance(usage.get('premiumRequests'), (int, float)):
                         premium = usage['premiumRequests']
                     if msg.get('exitCode') != 0:
-                        raise ProviderError('GitHub Copilotの実行が完了しませんでした（終了コード ' + str(msg.get('exitCode')) + '）。')
+                        raise ProviderError('GitHub Copilotの実行が完了しませんでした（終了コード ' + str(msg.get('exitCode')) + '）。'
+                                            + ('理由: ' + session_error if session_error else ''))
                     return final
         finally:
             if process is not None:
@@ -762,9 +865,7 @@ class GeminiAdapter:
                 + ('\n\n---\n使える道具は project_read の list_files・read_file・search_files・read_document（読み取り専用）だけです。'
                    '回数に上限があるため、必要な読み取りだけにしてください。' if read_mcp else '')
                 + '\n\n---\n\n' + prompt
-                + '\n\n---\n最終回答は、次のJSONスキーマに適合するJSONオブジェクトだけを出力してください。'
-                  'すべての項目を省略せずに含めてください（該当がなければ空文字・空の配列）。'
-                  '前置き・説明文・コードブロックは付けないでください。\n' + json.dumps(schema, ensure_ascii=False))
+                + report_format_instruction(schema, include_schema=True))
         with tempfile.TemporaryDirectory(prefix='agent-team-gemini-') as root:
             home, work = Path(root) / 'home', Path(root) / 'work'
             (home / '.gemini' / 'policies').mkdir(parents=True)
@@ -791,6 +892,9 @@ class GeminiAdapter:
                     result, errors = None, ['結果（JSONとして読めない）']
                 if not errors:
                     return result
+                if not allow_automatic_format_retry(ctx):
+                    raise ProviderError('報告の形式を回収できませんでした（' + '、'.join(errors[:8])[:300]
+                                        + '）。成果は保持しました。追加のモデル実行は利用者の判断を待ちます。', 'format')
                 ctx.event('報告の項目が指定と違うため、同じモデルに形だけ直させます：' + '、'.join(errors[:8])[:400])
                 ask = (text + '\n\n---\n直前の回答は、指定のJSONスキーマに合っていません（' + '、'.join(errors[:20])
                        + '）。直前の回答:\n' + (answer or '')[:20000] + '\n\n調べ直さず、同じ内容を指定のスキーマに合うJSONオブジェクト'

@@ -52,4 +52,5 @@ class HttpTests(unittest.TestCase):
             value = json.load(response)
             self.assertEqual(value['record']['minutes'], 9)
             self.assertEqual(value['status'], 'accepted')
-        with self.request('/api/state') as response: self.assertEqual(json.load(response)['history']['hidden_jobs'], 53)
+        # The 10 most recently finished jobs stay on screen (team_history.MIN_RECENT_JOBS), so 53 - 10 are hidden.
+        with self.request('/api/state') as response: self.assertEqual(json.load(response)['history']['hidden_jobs'], 43)

@@ -138,3 +138,95 @@ select{max-width:100%;text-overflow:ellipsis}
 
 /* Warning text and icon accompany color; it is not an approval request. */
 .progress-warning{background:#fff3cd;color:#664d03;border:2px solid #b58100;border-radius:8px;padding:10px;margin:8px 0;text-align:left}.progress-warning p{margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}.progress-warning summary{cursor:pointer}
+
+/* P0 L1：標準画面と技術詳細の切り替え。既定は標準。技術的な情報（Provider・モデル・利用枠・内部ID）は tech-only の印で隠す。 */
+body:not([data-view="technical"]) .tech-only{display:none !important}
+.view-toggle[aria-pressed="true"]{background:#e8f0fe;border-color:#3b6fd4}
+.view-toggle:focus-visible{outline:3px solid #3b6fd4;outline-offset:2px}
+
+/* P0 L3：依頼の進み具合。状態は色だけでなく、記号（✓ ○ ×）と文字でも示す。 */
+.job-progress{margin:16px 0}
+.job-progress-card{border:1px solid #cdd5df;border-radius:8px;padding:14px 16px;margin:10px 0;background:#fff}
+.job-progress-card .card-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.job-progress-card h3{margin:0;font-size:1.05rem}
+.progress-lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 18px}
+.progress-group h4{margin:10px 0 4px;font-size:.95rem}
+.progress-group ul{margin:0;padding-left:0;list-style:none}
+.progress-group.unmet{border-left:4px solid #b3261e;padding-left:10px}
+.completion-status{font-weight:700}
+.business-summary{font-weight:700;margin:8px 0}
+.deliverable-row{margin:6px 0}
+.artifact-text{max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#f6f8fa;border:1px solid #cdd5df;border-radius:6px;padding:10px;margin:6px 0}
+.artifact-text:focus-visible{outline:3px solid #3b6fd4;outline-offset:2px}
+/* 依頼の一覧：1件1行。詳細は開いたときだけ出す。 */
+.job-row{border:1px solid #cdd5df;border-radius:8px;margin:6px 0;background:#fff}
+.job-row-head{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(150px,220px);gap:8px 14px;align-items:center;padding:10px 14px;cursor:pointer;list-style:none}
+.job-row-head::-webkit-details-marker{display:none}
+.job-row-head::after{content:"›";grid-column:4;grid-row:1;font-size:1.3rem;color:#5b6573;transition:transform .15s}
+.job-row[open]>.job-row-head::after{transform:rotate(90deg)}
+.job-row-head{grid-template-columns:minmax(0,1fr) auto minmax(150px,220px) 1rem}
+.job-row-title{margin:0;font-size:1rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job-row-progress{display:flex;flex-direction:column;gap:3px;font-size:.85rem;color:#3b4350}
+.job-row-progress progress{width:100%;height:8px}
+.job-row-body{border-top:1px solid #e3e8ee;padding:8px 16px 14px}
+.job-row-head:focus-visible{outline:3px solid #0b57d0;outline-offset:2px}
+.job-deliverables{margin:10px 0}
+.job-deliverables>summary{font-weight:600;cursor:pointer}
+.badge.unverified{background:var(--bg);color:var(--text);border:1px solid var(--line-strong)}
+@media (max-width:640px){.job-row-head{grid-template-columns:minmax(0,1fr) auto 1rem}.job-row-progress{grid-column:1 / -1;grid-row:2}}
+/* 依頼の一覧の配色：状態ごとに左の帯と見出しの色を変える。色だけに頼らず、状態の文字も出す。 */
+.job-row{--state:var(--line-strong);--state-bg:var(--surface-2);border-left:6px solid var(--state);background:var(--surface)}
+.job-row[data-state="running"],.job-row[data-state="retrying"]{--state:var(--blue);--state-bg:var(--blue-bg)}
+.job-row[data-state="decision"],.job-row[data-state="awaiting_acceptance"]{--state:var(--amber-line);--state-bg:var(--amber-bg)}
+.job-row[data-state="safety_blocked"],.job-row[data-state="failed"]{--state:var(--red);--state-bg:var(--red-bg)}
+.job-row[data-state="maintenance_required"],.job-row[data-state="blocked"]{--state:var(--muted);--state-bg:var(--surface-2)}
+.job-row[data-state="accepted"],.job-row[data-state="accepted_with_pending_checks"]{--state:var(--green);--state-bg:var(--green-weak)}
+.job-row-head{background:var(--state-bg);border-radius:0 7px 7px 0}
+.job-row[open]>.job-row-head{border-radius:0 7px 0 0}
+.job-row-count{font-weight:700;color:var(--text)}
+.job-row-progress progress{accent-color:var(--state)}
+.job-row-head .badge{background:var(--surface);border:1px solid var(--state);color:var(--text);font-weight:600}
+/* 詳細の中：完成済み・残り・未確認を色で分ける */
+.job-row-body .progress-lists{gap:10px 14px}
+.job-row-body .progress-group{border-radius:6px;padding:8px 12px;background:var(--surface-2)}
+.job-row-body .progress-group.done{background:var(--green-weak);border-left:4px solid var(--green)}
+.job-row-body .progress-group.done li{color:var(--green-strong)}
+.job-row-body .progress-group.unmet{background:var(--amber-bg);border-left:4px solid var(--amber-line);margin-top:10px}
+.job-row-body .progress-group h4{margin-top:0}
+/* 成果物：見出しを帯にし、行は交互に背景を変える（テレコ） */
+.job-deliverables{border:1px solid var(--line-strong);border-radius:6px;overflow:hidden;margin:12px 0;background:var(--surface)}
+.job-deliverables>summary{background:var(--blue-bg);color:var(--text);padding:8px 12px;font-weight:700;cursor:pointer}
+.job-deliverables>p.hint{margin:0;padding:8px 12px;border-bottom:1px solid var(--line)}
+.job-deliverables .deliverable-row{margin:0;padding:8px 12px;border-bottom:1px solid var(--line)}
+.job-deliverables .deliverable-row:nth-of-type(odd){background:var(--surface)}
+.job-deliverables .deliverable-row:nth-of-type(even){background:var(--surface-2)}
+.job-deliverables .deliverable-row:last-child{border-bottom:0}
+.job-deliverables .deliverable-row p{margin:0 0 6px}
+.job-deliverables .deliverable-row code{font-weight:600}
+.job-deliverables .deliverable-row button{margin-top:2px}
+.job-deliverables .deliverable-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+.job-deliverables .deliverable-row>p{flex:1 1 220px;margin:0}
+.job-deliverables .deliverable-row>button{flex:0 0 auto;margin:0}
+.job-deliverables .deliverable-row>pre,.job-deliverables .deliverable-row>p.hint,.job-deliverables .deliverable-row>p.form-error{flex:1 1 100%}
+/* 操作の承認：見出しと値を交互の背景で並べる。技術詳細は閉じておく。 */
+.tool-facts{display:grid;grid-template-columns:max-content 1fr;margin:8px 0;border:1px solid var(--line-strong);border-radius:6px;overflow:hidden}
+.tool-facts dt,.tool-facts dd{margin:0;padding:8px 12px;border-bottom:1px solid var(--line)}
+.tool-facts dt{font-weight:700;background:var(--blue-bg)}
+.tool-facts dd{background:var(--surface);overflow-wrap:anywhere}
+.tool-facts dt:nth-of-type(even),.tool-facts dd:nth-of-type(even){filter:brightness(.97)}
+.tool-facts dt:last-of-type,.tool-facts dd:last-of-type{border-bottom:0}
+.tool-raw{margin:8px 0}
+.tool-raw>summary{cursor:pointer;font-weight:600}
+@media (max-width:640px){.tool-facts{grid-template-columns:1fr}.tool-facts dt{border-bottom:0}}
+
+/* 2026-10-19 詳細のタブ（ジャンル分け）。失敗・停止のあるタブは赤、確認待ち・注意のあるタブは黄。 */
+.detail-tabs{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 4px;padding-bottom:8px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surface);z-index:1}
+.detail-tab{border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);border-radius:999px;padding:6px 14px;font-size:var(--fs-s,14px);cursor:pointer}
+.detail-tab[aria-selected="true"]{background:var(--green);border-color:var(--green);color:var(--on-accent);font-weight:700}
+.detail-tab.tab-attention{border:2px solid var(--amber-line);background:var(--amber-bg);color:var(--amber);font-weight:700}
+.detail-tab.tab-alert{border:2px solid var(--red);background:var(--red-bg);color:var(--red);font-weight:700}
+.detail-tab.tab-attention::before,.detail-tab.tab-alert::before{content:"● "}
+.detail-tab.tab-attention[aria-selected="true"]{background:var(--amber-line);border-color:var(--amber-line);color:var(--on-accent)}
+.detail-tab.tab-alert[aria-selected="true"]{background:var(--red);border-color:var(--red);color:var(--on-accent)}
+.detail-tab:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.detail-tab-panel[hidden]{display:none}

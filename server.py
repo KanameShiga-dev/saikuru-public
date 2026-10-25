@@ -196,6 +196,7 @@ class App:
 
     ENDED_JOB_STATUSES = ('accepted', 'accepted_with_pending_checks', 'cancelled')
     # Heavy parts of a finished job's tasks (most of the state's size): the screen reads them through task_detail().
+    MIN_RECENT_JOBS = 10
     SLIM_FIELDS = ('result', 'instruction', 'instruction_history', 'decision_record', 'agent_run_history', 'agent_run')
 
     @classmethod
@@ -233,7 +234,11 @@ class App:
             jobs_total, shown, tasks, approvals = cached[1]
         else:
             jobs = self.store.all('job')
-            shown = [j for j in jobs if j.get('status') not in self.ENDED_JOB_STATUSES or j.get('updated_at', 0) >= cutoff]
+            # At least the 10 most recently finished jobs stay on screen even when they are older than the window.
+            recent = {j['id'] for j in sorted((j for j in jobs if j.get('status') in self.ENDED_JOB_STATUSES),
+                                              key=lambda j: j.get('updated_at', 0), reverse=True)[:self.MIN_RECENT_JOBS]}
+            shown = [j for j in jobs if j.get('status') not in self.ENDED_JOB_STATUSES or j.get('updated_at', 0) >= cutoff
+                     or j['id'] in recent]
             # A finished job no longer changes: keep its slimmed tasks and approvals until the job itself changes,
             # and read only the shown jobs' rows (indexed by job_id) instead of decoding every task in the database.
             ended_cache = getattr(self, '_ended_cache', {})
@@ -1008,6 +1013,9 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('プロバイダ設定が不正です。')
                     config['provider_settings'] = {'enabled': settings.get('enabled'),
                                                    'copilot_monthly_credits': settings.get('copilot_monthly_credits')}
+                if 'auto_failover' in body:
+                    # 2026-10-19: Claude <-> Copilot automatic switch on/off (validated as a bool by validate_config).
+                    config['auto_failover'] = body['auto_failover']
                 for role in ('planner', 'builder', 'researcher', 'reviewer'):
                     item = body.get(role)
                     if not isinstance(item, dict):

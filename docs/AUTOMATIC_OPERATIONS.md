@@ -11,4 +11,6 @@
 DBのバックアップは `backup-20260928-125515-671998.sqlite3` と `handoff-backup-20260928-125515-671998.sqlite3`。
 戻す場合はサービス停止後、`automatic_operations` を `false` にして再起動する。
 
+> この記録は2026-09-28の設定変更記録であり、現在の稼働環境の値を証明するものではない。グローバル設定の適用範囲、専用ガード、自動許可・強制承認の現行実装は [AUTOMATIC_OPERATIONS_GUIDE.md](AUTOMATIC_OPERATIONS_GUIDE.md) を参照し、対象環境の実設定を別途確認する。
+
 テストスイートは未実行。
