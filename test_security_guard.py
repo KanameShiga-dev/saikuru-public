@@ -65,7 +65,7 @@ class OutboundGuardTests(unittest.TestCase):
     def test_credential_stores_are_denied(self):
         for command in ('cat ~/.ssh/id_rsa', 'type C:\\Users\\a\\.claude-sairai\\.credentials.json', 'cat .env',
                         'echo $env:AGENT_TEAM_RUN_TOKEN', 'printenv', 'cmdkey /list',
-                        'sqlite3 C:/AI_Work/operation/saikuru/data/team.sqlite3 .dump'):
+                        'sqlite3 C:/AI_WorkSpace/operation/saikuru/data/team.sqlite3 .dump'):
             with self.subTest(command=command):
                 self.assertEqual(classify(command)[2], 'deny')
 
@@ -135,7 +135,7 @@ class InputGuardTests(unittest.TestCase):
         self.assertEqual(require_clean_input(text, confirmed=True)['confirm'], ['メールアドレス', '電話番号'])
 
     def test_plain_request_passes(self):
-        self.assertEqual(scan_input('スキルの説明資料を PowerPoint で 16:9、15〜20枚で作る。C:\\Projects\\skills に保存。'),
+        self.assertEqual(scan_input('スキルの説明資料を PowerPoint で 16:9、15〜20枚で作る。C:\\AI_WorkSpace\\Legacy\\Projects\\skills に保存。'),
                          {'block': [], 'confirm': []})
 
     def test_card_number_uses_checksum(self):

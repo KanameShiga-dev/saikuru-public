@@ -13,7 +13,7 @@ class InboxCheckTests(unittest.TestCase):
 
     def test_inbox_paths_are_refused(self):
         for command in ('python skills/_inbox/new/run.py', 'python "' + ROOT + '/_inbox/new/run.py"',
-                        'type C:\\AI_Work\\operation\\saikuru\\skills\\_inbox\\x\\SKILL.md'):
+                        'type C:\\AI_WorkSpace\\operation\\saikuru\\skills\\_inbox\\x\\SKILL.md'):
             with self.subTest(command=command):
                 self.assertFalse(script_check(command, set())[0])
 

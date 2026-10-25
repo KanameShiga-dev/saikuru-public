@@ -12,16 +12,16 @@ import shutil
 from team_store import now
 
 root=Path(__file__).resolve().parent
-team_ledger.ROOT=Path('C:/Projects')
-team_harness.ROOT=Path('C:/Projects')
+team_ledger.ROOT=Path('C:/AI_WorkSpace/Legacy/Projects')
+team_harness.ROOT=Path('C:/AI_WorkSpace/Legacy/Projects')
 server_module.ROOT=root/'capture-runtime'
 shutil.copytree(root.parents[1]/'web',server_module.ROOT/'web',dirs_exist_ok=True)
 for display_file in (server_module.ROOT/'web').glob('*'):
     if display_file.suffix in ('.html','.js'):
-        text=display_file.read_text(encoding='utf-8').replace('C:\\AI_Work','C:\\Projects').replace('C:\AI_Work','C:\Projects')
+        text=display_file.read_text(encoding='utf-8').replace('C:\\AI_WorkSpace','C:\\AI_WorkSpace\\Legacy\\Projects').replace('C:\AI_WorkSpace','C:\AI_WorkSpace\Legacy\Projects')
         display_file.write_text(text,encoding='utf-8')
 data=root/'capture-data-anonymous'; data.mkdir(exist_ok=True)
-project=Path('C:/Projects/Demo'); project.mkdir(parents=True,exist_ok=True)
+project=Path('C:/AI_WorkSpace/Legacy/Projects/Demo'); project.mkdir(parents=True,exist_ok=True)
 (project/'README.md').write_text('# Demo project\nManual screenshot example.\n',encoding='utf-8')
 config=default_config(); config['approved_roots']=[str(project)]
 (data/'config.json').write_text(json.dumps(config,ensure_ascii=False,indent=2),encoding='utf-8')

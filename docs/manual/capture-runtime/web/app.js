@@ -629,7 +629,7 @@ function openFolders(create){
   $('folder-title').textContent=create?'新規プロジェクトのフォルダを作成':'既存フォルダを選択';
   $('folder-create-form').hidden=!create;$('folder-name').value='';
   $('folder-list').replaceChildren();$('folder-dialog').showModal();
-  folderAction(()=>loadFolder('C:\\AI_Work'));
+  folderAction(()=>loadFolder('C:\\AI_WorkSpace'));
 }
 $('choose-folder').addEventListener('click',()=>openFolders(false));
 $('new-folder').addEventListener('click',()=>openFolders(true));

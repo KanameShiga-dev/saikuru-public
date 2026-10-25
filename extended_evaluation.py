@@ -9,7 +9,7 @@ from team_adapters import ClaudeAdapter,Cancelled
 from team_config import discover
 from types import SimpleNamespace
 import uuid
-APP=Path('C:/AI_Work/Projects/Operations/HomeAppStatus')
+APP=Path('C:/AI_WorkSpace/Projects/Operations/HomeAppStatus')
 ACTIONS={'SEARCH':'Search alpha','RUNNING':'Filter 起動中','ALL':'Filter すべて','APPS':'Select アプリ状態 tab',
  'SCHEDULES':'Select 再起動・スケジュール tab','REFRESH':'Press 更新','NEXT':'Next page','PREVIOUS':'Previous page','STOP':'Stop without executing'}
 GOALS={'compound':'Show only alpha02 and alpha04, running, then open the schedules tab and read evaluation schedule.',

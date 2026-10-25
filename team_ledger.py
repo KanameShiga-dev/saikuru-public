@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 
-ROOT = Path(r'C:\AI_Work')
+ROOT = Path(r'C:\AI_WorkSpace')
 SKIP = {'.git', '.venv', 'venv', 'node_modules', 'library', 'temp', 'obj', 'bin',
         'build', 'builds', 'dist', 'out', 'data', 'backups', 'gacha-backups',
         '_archive', '_migration', '__pycache__', 'assets', 'packages', 'projectsettings',
@@ -37,7 +37,7 @@ def inside(path):
         raise ValueError('絶対パスを指定してください。')
     path = Path(path).resolve()
     if not path.is_relative_to(ROOT.resolve()):
-        raise ValueError('台帳の調査・登録範囲は C:\\AI_Work 以下です。')
+        raise ValueError('台帳の調査・登録範囲は C:\\AI_WorkSpace 以下です。')
     return path
 
 
@@ -254,7 +254,7 @@ class Ledger:
     def add(self, body):
         path = inside(body.get('path', ''))
         if not path.is_dir() or path == ROOT:
-            raise ValueError('C:\\AI_Work 以下の既存プロジェクトフォルダを指定してください。')
+            raise ValueError('C:\\AI_WorkSpace 以下の既存プロジェクトフォルダを指定してください。')
         with self.lock:
             self.backup()
             with self.db:
@@ -331,7 +331,7 @@ class Ledger:
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='C:\\AI_Work の開発プロジェクト台帳')
+    parser = argparse.ArgumentParser(description='C:\\AI_WorkSpace の開発プロジェクト台帳')
     parser.add_argument('action', choices=['scan', 'list', 'export', 'backup'])
     parser.add_argument('--data', type=Path, default=Path(__file__).parent / 'data')
     args = parser.parse_args()

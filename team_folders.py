@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from team_config import ROOT
 
-BASE = Path('C:/AI_Work').resolve()
+BASE = Path('C:/AI_WorkSpace').resolve()
 
 
 def folder(value):
