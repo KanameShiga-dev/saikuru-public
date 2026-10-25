@@ -183,7 +183,7 @@ def main():
     if args.allow_fixture_actions:
         temp_parent = ROOT.parent.resolve()
         if not temp_parent.is_relative_to(LEDGER_ROOT.resolve()):
-            raise ValueError('操作確認モードは C:/AI_Work 内の統合作業領域から起動してください。')
+            raise ValueError('操作確認モードは C:/AI_WorkSpace 内の統合作業領域から起動してください。')
     with tempfile.TemporaryDirectory(prefix='saikuru-p0-ui-api-', dir=temp_parent) as folder:
         server = make_server(args.port, Path(folder), args.allow_fixture_actions)
         print(server.app.origin, flush=True)
