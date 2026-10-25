@@ -7,9 +7,9 @@
 Python 3.11以上（このPCでは3.14）。外部Pythonパッケージは不要。
 
 ```powershell
-python -X utf8 C:\AI_Work\Projects\Operations\agent-team\manage.py start
-python -X utf8 C:\AI_Work\Projects\Operations\agent-team\manage.py status
-python -X utf8 C:\AI_Work\Projects\Operations\agent-team\manage.py stop
+python -X utf8 C:\AI_WorkSpace\Saikuru\App\manage.py start
+python -X utf8 C:\AI_WorkSpace\Saikuru\App\manage.py status
+python -X utf8 C:\AI_WorkSpace\Saikuru\App\manage.py stop
 ```
 
 画面: <http://127.0.0.1:8787>
@@ -25,14 +25,14 @@ Claude Desktopが使えていても、アプリ外から起動したCLIで認証
 利用者が次をターミナルで実行し、ブラウザ上の本人確認を完了する。
 
 ```powershell
-python -X utf8 C:\AI_Work\Projects\Operations\agent-team\manage.py login-claude
+python -X utf8 C:\AI_WorkSpace\Saikuru\App\manage.py login-claude
 ```
 
 `auth login --claudeai` を使用する。ConsoleのAPI従量課金への切替や、認証情報のコピーは行わない。
 ログイン後はサービスを停止・再起動して画面の状態を更新し、次の接続確認を行う。
 
 ```powershell
-python -X utf8 C:\AI_Work\Projects\Operations\agent-team\probe_live.py claude
+python -X utf8 C:\AI_WorkSpace\Saikuru\App\probe_live.py claude
 ```
 
 プローブも実際のCLI利用枠を消費する。合成入力のみを送り、ツール操作は拒否する。

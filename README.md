@@ -38,7 +38,7 @@ Codex・Claudeの実モデルからの構造化結果取得を確認済み。二
 
 ## 移行との関係
 
-`C:\AI_Work\_migration` の差し替え・移動計画は承認待ちのままです。
+`C:\AI_WorkSpace\.local\migration\previous-migration` の差し替え・移動計画は承認待ちのままです。
 現行の共通方針と各プロジェクトの指示を尊重し、下書きを適用済みとみなしません。
 `Restore-CodexPolicy.ps1` は実行しません。
 

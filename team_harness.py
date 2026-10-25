@@ -66,7 +66,7 @@ def _project_path(path):
     lexical = Path(os.path.abspath(raw))
     root = ROOT.resolve()
     if not lexical.is_relative_to(root):
-        raise ValueError('プロジェクトは C:\\AI_Work 以下に限ります。')
+        raise ValueError('プロジェクトは C:\\AI_WorkSpace 以下に限ります。')
     current = lexical
     while current != root:
         if current.exists() and _is_reparse(current):

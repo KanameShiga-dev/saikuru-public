@@ -17,7 +17,7 @@ from types import MappingProxyType
 from datetime import datetime
 
 
-APPROVED_BASE = Path(r'C:\AI_Work\studyWork\saikuru-no007-g123-test-20261017')
+APPROVED_BASE = Path(r'C:\AI_WorkSpace\Saikuru\Work\Sessions\saikuru-no007-g123-test-20261017')
 SOURCE_NAMES = ('safe_server.py', 'safe_start_runtime.py', 'web/safe-start.html')
 MAX_SNAPSHOT = 128 * 1024 * 1024
 HEX256 = re.compile(r'[0-9a-f]{64}\Z')
