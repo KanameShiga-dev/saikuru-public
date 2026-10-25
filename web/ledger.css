@@ -63,3 +63,13 @@ main{max-width:1440px}
 #development-issues form { max-width: 800px; padding: 12px; }
 #development-issues form label { display: block; margin: 8px 0; }
 #development-issues form input, #development-issues form textarea, #development-issues form select { display: block; width: 100%; }
+
+/* 2026-10-19 指示ファイルの有無・容量確認：1行の要約にして折りたたむ。不足・警告があるときは黄色で開く。 */
+#instruction-health{margin:4px 0 8px}
+.instruction-health-fold{border:1px solid var(--line);border-radius:8px;padding:4px 10px;background:var(--surface-2);font-size:var(--fs-s,14px)}
+.instruction-health-fold>summary{cursor:pointer;padding:2px 0;list-style-position:inside}
+.instruction-health-fold>summary strong{margin-right:4px}
+.instruction-health-fold[open]>summary{margin-bottom:4px}
+.instruction-health-fold>p{margin:4px 0}
+.instruction-health-fold.warning{border:2px solid var(--amber-line);background:var(--amber-bg)}
+.instruction-health-fold.warning>summary{color:var(--amber)}

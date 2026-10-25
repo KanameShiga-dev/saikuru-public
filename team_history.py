@@ -45,7 +45,16 @@ def snapshot(app, job_id='', before=0):
         value = {k: job.get(k) for k in fields}
         value['origin'] = origins.get(job['id'], {'kind': job.get('request_origin', 'unrecorded')})
         jobs.append(value)
-    records = {t['id']: t for t in (app.store.for_job('task', job_id) if job_id else app.store.all('task'))}
+    if job_id:
+        records = {t['id']: t for t in app.store.for_job('task', job_id)}
+    else:
+        # The list only needs each job's task count; decoding every task made the page take tens of seconds.
+        records = {}
+        with app.store.lock:
+            counts = dict(app.store.db.execute(
+                "SELECT json_extract(body,'$.job_id'), COUNT(*) FROM objects WHERE kind='task' GROUP BY 1"))
+        for value in jobs:
+            value['task_count'] = counts.get(value['id'], 0)
     tasks = [{k: task.get(k) for k in ('id', 'job_id', 'title', 'role', 'status', 'profile',
               'created_at', 'started_at', 'finished_at', 'updated_at', 'attempt', 'summary')}
              for task in records.values()]

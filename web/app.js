@@ -572,8 +572,66 @@ function watchClaudeLogin(){
 function section(title,text) { const s=el('section',undefined,'detail-section');s.append(el('h3',title),el('div',text,'text-block'));return s; }
 const detailFolds=new Map();let renderedDetailTask=null;
 function revealSection(node){
+  const panel=node.closest?.('.detail-tab-panel');if(panel)activateDetailTab(panel.closest('#detail-body')||document,panel.dataset.tab);
   for(let parent=node.parentElement;parent;parent=parent.parentElement)if(parent.tagName==='DETAILS')parent.open=true;
 }
+// 2026-10-19 （利用者の要望）縦に長い詳細を、ジャンルごとのタブに分ける。区画の中身は作り終えたあとで振り分けるだけで、
+// 各区画の処理（回答・承認・再開など）は変えない。失敗・停止のあるタブは赤、確認待ち・注意のあるタブは黄にする。
+const DETAIL_TABS=[['action','対応'],['result','結果'],['request','依頼・指示'],['run','実行記録'],['usage','使用量'],['handoff','引き継ぎ']];
+const detailTabs=new Map();
+function detailTabOf(node){
+  const title=(node.querySelector?.(':scope > summary')?.textContent||node.querySelector?.(':scope > h3')?.textContent||node.textContent||'').trim().slice(0,60);
+  if(/CLIトークン|入力サイズ|参考情報の画像化/.test(title))return 'usage';
+  if(/Agentの実行情報|過去のAgent実行|判断レイヤー|共通Skill|一時モデル|担当する共通Agent|実行時に共通定義|旧方式/.test(title))return 'run';
+  if(/引き継ぎ情報を登録|引き継ぎDB/.test(title))return 'handoff';
+  if(/今回の作業|対象と元の依頼|過去の指示|一次分類|添付ファイル|指示ファイルの容量|効果検証用|スキル/.test(title))return 'request';
+  if(/担当の報告|^状況|成果物$|この依頼の成果物|Artifact|判断の履歴|引き継ぎ範囲|この依頼は終了/.test(title))return 'result';
+  return 'action';
+}
+function activateDetailTab(body,key){
+  const bar=body.querySelector?.('.detail-tabs');if(!bar)return;
+  for(const tab of bar.querySelectorAll('[role=tab]')){const on=tab.dataset.tab===key;tab.setAttribute('aria-selected',String(on));tab.tabIndex=on?0:-1;}
+  for(const panel of body.querySelectorAll('.detail-tab-panel'))panel.hidden=panel.dataset.tab!==key;
+  if(renderedDetailTask)detailTabs.set(renderedDetailTask,key);
+}
+function tabifyDetail(body,task){
+  const nodes=[...body.children],header=[];
+  // The first lines (担当・モデル・試行、状態) stay above the tabs.
+  while(nodes.length&&nodes[0].tagName==='P'&&header.length<2)header.push(nodes.shift());
+  const panels=new Map(DETAIL_TABS.map(([key])=>{const panel=el('div',undefined,'detail-tab-panel');panel.dataset.tab=key;panel.setAttribute('role','tabpanel');return [key,panel];}));
+  for(const node of nodes)panels.get(detailTabOf(node)).append(node);
+  const bar=el('div',undefined,'detail-tabs');bar.setAttribute('role','tablist');bar.setAttribute('aria-label','詳細の表示の切り替え');
+  const used=DETAIL_TABS.filter(([key])=>panels.get(key).children.length);
+  let alertKey=null,attentionKey=null;
+  for(const [key,label] of used){
+    const panel=panels.get(key),tab=el('button',label,'detail-tab');tab.type='button';tab.dataset.tab=key;tab.setAttribute('role','tab');
+    const tabId='detail-tab-'+key;tab.id=tabId;panel.id='detail-panel-'+key;panel.setAttribute('aria-labelledby',tabId);tab.setAttribute('aria-controls',panel.id);
+    const shownNodes=[...panel.children].filter(node=>document.body.dataset.view==='technical'||!node.classList.contains('tech-only'));
+    const has=selector=>shownNodes.some(node=>node.matches(selector)||node.querySelector(selector));
+    const alert=has('.failure-fold,.stop-fold,#failure-card,.failure-card');
+    const attention=!alert&&has('.approval-box,.stop-reason-box,.notice,#decision-guide');
+    if(alert){tab.classList.add('tab-alert');tab.title='失敗・停止があります';alertKey??=key;}
+    else if(attention){tab.classList.add('tab-attention');tab.title='確認待ち・注意があります';attentionKey??=key;}
+    tab.addEventListener('click',()=>activateDetailTab(body,key));
+    tab.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight'].includes(event.key))return;event.preventDefault();const tabs=[...bar.querySelectorAll('[role=tab]')].filter(t=>document.body.dataset.view==='technical'||!t.classList.contains('tech-only'));
+      const next=tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length];next.focus();activateDetailTab(body,next.dataset.tab);});
+    if([...panel.children].every(node=>node.classList.contains('tech-only')))tab.classList.add('tech-only');
+    bar.append(tab);
+  }
+  body.replaceChildren(...header,bar,...used.map(([key])=>panels.get(key)));
+  const visible=used.filter(([key])=>document.body.dataset.view==='technical'||!bar.querySelector('[data-tab="'+key+'"]').classList.contains('tech-only'));
+  const keys=visible.map(([key])=>key),saved=detailTabs.get(task.id);
+  if(!keys.includes(alertKey))alertKey=null;if(!keys.includes(attentionKey))attentionKey=null;
+  activateDetailTab(body,keys.includes(saved)?saved:(alertKey||attentionKey||(keys.includes('result')?'result':keys[0])));
+}
+$('view-toggle')?.addEventListener('click',()=>{
+  if(document.body.dataset.view==='technical')return;
+  const body=$('detail-body'),bar=body.querySelector('.detail-tabs');if(!bar)return;
+  if(bar.querySelector('[aria-selected="true"]')?.classList.contains('tech-only')){
+    const first=[...bar.querySelectorAll('[role=tab]')].find(tab=>!tab.classList.contains('tech-only'));
+    if(first)activateDetailTab(body,first.dataset.tab);
+  }
+});
 function foldDetailSections(body,task){
   const previous=detailFolds.get(task.id)||{signature:null,open:{}};
   const requests=endedJob(task)?[]:pending(task.id);
@@ -1054,7 +1112,7 @@ function renderDetail(task,version) {
   const focusedId=dialogHadFocus?document.activeElement.id:'';
   const checkedBoxes={};$('detail-body').querySelectorAll('input[type=checkbox][id]').forEach(c=>checkedBoxes[c.id]=c.checked);
   if(task.slim){loadTaskDetail(task);$('detail-title').textContent=task.title;$('detail-body').replaceChildren(el('p','詳細を読み込み中…'));renderedDetailTask=null;return;}
-  if(renderedDetailTask){const saved=detailFolds.get(renderedDetailTask);if(saved)$('detail-body').querySelectorAll(':scope > details[data-fold-key]').forEach(d=>saved.open[d.dataset.foldKey]=d.open);}
+  if(renderedDetailTask){const saved=detailFolds.get(renderedDetailTask);if(saved)$('detail-body').querySelectorAll('details[data-fold-key]').forEach(d=>saved.open[d.dataset.foldKey]=d.open);}
   renderedDetailTask=task.id;
   const drafts={};$('detail-body').querySelectorAll('textarea').forEach(t=>drafts[t.id]=t.value);
   detailVersion=version;const job=state.jobs.find(j=>j.id===task.job_id);$('detail-title').textContent=task.title;
@@ -1272,12 +1330,13 @@ function renderDetail(task,version) {
     const status=section('いまの状況',phase.label+'\n'+detail+(job.p0_progress?.next_action?'\n次の動作：'+job.p0_progress.next_action:''));
     status.classList.add('p0-status');status.setAttribute('role','status');body.prepend(status);
   }
+  tabifyDetail(body,task);
   // 描き直しで、操作中のボタンが差し替わりフォーカスを失ったときは、承認の枠の見出し（無ければ詳細の題名）へ移す。
   if(dialogHadFocus&&(!$('detail-dialog').contains(document.activeElement)||document.activeElement===$('detail-dialog'))){
     const same=focusedId&&document.getElementById(focusedId);
     const target=same&&body.contains(same)?same:((approvalSummary(body)||body.querySelector('.approval-box h3'))||$('detail-title'));
     if(target!==same)target.tabIndex=-1;
-    target.focus();
+    revealSection(target);target.focus();
   }
 }
 // 2026-10-08 カードを開くたびに折りたたみを初期状態（停止理由を開く）から始める。以前の開閉を引き継ぐと、停止後も閉じたままになっていた。
@@ -1291,7 +1350,7 @@ function restoreFocus(key){
   if(target){target.focus({preventScroll:true});focusPending=false;}
 }
 let focusReturn=null;
-function openTask(id){focusReturn=document.activeElement?.dataset?.focusKey||null;selected=id;detailVersion='';detailFolds.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();
+function openTask(id){focusReturn=document.activeElement?.dataset?.focusKey||null;selected=id;detailVersion='';detailFolds.delete(id);detailTabs.delete(id);if(renderedDetailTask===id)renderedDetailTask=null;const t=state.tasks.find(t=>t.id===id);renderDetail(t,'');if(!$('detail-dialog').open)$('detail-dialog').showModal();
   // 利用者の判断を待つ作業を開いたときは、最初のフォーカスを承認欄に置く（閉じるボタンから十数回Tabを押さずに済む）。
   if(pendingUser(id).length)focusApproval();}
 // 承認欄の見出し（折りたたみの要約）。折りたたんだ後は h3 が要約に移るため、要約を探す。
@@ -1303,7 +1362,7 @@ function focusApproval(){
   const body=$('detail-body'),box=body.querySelector('.approval-box,[data-user-decision]');if(!box)return false;
   const target=approvalSummary(body)||box.querySelector('textarea,button')||box;
   if(target===box)box.tabIndex=-1;
-  target.focus();return true;
+  revealSection(target);target.focus();return true;
 }
 // 詳細を閉じたら、開いたボタンの位置へフォーカスを戻す（画面の描き直しで要素が差し替わっても、印（data-focus-key）で探す）。
 // 見つからない（判断が済んで項目が消えた）ときは、進み具合の見出し、無ければ作業ボードへ戻す。
@@ -1338,7 +1397,7 @@ function restoreDetailFocus(){
   const body=$('detail-body'),same=lastDetailFocus&&document.getElementById(lastDetailFocus);
   const target=same&&body.contains(same)?same:((approvalSummary(body)||body.querySelector('.approval-box h3'))||$('detail-title'));
   if(target!==same)target.tabIndex=-1;
-  target.focus();
+  revealSection(target);target.focus();
 }
 function hideBusy(){if(busyCount>0&&--busyCount===0){clearInterval(busyTimer);if(busyDialog.open)busyDialog.close();setTimeout(restoreDetailFocus,0);}}
 function refresh(){
@@ -1785,6 +1844,13 @@ $('settings-open').addEventListener('click',()=>{
   creditsLabel.append(credits);creditsLabel.hidden=!enabledProviders().includes('copilot');
   providerBox.append(creditsLabel,el('p','使用しないプロバイダは、担当の選択肢・利用枠表示・残量取得から外れます。GitHub Copilotは計画・実装・レビュー担当と相談で使えます（道具は采来の確認付きのものだけ。調査担当は不可）。残り％は采来から実行した分の消費で計算します。Copilotのモデル名の（約○クレジット/回）は、短い問いかけ1回の実測値です。実際の作業では、読み込む資料の量や回答の長さに応じて数倍〜数十倍になります。','hint'));
   $('profile-inputs').append(providerBox);
+  // 2026-10-19 Claude ⇔ GitHub Copilot の自動の切り替えのオン・オフ（既定はオン）。
+  const failoverBox=el('fieldset',undefined,'provider-choice');failoverBox.append(el('legend','自動の切り替え'));
+  const failoverLabel=el('label',undefined,'check'),failover=el('input');failover.type='checkbox';failover.name='auto-failover';failover.id='auto-failover';
+  failover.checked=state.config.auto_failover!==false;
+  failoverLabel.append(failover,el('span','Claude と GitHub Copilot を自動で切り替える（ログイン切れ・利用上限・枠切れのとき）'));
+  failoverBox.append(failoverLabel,el('p','担当が止まったとき、または使うサービスの枠を使い切っていると分かっているときに、もう一方のサービスで続けます（始める前の切り替えは通知します）。自動で切り替えるのは、データ分類が公開・社内の依頼だけです。オフにすると切り替えずに待機または停止します。中止や手動の切り替えを判断したいときはオフにしてください。','hint'));
+  $('profile-inputs').append(failoverBox);
   for(const role of Object.keys(roles)){
     const p=state.config.profiles[state.config.roles[role]],row=el('div',undefined,'profile-row');row.append(el('span',roles[role]));
     const provider=el('select');provider.name=role+'-adapter';provider.setAttribute('aria-label',roles[role]+'の担当');provider.append(new Option(providerShortLabels[p.adapter],p.adapter));provider.value=p.adapter;
@@ -1857,6 +1923,7 @@ $('profiles-form').addEventListener('submit',e=>{
   for(const role of Object.keys(roles))data[role]={adapter:f.get(role+'-adapter'),model:f.get(role+'-model'),effort:f.get(role+'-effort')};
   const credits=String(f.get('copilot-credits')||'').trim();
   data.provider_settings={enabled:checkedProviders(),copilot_monthly_credits:credits?Number(credits):null};
+  data.auto_failover=f.has('auto-failover');
   $('models-save').disabled=true;
   api('/api/profiles',data).then(async()=>{await refresh();notice('今後作成するタスクのモデル設定を保存しました。');$('settings-dialog').close();}).catch(e=>{$('models-message').textContent=e.message;}).finally(modelSaveState);
 });

@@ -302,20 +302,26 @@ function showEditor(){const ed=$('editor');ed.hidden=false;$('editor-placeholder
 function hideEditor(){$('editor').hidden=true;$('editor-placeholder').hidden=false;markSelected();}
 function markSelected(){for(const card of document.querySelectorAll('#list .project')){const b=card.querySelector('button[data-project-id]'),on=!$('editor').hidden&&b?.dataset.projectId===selected?.id;card.classList.toggle('selected',on);if(b){if(on)b.setAttribute('aria-current','true');else b.removeAttribute('aria-current');}}}
 let instructionRequest=0;const instructionReports=new Map();
+// 2026-10-19 （利用者の要望）表示が場所をとりすぎるため、1行の要約にまとめ、説明・ファイル別の容量・再確認は折りたたむ。
+// 不足や警告があるときだけ、黄色の印をつけて最初から開く。
 function showInstructionHealth(report){
  const box=$('instruction-health');box.replaceChildren();
- const heading=node('strong','指示ファイルの有無・容量確認');box.append(heading);
- if(report.presence)box.append(node('p',report.presence.message,report.presence.status==='both_present'?'':'archive-warning'));
- box.append(node('p','判定はプロジェクト直下の指示ファイルです。親・共通指示の継承、代替名、AIの実際の読み込みは別途確認してください。'));
- const format=b=>`${(b/1024).toFixed(1)} KiB（${b.toLocaleString()} bytes）`;
- box.append(node('p',`Codex上限候補：${format(report.codex_limit_bytes)} ／ 階層合計の最大候補：${format(report.codex_candidate_max_bytes||0)}。${report.limit_basis}`));
- for(const w of (report.warnings||[]).filter(w=>!['missing_instructions','presence_unknown'].includes(w.code)))box.append(node('p','警告：'+w.message,'archive-warning'));
- if(!(report.warnings||[]).length)box.append(node('p','確認した範囲にサイズ警告はありません。実際に全指示が読まれたことは未確認です。'));
- box.append(node('p',report.hint));
- const details=node('details');details.append(node('summary','ファイル別の容量・行数と確認範囲'));
- for(const f of report.files||[])details.append(node('p',`${f.path}：${format(f.bytes)} ／ ${f.lines===null?'行数未確認':f.lines+'行'}`,'path'));
- details.append(node('p',`Claude Codeは200行未満を推奨。200行は読み込み打ち切りではありません。CLAUDE.mdは4 MiB超で読み込み対象外（現在の公式仕様）。確認：${report.checked_at}。${report.scope}。${report.note||''}`));box.append(details);
- const retry=node('button','容量を再確認');retry.type='button';retry.onclick=()=>refreshInstructionHealth(selected);box.append(retry);
+ const format=b=>`${(b/1024).toFixed(1)} KiB（${b.toLocaleString()} bytes）`,short=b=>`${(b/1024).toFixed(1)} KiB`;
+ const sizeWarnings=(report.warnings||[]).filter(w=>!['missing_instructions','presence_unknown'].includes(w.code));
+ const presenceOk=!report.presence||report.presence.status==='both_present',problem=!presenceOk||sizeWarnings.length>0;
+ const fold=node('details',undefined,'instruction-health-fold'+(problem?' warning':''));fold.open=problem;
+ const parts=[presenceOk?'両方あり':(report.presence?.message||'指示ファイルの不足').replace(/。$/,''),sizeWarnings.length?`サイズ警告 ${sizeWarnings.length}件`:'サイズ警告なし'];
+ const summary=node('summary');summary.append(node('strong',(problem?'⚠ ':'✓ ')+'指示ファイル：'),document.createTextNode(parts.join('・')+`（最大 ${short(report.codex_candidate_max_bytes||0)}／上限候補 ${short(report.codex_limit_bytes)}）`));
+ fold.append(summary);
+ if(report.presence&&!presenceOk)fold.append(node('p',report.presence.message,'archive-warning'));
+ for(const w of sizeWarnings)fold.append(node('p','警告：'+w.message,'archive-warning'));
+ if(!sizeWarnings.length)fold.append(node('p','確認した範囲にサイズ警告はありません。実際に全指示が読まれたことは未確認です。'));
+ fold.append(node('p',`Codex上限候補：${format(report.codex_limit_bytes)} ／ 階層合計の最大候補：${format(report.codex_candidate_max_bytes||0)}。${report.limit_basis}`));
+ fold.append(node('p','判定はプロジェクト直下の指示ファイルです。親・共通指示の継承、代替名、AIの実際の読み込みは別途確認してください。'),node('p',report.hint));
+ for(const f of report.files||[])fold.append(node('p',`${f.path}：${format(f.bytes)} ／ ${f.lines===null?'行数未確認':f.lines+'行'}`,'path'));
+ fold.append(node('p',`Claude Codeは200行未満を推奨。200行は読み込み打ち切りではありません。CLAUDE.mdは4 MiB超で読み込み対象外（現在の公式仕様）。確認：${report.checked_at}。${report.scope}。${report.note||''}`));
+ const retry=node('button','容量を再確認');retry.type='button';retry.onclick=()=>refreshInstructionHealth(selected);fold.append(retry);
+ box.append(fold);
 }
 async function refreshInstructionHealth(p){
  if(!p)return;const request=++instructionRequest;

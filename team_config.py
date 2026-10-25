@@ -133,6 +133,7 @@ def default_config():
         'security_review': 'always',
         'review_context_mode': 'off',
         'document_review_relaxed': False,
+        'auto_failover': True,   # Claude <-> Copilot automatic switch (2026-10-19: the user can turn it off)
         'task_timeout_seconds': 1800,
         'approval_timeout_seconds': 900,
         'max_repairs': 2,
@@ -198,6 +199,8 @@ def validate_config(config):
         raise ValueError('操作自動承認の設定は真偽値で指定してください。')
     if type(config.get('document_review_relaxed', False)) is not bool:
         raise ValueError('document_review_relaxed は真偽値を指定してください。')
+    if type(config.get('auto_failover', True)) is not bool:
+        raise ValueError('自動の切り替えの設定は真偽値で指定してください。')
     review_context_mode = config.get('review_context_mode', 'off')
     if review_context_mode not in ('off', 'shadow', 'on'):
         raise ValueError('レビュー文脈の評価モードが不正です。')

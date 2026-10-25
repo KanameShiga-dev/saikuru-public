@@ -14,13 +14,15 @@ from team_engine import Engine, REPAIR_RULE, repair_instruction
 from team_store import Store
 
 PLAN = {'summary': '計画', 'tasks': [{'title': '作る', 'instruction': '作ってテストする', 'role': 'builder'}],
-        'security_review_required': False,
+        'security_review_required': False, 'warnings': [],
         # Plans for new development jobs must carry a code-test decision; these jobs change no real code.
         'code_test_plan': {'required': False, 'reason': '架空のテスト用の計画。実コードの変更なし。',
                            'cases': [], 'command': '', 'existing_tests': []}}
-DONE = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格'], 'pending_checks': [], 'question': ''}
+DONE = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格'], 'pending_checks': [], 'question': '',
+        'warnings': [], 'stage_complete': True, 'blocking_reasons': []}
 NO_EVIDENCE = {'status': 'blocked', 'summary': '修正後のテスト結果がないため完了と判定できない。',
-               'checks': ['後続確認：現行版でunittestを実行する'], 'pending_checks': ['現行版でunittestを実行する'], 'question': ''}
+               'checks': ['後続確認：現行版でunittestを実行する'], 'pending_checks': ['現行版でunittestを実行する'], 'question': '',
+               'warnings': [], 'stage_complete': False, 'blocking_reasons': []}
 QUESTION = {'id': 'q1', 'text': '出力先を変えてよいですか', 'options': [
     {'id': 'yes', 'label': '変えてよい', 'input_required': False, 'input_label': ''}]}
 
@@ -45,12 +47,20 @@ class InstructionTextTest(unittest.TestCase):
 class ReviewFlowTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        Path(self.temp.name, 'SCOPE.md').write_text('# Synthetic Scope\n\nOnly synthetic test files.\n', encoding='utf-8')
         self.store = Store(self.temp.name)
         config = default_config()
+        # Exercise the legacy review/repair flow with the current explicit G2/G3 gates.
+        config['p0_contract_enabled'] = False
         config['approved_roots'] = [self.temp.name]
         config['security_review'] = 'planner'
         self.engine = Engine(self.store, config, {'codex': ['fixture'], 'claude': ['fixture']}, 'http://127.0.0.1:1')
         self.saved = ADAPTERS.copy()
+
+    def approve_fixture_gates(self, job_id):
+        for approval in self.store.for_job('approval', job_id):
+            if approval['status'] == 'pending' and approval['kind'] in ('ai_start', 'plan'):
+                self.engine.decide(approval['id'], True, 'Synthetic approval for this offline test')
 
     def tearDown(self):
         self.engine.shutdown.set()
@@ -70,6 +80,7 @@ class ReviewFlowTest(unittest.TestCase):
         job = self.engine.create_job('開発', 'ツールを作る', self.temp.name, True)
         deadline = time.time() + 30
         while self.store.get(job['id'])['status'] not in ('awaiting_acceptance', 'blocked', 'failed') and time.time() < deadline:
+            self.approve_fixture_gates(job['id'])
             self.engine.tick()
             time.sleep(.01)
         return self.store.get(job['id'])
@@ -107,6 +118,76 @@ class ReviewFlowTest(unittest.TestCase):
         fixes = [t for t in self.store.all('task') if t['title'] == 'レビュー指摘を修正する']
         self.assertEqual(len(fixes), self.engine.config['max_repairs'])
         self.assertTrue(any(e['type'] == 'repair_limit' for e in self.store.events(500)))
+
+    def run_with_builder(self, review, builder, answer_handoff=False):
+        class Fixture:
+            def run(s, ctx, prompt, schema):
+                if ctx.task['role'] == 'planner':
+                    return PLAN
+                if ctx.task['role'] == 'reviewer':
+                    return review(ctx.task)
+                return builder(ctx)
+        ADAPTERS.update(codex=Fixture, claude=Fixture)
+        job = self.engine.create_job('開発', 'ツールを作る', self.temp.name, True)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            status = self.store.get(job['id'])['status']
+            pending = [a for a in self.store.all('approval') if a['status'] == 'pending' and a['kind'] == 'question']
+            if status == 'blocked' and answer_handoff and pending:
+                if self.engine.active:
+                    time.sleep(.01)
+                    continue
+                # The user answers the existing handoff question: leave the items unfinished and go on.
+                self.engine.decide(pending[0]['id'], True, '', answers={'handoff_scope_decision': {'option_id': 'leave', 'text': ''}})
+                continue
+            if status in ('awaiting_acceptance', 'blocked', 'failed'):
+                break
+            self.approve_fixture_gates(job['id'])
+            self.engine.tick()
+            time.sleep(.01)
+        return self.store.get(job['id'])
+
+    def record_run(self, ctx):
+        ctx.command_result('python -m unittest', 0, 'OK')
+        return DONE
+
+    def test_repair_without_recorded_run_is_sent_back_once_before_review(self):
+        # 2026-10-14: a repair that reports done without a run 采来 recorded goes back to the same assignee once.
+        job = self.run_with_builder(lambda task: NO_EVIDENCE if task['repair'] == 0 else DONE,
+                                    lambda ctx: self.record_run(ctx) if not ctx.task['repair'] else DONE)
+        self.assertEqual(job['status'], 'awaiting_acceptance')
+        fix = next(t for t in self.store.all('task') if t['title'] == 'レビュー指摘を修正する')
+        self.assertTrue(fix['evidence_gate_retried'])
+        self.assertIn('証拠の点検', fix['instruction'])
+        self.assertEqual(sum(e['type'] == 'evidence_gate_retry' for e in self.store.events(500)), 1)
+
+    def test_repair_with_recorded_run_goes_straight_to_review(self):
+        job = self.run_with_builder(lambda task: NO_EVIDENCE if task['repair'] == 0 else DONE, self.record_run)
+        self.assertEqual(job['status'], 'awaiting_acceptance')
+        self.assertFalse(any(e['type'] == 'evidence_gate_retry' for e in self.store.events(500)))
+
+    def test_job_without_command_runs_is_not_gated(self):
+        job = self.run_job(lambda task: NO_EVIDENCE if task['repair'] == 0 else DONE)
+        self.assertEqual(job['status'], 'awaiting_acceptance')
+        self.assertFalse(any(e['type'] == 'evidence_gate_retry' for e in self.store.events(500)))
+
+    def test_finding_the_repair_cannot_fix_stops_instead_of_repeating(self):
+        # 2026-10-14: the repair assignee said it cannot fix the finding; another automatic repair would repeat it.
+        handoff = {'status': 'handoff', 'summary': '操作記録はこの担当から編集できません。', 'checks': ['未実施：記録の伏字化'],
+                   'pending_checks': [], 'question': '', 'warnings': [], 'stage_complete': False, 'blocking_reasons': []}
+        job = self.run_with_builder(lambda task: NO_EVIDENCE, lambda ctx: dict(handoff) if ctx.task['repair'] else DONE, answer_handoff=True)
+        self.assertEqual(job['status'], 'blocked')
+        fixes = [t for t in self.store.all('task') if t['title'] == 'レビュー指摘を修正する']
+        self.assertEqual(len(fixes), 1)
+        events = [e['type'] for e in self.store.events(500)]
+        self.assertIn('repair_unfixable', events)
+        self.assertNotIn('repair_limit', events)
+        review = next(t for t in self.store.all('task') if t['role'] == 'reviewer' and t['repair'] == 1)
+        self.assertIn('直せない', review['next_action'])
+
+    def test_repair_rule_asks_for_a_question_when_the_user_must_decide(self):
+        self.assertIn('利用者の判断に委ねる点', REPAIR_RULE)
+        self.assertIn('doneにせず', REPAIR_RULE)
 
 
 if __name__ == '__main__':

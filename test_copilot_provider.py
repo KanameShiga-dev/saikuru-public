@@ -100,6 +100,31 @@ class CreditTest(unittest.TestCase):
         next_month = datetime(2099, 1, 15, tzinfo=timezone.utc).timestamp()
         self.assertEqual(copilot_usage(1000, next_month)['rows'][0]['monthly']['used'], 0.0)
 
+    def test_quota_refusal_shows_zero_until_a_run_consumes_credits(self):
+        # 10-19: Copilot refused with "exceeded your monthly quota" while 采来's own count still showed about 40% left.
+        record_copilot_usage(100.0, 0)
+        team_usage.mark_copilot_exhausted()
+        value = copilot_usage(1000)
+        monthly = value['rows'][0]['monthly']
+        self.assertEqual((monthly['remaining_percent'], monthly['exhausted']), (0, True))
+        self.assertIn('使い切った', value['note'])
+        self.assertFalse(recovery_ready({'copilot': value}, COPILOT))
+        record_copilot_usage(None, 0)                       # a failed run with no consumption changes nothing
+        self.assertEqual(copilot_usage(1000)['rows'][0]['monthly']['remaining_percent'], 0)
+        record_copilot_usage(5.0, 0)                        # a run consumed credits: the allowance works again
+        self.assertEqual(copilot_usage(1000)['rows'][0]['monthly']['remaining_percent'], 89.5)
+        next_month = datetime(2099, 1, 15, tzinfo=timezone.utc).timestamp()
+        team_usage.mark_copilot_exhausted()
+        self.assertFalse(copilot_usage(1000, next_month)['rows'][0]['monthly']['exhausted'])
+
+    def test_quota_refusal_is_known_even_without_a_configured_allowance(self):
+        team_usage.mark_copilot_exhausted()
+        value = copilot_usage(None)
+        self.assertEqual(value['status'], 'ok')
+        self.assertTrue(value['rows'][0]['monthly']['exhausted'])
+        self.assertEqual(value['rows'][0]['monthly']['remaining_percent'], 0)
+        self.assertIsNone(value['rows'][0]['monthly']['limit'])
+
     def test_reset_is_first_of_next_month_utc(self):
         moment = datetime(2026, 12, 20, tzinfo=timezone.utc).timestamp()
         resets = copilot_usage(1000, moment)['rows'][0]['monthly']['resets_at']
@@ -112,6 +137,8 @@ class AdapterScopeTest(unittest.TestCase):
         base = dict(task={'profile': dict(COPILOT)}, agent_definition=definition, text_only=True,
                     attachment_ids=[], command=['copilot-not-started'])
         base.update(values)
+        base['task'].setdefault('job_id', 'synthetic')
+        base['engine'] = SimpleNamespace(store=SimpleNamespace(get=lambda *a: {}))
         return SimpleNamespace(**base)
 
     def test_refuses_non_text_tasks_before_starting(self):
@@ -133,7 +160,8 @@ class AdapterScopeTest(unittest.TestCase):
         seen = {}
         def fake(adapter, ctx, command, text, cwd, env, allowed, baseline=None):
             seen['allowed'] = allowed
-            return json.dumps({'status': 'done', 'summary': 's', 'checks': ['c'], 'pending_checks': [], 'question': ''})
+            return json.dumps({'status': 'done', 'summary': 's', 'checks': ['c'], 'pending_checks': [], 'question': '',
+                               'warnings': [], 'stage_complete': True, 'blocking_reasons': []})
         with mock.patch.object(CopilotAdapter, '_call', fake):
             CopilotAdapter().run(ctx, 'x', RESULT_SCHEMA)
         self.assertEqual(seen['allowed'], ['project_read-read_file', 'project_read-write_document', 'project_read-generate_media'])
@@ -169,10 +197,11 @@ class ReportRepairTest(unittest.TestCase):
         from team_engine import RESULT_SCHEMA
         self.schema = RESULT_SCHEMA
         self.full = {'status': 'done', 'summary': '指摘なし', 'checks': ['確認：テスト'], 'pending_checks': [], 'question': '',
-                     'questions': [], 'context_updates': []}
+                     'questions': [], 'context_updates': [], 'warnings': [], 'stage_complete': True, 'blocking_reasons': []}
         self.events = []
         definition = SimpleNamespace(sandbox='read-only', tools=())
-        self.ctx = SimpleNamespace(task={'profile': dict(COPILOT)}, agent_definition=definition, text_only=True,
+        self.ctx = SimpleNamespace(task={'profile': dict(COPILOT), 'job_id': 'synthetic'},
+                                   engine=SimpleNamespace(store=SimpleNamespace(get=lambda *a: {})), agent_definition=definition, text_only=True,
                                    attachment_ids=[], command=['copilot'], agent_system_instructions='',
                                    agent_started=lambda *a: None, event=self.events.append)
 

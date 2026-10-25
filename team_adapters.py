@@ -751,6 +751,7 @@ class CopilotAdapter:
         require_safe_egress(text, 'copilot')
         process = None
         final, credits, premium = '', None, None
+        session_error = ''
         self._spent = (None, None)
         # Token counts are only in the CLI's usage file, written as the process ends (2026-10-09).
         usage_file = Path(cwd) / ('usage-' + uuid.uuid4().hex + '.json')
@@ -765,7 +766,8 @@ class CopilotAdapter:
                     msg = process.receive(ctx)
                 except ProviderError as exc:
                     detail = ''.join(process.stderr).strip()
-                    raise ProviderError('GitHub Copilot: ' + (detail[-800:] or str(exc))) from exc
+                    reason = ' '.join(part for part in (session_error, detail[-800:]) if part)
+                    raise ProviderError('GitHub Copilot: ' + (reason or str(exc))) from exc
                 kind = msg.get('type')
                 data = msg.get('data') or {}
                 if kind == 'tool.execution_start':
@@ -777,6 +779,14 @@ class CopilotAdapter:
                         ctx.count_tool(tool)  # agent_run.tool_calls, as for Claude
                 elif kind == 'assistant.message' and data.get('content'):
                     final = data['content']
+                elif kind == 'session.error':
+                    # 2026-10-19: the reason (e.g. "You have exceeded your monthly quota", errorCode quota_exceeded)
+                    # must reach the engine, or a usage limit / sign-in loss looks like a plain failure and the
+                    # Claude <-> Copilot failover never starts.
+                    session_error = ' '.join(str(data.get(k) or '') for k in ('message', 'errorCode', 'errorType')).strip()[:500]
+                    if data.get('errorCode') == 'quota_exceeded' or 'monthly quota' in str(data.get('message', '')):
+                        from team_usage import mark_copilot_exhausted
+                        mark_copilot_exhausted()   # the screen shows 0% (采来 counts only its own runs otherwise)
                 elif kind == 'session.usage_checkpoint':
                     if isinstance(data.get('totalNanoAiu'), (int, float)):
                         credits = data['totalNanoAiu'] / 1e9
@@ -787,7 +797,8 @@ class CopilotAdapter:
                     if isinstance(usage.get('premiumRequests'), (int, float)):
                         premium = usage['premiumRequests']
                     if msg.get('exitCode') != 0:
-                        raise ProviderError('GitHub Copilotの実行が完了しませんでした（終了コード ' + str(msg.get('exitCode')) + '）。')
+                        raise ProviderError('GitHub Copilotの実行が完了しませんでした（終了コード ' + str(msg.get('exitCode')) + '）。'
+                                            + ('理由: ' + session_error if session_error else ''))
                     return final
         finally:
             if process is not None:

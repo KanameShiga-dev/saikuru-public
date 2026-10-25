@@ -200,10 +200,29 @@ def record_copilot_usage(credits, premium_requests):
         value = _read_copilot_ledger()
         if type(credits) in (int, float) and math.isfinite(credits) and credits >= 0:
             value['credits'] = round(value['credits'] + credits, 6)
+            if credits > 0:
+                value.pop('exhausted_at', None)   # a run that consumed credits: the allowance works again
         if type(premium_requests) in (int, float) and math.isfinite(premium_requests) and premium_requests >= 0:
             value['premium_requests'] += premium_requests
         value['runs'] += 1
         value['updated_at'] = time.time()
+        try:
+            COPILOT_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+            temporary = COPILOT_LEDGER.with_suffix('.tmp')
+            temporary.write_text(json.dumps(value), encoding='utf-8')
+            temporary.replace(COPILOT_LEDGER)
+        except OSError:
+            pass
+
+
+def mark_copilot_exhausted():
+    """2026-10-19: Copilot answered "exceeded your monthly quota" (402 quota_exceeded). 采来 only counts its own runs,
+    so the screen still showed about 40% left; record the refusal so this month shows 0% until a run consumes credits
+    again or the month changes. The refusal itself consumed nothing (premiumRequests 0), and no extra call is made."""
+    with _copilot_lock:
+        value = _read_copilot_ledger()
+        value['exhausted_at'] = time.time()
+        value['updated_at'] = value['exhausted_at']
         try:
             COPILOT_LEDGER.parent.mkdir(parents=True, exist_ok=True)
             temporary = COPILOT_LEDGER.with_suffix('.tmp')
@@ -221,18 +240,22 @@ def copilot_usage(limit, now=None):
     # Local numbers, never stale. updated_at is the last recorded run (None before the first one), so the
     # snapshot stays identical between runs and the screen does not redraw on every poll.
     base = {'updated_at': value['updated_at'], 'stale': False}
-    if not limit:
+    exhausted = bool(value.get('exhausted_at'))
+    if not limit and not exhausted:
         return dict(base, status='unavailable', rows=[{'id': 'copilot', 'label': '月間AIクレジット', 'short': None,
             'weekly': None, 'minutes': None, 'monthly_only': True,
             'monthly': {'remaining_percent': None, 'resets_at': resets_at, 'used': used, 'limit': None,
                         'premium_requests': value['premium_requests']}}],
             note='設定画面で「月間の最大クレジット」を入力すると残り％を表示します。')
-    remaining = round(max(0, min(100, 100 - used / limit * 100)), 1)
+    remaining = 0 if exhausted else round(max(0, min(100, 100 - used / limit * 100)), 1)
+    note = ('GitHub Copilot から「今月の枠を使い切った」と返されたため 0% と表示しています（采来の外での利用を含む）。'
+            '毎月1日（UTC）のリセット後、または采来からの実行が再び成功すると元の集計に戻ります。' if exhausted else
+            '采来から実行した分の消費を集計しています（VS Code等、他での利用は含みません）。毎月1日（UTC）にリセット。')
     return dict(base, status='ok', rows=[{'id': 'copilot', 'label': '月間AIクレジット', 'short': None, 'weekly': None,
         'minutes': None, 'monthly_only': True,
-        'monthly': {'remaining_percent': remaining, 'resets_at': resets_at, 'used': used, 'limit': limit,
-                    'premium_requests': value['premium_requests']}}],
-        note='采来から実行した分の消費を集計しています（VS Code等、他での利用は含みません）。毎月1日（UTC）にリセット。')
+        'monthly': {'remaining_percent': 0 if exhausted else remaining, 'resets_at': resets_at, 'used': used, 'limit': limit,
+                    'premium_requests': value['premium_requests'], 'exhausted': exhausted}}],
+        note=note)
 
 
 class UsageMonitor:
