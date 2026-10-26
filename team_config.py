@@ -125,6 +125,8 @@ def default_config():
         # Whether a new development request carries the P0 contract (a stopped P0 job needs a maintenance credential to
         # resume). Default on; a one-person production folder keeps it off until it can be resumed from the screen.
         'p0_contract_enabled': True,
+        # Storage support only; selecting a new workflow is a separate explicit action.
+        'workflow_contract_enabled': False,
         'computer_use_allowed': False,
         'decision': {'provider': 'ollama', 'model': 'tev1:0.8b', 'shadow': True},
         'local_summary': {'mode': 'shadow', 'model': 'gemma4:latest',
@@ -195,6 +197,8 @@ def validate_config(config):
                 raise ValueError('軽い経路の評価ルートに通常サービスのフォルダは使えません。')
     if type(config.get('p0_contract_enabled', True)) is not bool:
         raise ValueError('p0_contract_enabled は真偽値で指定してください。')
+    if type(config.get('workflow_contract_enabled', False)) is not bool:
+        raise ValueError('workflow_contract_enabled は真偽値で指定してください。')
     if type(config.get('automatic_operations', False)) is not bool:
         raise ValueError('操作自動承認の設定は真偽値で指定してください。')
     if type(config.get('document_review_relaxed', False)) is not bool:

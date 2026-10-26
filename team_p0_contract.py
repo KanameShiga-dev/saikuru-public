@@ -13,6 +13,36 @@ MAX_ITEMS = 20
 MAX_TEXT = 500
 
 
+def workflow_version(job):
+    """Validate an explicit workflow marker; absence alone denotes legacy data."""
+    if 'workflow_contract_version' not in job:
+        return None
+    if type(job['workflow_contract_version']) is not int or job['workflow_contract_version'] != 1:
+        raise ValueError('未対応の作業フロー版です。')
+    if (job.get('request_origin') != 'new' or job.get('route') != 'full'
+            or job.get('document_source') or type(job.get('p0_contract_version')) is not int
+            or job['p0_contract_version'] != 1):
+        raise ValueError('新しい作業フローは新規P0開発依頼だけが対象です。')
+    return 1
+
+
+def initial_workflow(job, *, enabled=False):
+    """Called only for an explicitly selected new job, before its first save.
+
+    This helper does not enable execution, migrate a runtime, or grant approval.
+    """
+    if enabled is not True or 'workflow_contract_version' in job:
+        raise ValueError('作業フローの新規選択が有効ではありません。')
+    result = deepcopy(job)
+    result['workflow_contract_version'] = 1
+    workflow_version(result)
+    if result.get('status') != 'awaiting_approval':
+        raise ValueError('受付時の新規依頼だけ作業フローを選択できます。')
+    result.update(requirement_revision=0, requirements_approval_id=None,
+                  plan_revision=0, plan_approval_id=None)
+    return result
+
+
 def initial(goal):
     return {
         'original_request': goal,

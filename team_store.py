@@ -8,6 +8,8 @@ import uuid
 from contextlib import contextmanager, closing
 from pathlib import Path
 
+from team_p0_contract import workflow_version
+
 
 def uid():
     return uuid.uuid4().hex
@@ -39,8 +41,9 @@ class Store:
 
     def put(self, kind, obj, transition_reason=None):
         with self.lock:
-            self.revision += 1
             obj = copy.deepcopy(obj)
+            self._workflow_storage(kind, obj)
+            self.revision += 1
             obj['updated_at'] = now()
             body = json.dumps(obj, ensure_ascii=False)
             if kind in ('job', 'task'):
@@ -94,6 +97,88 @@ class Store:
             if self.depth == 0:
                 self.db.commit()
             return obj
+
+    def _workflow_storage(self, kind, obj):
+        """Additive storage checks; dispatch/fenced callbacks arrive in W02.02.
+
+        No legacy object is stamped or converted. Checkpoints are drafts only
+        until the dedicated ready/pointer transaction is implemented.
+        """
+        row = self.db.execute('SELECT kind, body FROM objects WHERE id=?', (obj['id'],)).fetchone()
+        if row and row[0] != kind:
+            raise ValueError('保存IDは別の種類で使用されています。')
+        previous = json.loads(row[1]) if row else None
+        if kind == 'job':
+            version = workflow_version(obj)
+            if previous and previous.get('workflow_contract_version') != obj.get('workflow_contract_version'):
+                raise ValueError('既存依頼の作業フロー版は変更できません。')
+            if version is None:
+                return
+            for revision_key, approval_key in (
+                    ('requirement_revision', 'requirements_approval_id'), ('plan_revision', 'plan_approval_id')):
+                revision = obj.get(revision_key)
+                if type(revision) is not int or revision < 0:
+                    raise ValueError('要求・計画の版が不正です。')
+                approval_id = obj.get(approval_key)
+                if revision == 0:
+                    if approval_id is not None:
+                        raise ValueError('未承認版に承認参照は付けられません。')
+                else:
+                    approval = self.get(approval_id, 'approval')
+                    if (approval.get('job_id') != obj['id'] or approval.get('kind') != 'plan'
+                            or approval.get('status') != 'approved'):
+                        raise ValueError('現行依頼の承認済み計画を参照してください。')
+                if previous and revision < previous[revision_key]:
+                    raise ValueError('要求・計画の版は戻せません。')
+        elif kind in ('task', 'work_package', 'checkpoint'):
+            if previous and previous.get('job_id') != obj['job_id']:
+                old_job = self.get(previous['job_id'], 'job')
+                if workflow_version(old_job) is not None:
+                    raise ValueError('保存済み記録の依頼は変更できません。')
+            job = self.get(obj['job_id'], 'job')
+            if workflow_version(job) is None:
+                if kind != 'task' or obj.get('work_package_id') is not None:
+                    raise ValueError('旧依頼には新しい作業フローの記録を追加できません。')
+                return
+            if kind != 'task':
+                if type(obj.get('schema_version')) is not int or obj['schema_version'] != 1:
+                    raise ValueError('未対応の保存形式です。')
+            if kind == 'work_package':
+                if 'task_ids' in obj or 'depends_on' in obj:
+                    raise ValueError('所属と依存は承認済み計画・実行Taskから参照してください。')
+                if (type(obj.get('plan_revision')) is not int or obj['plan_revision'] < 1
+                        or obj['plan_revision'] != job['plan_revision']
+                        or obj.get('spec_source_approval_id') != job['plan_approval_id']):
+                    raise ValueError('作業パッケージの計画版が不正です。')
+                if (obj.get('execution_state') not in ('planned', 'ready', 'running', 'succeeded', 'blocked', 'cancelled')
+                        or obj.get('review_status') not in ('not_requested', 'pending', 'approved', 'changes_requested', 'invalidated')):
+                    raise ValueError('作業パッケージの状態が不正です。')
+            if kind in ('task', 'checkpoint') and obj.get('work_package_id') is not None:
+                wp = self.get(obj['work_package_id'], 'work_package')
+                if wp.get('job_id') != job['id']:
+                    raise ValueError('別の依頼の作業パッケージは参照できません。')
+            if kind == 'checkpoint':
+                task = self.get(obj['task_id'], 'task')
+                if (task.get('job_id') != job['id']
+                        or obj.get('work_package_id') != task.get('work_package_id')):
+                    raise ValueError('Checkpointの担当・所属が不正です。')
+                if obj.get('state') not in ('writing', 'invalid'):
+                    raise ValueError('Checkpoint確定は専用の保存手続きが必要です。')
+                if previous and previous['state'] == 'invalid' and obj['state'] != 'invalid':
+                    raise ValueError('無効なCheckpointは再利用できません。')
+            if previous and (obj['job_id'] != previous['job_id']
+                             or obj.get('work_package_id') != previous.get('work_package_id')):
+                raise ValueError('保存済み記録の所属は変更できません。')
+        else:
+            return
+        if previous:
+            if type(obj.get('state_revision')) is not int or obj['state_revision'] != previous['state_revision']:
+                raise ValueError('状態の版が古くなりました。再読み込みしてください。')
+            obj['state_revision'] = previous['state_revision'] + 1
+        else:
+            if 'state_revision' in obj:
+                raise ValueError('初回保存の状態版はサーバーが設定します。')
+            obj['state_revision'] = 1
 
     def get(self, object_id, kind=None):
         with self.lock:
