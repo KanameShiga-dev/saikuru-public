@@ -211,6 +211,7 @@ class CodexAdapter:
         if not getattr(ctx,'text_only',False) and getattr(ctx,'read_mcp',None):
             command += ['-c','mcp_servers.project_read.command='+json.dumps(ctx.read_mcp['command']),
                         '-c','mcp_servers.project_read.args='+json.dumps(ctx.read_mcp['args'])]
+        ctx.check()
         process = Process(command, ctx.project)
         counter = 0
         file_changes = {}
@@ -419,6 +420,7 @@ class ClaudeAdapter:
             command += ['--add-dir', folder]
         process = None
         try:
+            ctx.check()
             process = Process(command, ctx.project, env)
             if structured:
                 from team_attachments import provider_input
@@ -758,6 +760,7 @@ class CopilotAdapter:
         command = list(command) + ['--usage-output-file', str(usage_file)]
         tokens = None
         try:
+            ctx.check()
             process = Process(command, cwd, env)
             process.proc.stdin.write(text)
             process.proc.stdin.close()
@@ -936,6 +939,7 @@ class GeminiAdapter:
         command = ctx.command + ['-p', '標準入力の指示に従って回答してください。', '-m', model, '-o', 'json', '--skip-trust']
         process, out = None, []
         try:
+            ctx.check()
             process = Process(command, cwd, env)
             process.proc.stdin.write(text)
             process.proc.stdin.close()

@@ -14,12 +14,13 @@ import threading
 import time
 import sys
 from dataclasses import replace
+from functools import wraps
 
 from pathlib import Path
 
 from team_adapters import ADAPTERS, Cancelled, ProviderError
 
-from team_store import uid, now
+from team_store import uid, now, StaleAttempt
 
 from team_questions import validate_questions, native_questions, answers_for, legacy_questions
 
@@ -225,6 +226,14 @@ def canonical(path):
 
 
 
+def _attempt_callback(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self.engine.store.attempt_scope(self.task):
+            return method(self, *args, **kwargs)
+    return guarded
+
+
 class Context:
 
     # Class-level defaults: a Context built without __init__ (tests, helpers) still has a working run-time limit.
@@ -296,6 +305,7 @@ class Context:
 
 
 
+    @_attempt_callback
     def prepare_agent(self, definition):
 
         self.check()
@@ -408,6 +418,7 @@ class Context:
                 + STAGING + '\\' + self.task['job_id'] + '\\_reference\\' + fmt + '.md）。'
                 'claude.aiへの送信は受け入れ後に行うため、送信やURLが無いことは不備としないでください。')
 
+    @_attempt_callback
     def artifact_result(self, tool_input, text):
         """Called by the adapter with the text of each Artifact tool result."""
         if not isinstance(tool_input, dict):
@@ -481,6 +492,7 @@ class Context:
 
 
 
+    @_attempt_callback
     def record_usage(self, values, extra=None):
 
         if not isinstance(values, dict) or self.agent_run is None:
@@ -502,6 +514,7 @@ class Context:
 
         self.engine.store.update(self.task['id'], agent_run=self.agent_run)
 
+    @_attempt_callback
     def observe_message(self, message):
         """Per-API-call usage and tool calls from the stream, kept so a failed or cancelled run still has a
         (partial) measurement. Streamed blocks of one call share an id; the last usage per id is used."""
@@ -528,6 +541,7 @@ class Context:
 
 
 
+    @_attempt_callback
     def count_tool(self, name):
         """One tool call, for providers whose stream observe_message does not see (Copilot); same field as Claude's."""
         if self.agent_run is None:
@@ -537,6 +551,7 @@ class Context:
         calls[name] = calls.get(name, 0) + 1
         self.engine.store.update(self.task['id'], agent_run=self.agent_run)
 
+    @_attempt_callback
     def add_copilot_usage(self, credits, premium, tokens=None):
         """AI credits, premium requests and token counts of one Copilot CLI call, added to this run's record."""
         if self.agent_run is None:
@@ -552,6 +567,7 @@ class Context:
                     total[key] = total.get(key, 0) + value
         self.engine.store.update(self.task['id'], agent_run=self.agent_run)
 
+    @_attempt_callback
     def command_result(self, command, exit_code, output, timed_out=False):
         """Record a command's result as 采来 received it from the provider (exit code + masked output tail)."""
         from team_security_audit import result_message
@@ -583,6 +599,7 @@ class Context:
             evidence[str(index)] = proof
             self.engine.store.update(job['id'], validation_evidence=evidence)
 
+    @_attempt_callback
     def agent_started(self, session_id, launch_method):
 
         if not isinstance(session_id, str) or not session_id or len(session_id) > 160:
@@ -599,6 +616,7 @@ class Context:
 
 
 
+    @_attempt_callback
     def finish_agent(self, status, failure_code=None):
 
         if self.agent_run is not None:
@@ -617,6 +635,10 @@ class Context:
 
     def check(self):
 
+        store = getattr(self.engine, 'store', None)
+        if store is not None:
+            store.assert_attempt(self.task)
+
         if self.cancel.is_set() or self.engine.shutdown.is_set():
 
             raise Cancelled('利用者またはサービス停止により中断しました。')
@@ -631,12 +653,14 @@ class Context:
 
 
 
+    @_attempt_callback
     def event(self, message):
 
         self.engine.store.event('progress', message, self.task['id'], self.task['job_id'])
 
 
 
+    @_attempt_callback
     def approve(self, payload):
 
         self.check()
@@ -2371,14 +2395,15 @@ class Engine:
 
 
     def sync_handoff(self, job_id):
+        with self.store.atomic():
 
-        job = self.store.get(job_id, 'job')
+            job = self.store.get(job_id, 'job')
 
-        tasks = self.store.for_job('task', job_id)
+            tasks = self.store.for_job('task', job_id)
 
-        approvals = self.store.for_job('approval', job_id)
+            approvals = self.store.for_job('approval', job_id)
 
-        self.handoff.sync(job, tasks, approvals)
+            self.handoff.sync(job, tasks, approvals)
 
 
 
@@ -2889,7 +2914,7 @@ class Engine:
 
     def _finish(self, task, result):
 
-        with self.store.atomic():
+        with self.store.attempt_scope(task), self.store.atomic():
 
             current = self.store.get(task['id'])
 
@@ -2998,7 +3023,7 @@ class Engine:
                 runs = self.store.job_events(job['id'], 'operation_result')
                 if runs and not any(e.get('task_id') == task['id'] for e in runs):
                     self.store.update(task['id'], status='queued', instruction=current['instruction'] + EVIDENCE_GATE_NOTE,
-                                      result=None, summary='', evidence_gate_retried=True, attempt=current['attempt'] + 1)
+                                      result=None, summary='', evidence_gate_retried=True, attempt=current['attempt'] + (0 if current.get('current_attempt') else 1))
                     self.store.event('evidence_gate_retry', '修正の報告に、采来が記録した検証の実行がありません。'
                                      'レビューの前に、同じ担当へ検証の実行を1回だけ依頼しました。', task['id'], job['id'])
                     return
@@ -3043,7 +3068,7 @@ class Engine:
                         # The planner can fix a role/tool mismatch itself: send the plan back instead of failing later.
                         instruction = compact_instruction(task['instruction'], note)
                         self.store.update(task['id'], status='queued', instruction=instruction, result=None, summary='',
-                                          plan_check_repairs=repairs + 1, attempt=task['attempt'] + 1)
+                                          plan_check_repairs=repairs + 1, attempt=task['attempt'] + (0 if task.get('current_attempt') else 1))
                         self.store.update(job['id'], status='planning')
                         self.store.event('plan_check_repair', '計画の点検で担当の道具に合わない作業が見つかったため、計画担当に作り直しを依頼しました（'
                                          + str(repairs + 1) + '回目）。', task['id'], job['id'])
@@ -3235,6 +3260,14 @@ class Engine:
 
 
     def _run(self, task):
+        try:
+            with self.store.attempt_scope(task):
+                return self._run_attempt(task)
+        except StaleAttempt:
+            # A fenced worker must not turn a newer task into a failure.
+            return
+
+    def _run_attempt(self, task):
 
         ctx = None
 
@@ -3250,6 +3283,7 @@ class Engine:
 
             with self.store.lock:
 
+                self.store.assert_attempt(task)
                 self.active[task['id']] = ctx
 
                 if self.store.get(task['id'])['status'] == 'cancelled':
@@ -3558,6 +3592,13 @@ class Engine:
         finally:
 
             with self.store.lock:
+                try:
+                    self.store.assert_attempt(task)
+                except StaleAttempt:
+                    if self.active.get(task['id']) is ctx:
+                        self.active.pop(task['id'], None)
+                    raise
+
 
                 if ctx is not None:
 
@@ -3572,6 +3613,8 @@ class Engine:
                         self.store.update(approval['id'], status='expired')
 
 
+
+                self.store.close_attempt(task['id'], 'closed', agent_outcome)
 
     def tick(self):
 
@@ -3737,7 +3780,10 @@ class Engine:
                                                       for w in working):
                         continue
 
-                task = self.store.update(task['id'], status='running', attempt=task['attempt'] + 1, started_at=now(), retry_at=None)
+                if job.get('workflow_contract_version') == 1:
+                    task = self.store.reserve_attempt(task['id'], task['state_revision'])
+                else:
+                    task = self.store.update(task['id'], status='running', attempt=task['attempt'] + 1, started_at=now(), retry_at=None)
 
                 busy.add(canonical(job['project']))
 
@@ -3769,6 +3815,8 @@ class Engine:
 
             self.store.get(job_id, 'job')
 
+            for running in self.store.for_job('task', job_id):
+                self.store.close_attempt(running['id'], 'fenced', 'cancel')
             self.store.update(job_id, status='cancelled')
 
             for task in self.store.all('task'):
@@ -4281,7 +4329,7 @@ class Engine:
 
     def retry(self, task_id, note, handoff_allowed=False):
 
-        with self.store.lock:
+        with self.store.atomic():
 
             task = self.store.get(task_id, 'task')
             task_job = self.store.get(task['job_id'], 'job')
@@ -4309,6 +4357,9 @@ class Engine:
 
                 raise ValueError('後続タスクが進行済みです。新しい依頼として開始してください。')
 
+            if task.get('recovery_check_required'):
+                raise ValueError('再起動前の作業停止と作用を保守担当が確認する必要があります。')
+            self.store.close_attempt(task_id, 'fenced', 'retry')
             instruction = compact_instruction(task['instruction'], str(note)[:4000] if note else '')
 
             # Archive a rejected handoff before clearing the retry state.
@@ -4457,6 +4508,10 @@ class Engine:
 
                 raise ValueError('無効なワーカー要求です。')
 
+        with self.store.attempt_scope(ctx.task):
+            return self._tool_request_context(ctx, body)
+
+    def _tool_request_context(self, ctx, body):
         tool = body.get('tool', '')
 
         data = body.get('input') or {}

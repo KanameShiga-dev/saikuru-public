@@ -11,6 +11,10 @@ from pathlib import Path
 from team_p0_contract import workflow_version
 
 
+class StaleAttempt(ValueError):
+    """A dispatch generation or persistent state revision is no longer current."""
+
+
 def uid():
     return uuid.uuid4().hex
 
@@ -26,6 +30,8 @@ class Store:
         self.lock = threading.RLock()
         self.revision = 0
         self.depth = 0
+        self.runtime_id = uid()
+        self._worker = threading.local()
         self.db = sqlite3.connect(self.directory / 'team.sqlite3', check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA synchronous=FULL')
@@ -41,6 +47,10 @@ class Store:
 
     def put(self, kind, obj, transition_reason=None):
         with self.lock:
+            if getattr(self._worker, 'task', None) is not None and self.depth == 0:
+                with self.atomic():
+                    return self.put(kind, obj, transition_reason)
+            self._check_worker()
             obj = copy.deepcopy(obj)
             self._workflow_storage(kind, obj)
             self.revision += 1
@@ -229,9 +239,89 @@ class Store:
                 raise ValueError('イベント詳細はオブジェクトで指定してください。')
             record['details'] = copy.deepcopy(details)
         with self.lock:
-            self.db.execute('INSERT INTO events(body) VALUES (?)', (json.dumps(record, ensure_ascii=False),))
+            if getattr(self._worker, 'task', None) is not None and self.depth == 0:
+                with self.atomic():
+                    return self.event(event_type, message, task_id, job_id, details)
+            self._check_worker()
+            cursor = self.db.execute('INSERT INTO events(body) VALUES (?)', (json.dumps(record, ensure_ascii=False),))
             if self.depth == 0:
                 self.db.commit()
+            return cursor.lastrowid
+
+    def assert_attempt(self, task):
+        """Check persisted generation, never the in-memory Store.revision."""
+        with self.lock:
+            try:
+                job = self.get(task['job_id'], 'job')
+            except ValueError:
+                if 'state_revision' not in task and not task.get('current_attempt'):
+                    return
+                raise StaleAttempt('実行対象の依頼を確認できません。') from None
+            if workflow_version(job) is None:
+                return
+            current = self.get(task['id'], 'task')
+            expected = task.get('current_attempt') or {}
+            actual = current.get('current_attempt') or {}
+            binding = actual.get('approved_versions') or {}
+            if (not expected.get('id') or actual.get('id') != expected['id']
+                    or actual.get('runtime_id') != self.runtime_id or actual.get('status') != 'running'
+                    or current.get('attempt') != task.get('attempt')
+                    or current.get('status') in ('cancelled', 'interrupted')
+                    or any(job.get(key) != value for key, value in binding.items())
+                    or job.get('status') in ('cancelled', 'interrupted', 'accepted', 'accepted_with_pending_checks')):
+                raise StaleAttempt('古い実行結果は保存できません。現在の状態を確認してください。')
+
+    def _check_worker(self):
+        task = getattr(self._worker, 'task', None)
+        if task is not None:
+            self.assert_attempt(task)
+
+    @contextmanager
+    def attempt_scope(self, task):
+        previous = getattr(self._worker, 'task', None)
+        self.assert_attempt(task)
+        self._worker.task = task
+        try:
+            yield
+        finally:
+            self._worker.task = previous
+
+    def reserve_attempt(self, task_id, expected_revision):
+        with self.atomic():
+            task = self.get(task_id, 'task')
+            job = self.get(task['job_id'], 'job')
+            if (workflow_version(job) != 1 or type(expected_revision) is not int
+                    or task.get('state_revision') != expected_revision
+                    or task['status'] != 'queued' or job['status'] not in ('planning', 'running')
+                    or (task.get('current_attempt') or {}).get('status') == 'running'
+                    or task.get('recovery_check_required')):
+                raise StaleAttempt('この担当は起動できません。現在の状態を確認してください。')
+            if task.get('role') != 'planner':
+                approval = self.get(job.get('plan_approval_id'), 'approval')
+                if (approval.get('job_id') != job['id'] or approval.get('kind') != 'plan'
+                        or approval.get('status') != 'approved'):
+                    raise StaleAttempt('承認済み計画がないため起動できません。')
+            attempt = {'id': uid(), 'ordinal': task['attempt'] + 1, 'status': 'running',
+                       'runtime_id': self.runtime_id, 'started_at': now(),
+                       'approved_versions': {key: job.get(key) for key in
+                           ('requirement_revision', 'requirements_approval_id', 'plan_revision', 'plan_approval_id')}}
+            attempt['start_event_seq'] = self.event('attempt_started', '担当の実行世代を予約しました。',
+                task_id, task['job_id'], details={'attempt_id': attempt['id'], 'ordinal': attempt['ordinal']})
+            return self.update(task_id, status='running', attempt=attempt['ordinal'],
+                               current_attempt=attempt, started_at=attempt['started_at'], retry_at=None)
+
+    def close_attempt(self, task_id, status, reason):
+        if status not in ('closed', 'fenced'):
+            raise ValueError('試行の終了状態が不正です。')
+        with self.atomic():
+            task = self.get(task_id, 'task')
+            attempt = task.get('current_attempt') or {}
+            if not attempt or attempt.get('status') != 'running':
+                return
+            self.event('attempt_closed', '担当の実行世代を終了しました。', task_id, task['job_id'],
+                       details={'attempt_id': attempt['id'], 'ordinal': attempt['ordinal'],
+                                'status': status, 'reason': str(reason)[:80]})
+            self.update(task_id, current_attempt=dict(attempt, status=status, closed_at=now()))
 
     @contextmanager
     def atomic(self):
@@ -241,6 +331,7 @@ class Store:
                 self.db.execute('BEGIN IMMEDIATE')
             self.depth += 1
             try:
+                self._check_worker()
                 yield
                 if outer:
                     self.db.commit()
@@ -263,9 +354,12 @@ class Store:
             return [dict(json.loads(row[1]), seq=row[0]) for row in rows]
 
     def recover(self):
-        with self.lock:
+        with self.atomic():
             for task in self.all('task'):
                 if task['status'] in ('running', 'awaiting_approval'):
+                    if 'state_revision' in task:
+                        self.close_attempt(task['id'], 'fenced', 'restart')
+                        self.update(task['id'], recovery_check_required=True)
                     self.update(task['id'], status='interrupted', summary='サービス再起動により中断。変更内容を確認して再試行してください。')
                     self.update(task['job_id'], status='interrupted')
             for approval in self.all('approval'):
