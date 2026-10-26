@@ -2202,38 +2202,15 @@ class Engine:
                 raise ValueError('この依頼は処理中です。終わってから差し戻してください。')
             if job['status'] in ('cancelled', 'interrupted'):
                 raise ValueError('中止した依頼は差し戻せません。新しい依頼として出してください。')
-            if after is None:
-                done = [t for t in tasks if t['status'] in ('succeeded', 'handed_off')]
-                if not done:
-                    raise ValueError('差し戻せる完了済みの工程がありません。')
-                after = max(done, key=lambda t: t.get('finished_at') or t.get('updated_at') or 0)['id']
-            count = int(job.get('rework_count', 0)) + 1
-            instruction = ('利用者が成果物の受け入れを拒否しました（差し戻し' + str(count) + '回目）。次の理由・指摘をすべて反映して成果物を修正してください。\n'
-                           '【利用者の指摘】\n' + note + '\n'
-                           '指摘のうち対応できないものは、勝手に省かず、理由と代替案を報告してください。'
-                           + ('この依頼で作った成果物は、同じ名前で作り直せます（旧版は .saikuru-versions に自動で退避されます）。利用者の既存ファイルは上書きできません。'
-                              'PPTXは generate_media の layout（cover/section/content）・table・diagram・theme・notes を使い、文字だけのスライドにしないでください。'
-                              if job.get('document_source') else ''))
-            fix = self.new_task(job, '利用者の差し戻し指摘を反映する', instruction, 'builder', after, 0)
-            self._queue_reviews(job, fix['id'], 0)
-            self.store.update(job_id, status='running', rework_count=count)
-            self.store.event('rework_requested', '利用者の差し戻し（' + str(count) + '回目）により修正担当とレビューを再開しました。', fix['id'], job_id)
-            return {'ok': True, 'task_id': fix['id'], 'rework_count': count}
-
-    def rework_from_rejection(self, job_id, note, after=None):
-        """Turn the user's rejection reason into a builder task followed by the normal and security reviews."""
-        note = str(note or '').strip()
-        if not note or len(note) > 4000:
-            raise ValueError('差し戻しの理由・指摘を1〜4000文字で入力してください。')
-        with self.store.atomic():
-            job = self.store.get(job_id, 'job')
-            tasks = [t for t in self.store.all('task') if t['job_id'] == job_id]
-            if any(t['status'] in ('queued', 'running', 'awaiting_approval') or t['id'] in self.active for t in tasks):
-                raise ValueError('この依頼は処理中です。終わってから差し戻してください。')
-            if job['status'] in ('cancelled', 'interrupted'):
-                raise ValueError('中止した依頼は差し戻せません。新しい依頼として出してください。')
             if job['status'] not in ('awaiting_acceptance','blocked','accepted','accepted_with_pending_checks'):
                 raise ValueError('成果確認待ち・停止・受領済みの依頼を選択してください。')
+            # G2-managed requests may only rework an approved implementation plan.
+            # Store order is receipt creation order; an older approval cannot
+            # override a later rejected, pending or superseded plan.
+            if 'g2_gate_version' in job:
+                plans = [a for a in self.store.for_job('approval', job_id) if a['kind'] == 'plan']
+                if job.get('g2_gate_version') != 1 or not plans or plans[-1]['status'] != 'approved':
+                    raise ValueError('承認済みの実装計画がありません。計画を修正し、承認してから進めてください。')
             if self.handoff.pending_conflicts(job_id):
                 raise ValueError('引き継ぎ情報の矛盾を先に解消してください。')
             for pending in self.store.all('approval'):
@@ -4308,6 +4285,8 @@ class Engine:
 
             task = self.store.get(task_id, 'task')
             task_job = self.store.get(task['job_id'], 'job')
+            if 'g2_gate_version' in task_job and task_job['status'] == 'cancelled':
+                raise ValueError('中止した依頼は再試行できません。新しい依頼として出してください。')
             if task.get('role') == 'planner' and task_job.get('g2_gate_version') != 1:
                 raise ValueError('この計画タスクには有効なG2ゲートがありません。AI実行を再試行できません。')
             if handoff_allowed and (task['role'] not in ('builder', 'researcher') or not str(note or '').strip()):

@@ -17,6 +17,7 @@ PLAN = {'required': True, 'reason': '架空の計算コードを変更する',
         'cases': ['二つの数量を正しく足す'], 'command': COMMAND, 'existing_tests': []}
 DONE = {'status': 'done', 'summary': '架空の作業が完了', 'checks': [],
         'pending_checks': [], 'question': '', 'questions': [], 'context_updates': [],
+        'warnings': [], 'stage_complete': True, 'blocking_reasons': [],
         'test_files': ['test_calc.py'], 'test_change_reason': ''}
 REVIEW = {key: value for key, value in DONE.items() if key not in ('test_files', 'test_change_reason')}
 
