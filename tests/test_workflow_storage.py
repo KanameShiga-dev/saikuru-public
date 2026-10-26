@@ -92,6 +92,27 @@ class WorkflowStorageTests(unittest.TestCase):
         self.store = Store(self.path)
         self.assertEqual(self.store.get(job['id'])['state_revision'], 2)
 
+    def test_legacy_orphan_task_can_be_created_updated_and_reloaded(self):
+        task = self.store.put('task', dict(id='orphan', job_id='missing-legacy-job', status='blocked'))
+        self.assertNotIn('state_revision', task)
+        updated = self.store.update(task['id'], summary='Fictional preserved legacy update')
+        self.assertNotIn('state_revision', updated)
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.get(task['id']), updated)
+
+    def test_missing_identifiers_rejected_with_value_error(self):
+        for kind, record in [('task', {'id': 'bad-task'}), ('work_package', {'id': 'bad-wp'}),
+                              ('checkpoint', {'id': 'bad-checkpoint'})]:
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                self.store.put(kind, record)
+        job = self.workflow()
+        with self.assertRaises(ValueError):
+            self.store.put('checkpoint', dict(id='missing-task', job_id=job['id'], schema_version=1,
+                                              state='writing'))
+        with self.assertRaises(ValueError):
+            self.store.put('task', dict(id='new-orphan', job_id='missing', state_revision=1, status='queued'))
+
     def test_new_object_requires_eligible_parent_and_supported_schema(self):
         wp = self.wp()
         self.assertEqual(wp['state_revision'], 1)

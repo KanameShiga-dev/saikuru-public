@@ -104,6 +104,8 @@ class Store:
         No legacy object is stamped or converted. Checkpoints are drafts only
         until the dedicated ready/pointer transaction is implemented.
         """
+        if not isinstance(obj.get('id'), str) or not obj['id'].strip():
+            raise ValueError('保存IDが必要です。')
         row = self.db.execute('SELECT kind, body FROM objects WHERE id=?', (obj['id'],)).fetchone()
         if row and row[0] != kind:
             raise ValueError('保存IDは別の種類で使用されています。')
@@ -124,6 +126,8 @@ class Store:
                     if approval_id is not None:
                         raise ValueError('未承認版に承認参照は付けられません。')
                 else:
+                    if not isinstance(approval_id, str) or not approval_id.strip():
+                        raise ValueError('承認参照が必要です。')
                     approval = self.get(approval_id, 'approval')
                     if (approval.get('job_id') != obj['id'] or approval.get('kind') != 'plan'
                             or approval.get('status') != 'approved'):
@@ -131,13 +135,21 @@ class Store:
                 if previous and revision < previous[revision_key]:
                     raise ValueError('要求・計画の版は戻せません。')
         elif kind in ('task', 'work_package', 'checkpoint'):
-            if previous and previous.get('job_id') != obj['job_id']:
-                old_job = self.get(previous['job_id'], 'job')
-                if workflow_version(old_job) is not None:
-                    raise ValueError('保存済み記録の依頼は変更できません。')
-            job = self.get(obj['job_id'], 'job')
+            if not isinstance(obj.get('job_id'), str) or not obj['job_id'].strip():
+                raise ValueError('保存対象の依頼IDが必要です。')
+            tracked = 'state_revision' in obj or (previous is not None and 'state_revision' in previous)
+            if previous and tracked and previous.get('job_id') != obj['job_id']:
+                raise ValueError('保存済み記録の依頼は変更できません。')
+            try:
+                job = self.get(obj['job_id'], 'job')
+            except ValueError:
+                # Legacy task-only fixtures/records were accepted before this
+                # extension. Missing parents must not enroll or block them.
+                if kind == 'task' and obj.get('work_package_id') is None and not tracked:
+                    return
+                raise ValueError('新しい作業フローの記録には依頼が必要です。') from None
             if workflow_version(job) is None:
-                if kind != 'task' or obj.get('work_package_id') is not None:
+                if kind != 'task' or obj.get('work_package_id') is not None or tracked:
                     raise ValueError('旧依頼には新しい作業フローの記録を追加できません。')
                 return
             if kind != 'task':
@@ -158,6 +170,8 @@ class Store:
                 if wp.get('job_id') != job['id']:
                     raise ValueError('別の依頼の作業パッケージは参照できません。')
             if kind == 'checkpoint':
+                if not isinstance(obj.get('task_id'), str) or not obj['task_id'].strip():
+                    raise ValueError('Checkpointの担当IDが必要です。')
                 task = self.get(obj['task_id'], 'task')
                 if (task.get('job_id') != job['id']
                         or obj.get('work_package_id') != task.get('work_package_id')):
