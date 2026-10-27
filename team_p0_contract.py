@@ -86,7 +86,7 @@ def _items(value, label, required=False):
     return clean
 
 
-def validate_plan(job, result):
+def validate_plan(job, result, *, check_current_inputs=True):
     """Validate planner linkage before a plan is offered to the user."""
     proposed = result.get('goal_contract')
     if not isinstance(proposed, dict) or set(proposed) != {
@@ -111,7 +111,7 @@ def validate_plan(job, result):
         raise ValueError('開発計画には現行版で実行するテストと確認条件が必要です。')
     if workflow_version(job) == 1:
         from team_wbs import validate_work_packages
-        validate_work_packages(result, job)
+        validate_work_packages(result, job, check_current_inputs=check_current_inputs)
     return contract
 
 
@@ -121,6 +121,23 @@ def approved_plan(job, result):
     return deepcopy(contract)
 
 
+def artifact_relative_path(name):
+    """Check artifact path syntax/privacy without consulting a current file."""
+    if not isinstance(name, str) or not name.strip() or len(name) > 260:
+        raise ValueError('成果ファイルの報告形式が不正です。')
+    relative = Path(name)
+    if relative.is_absolute() or any(part in ('.', '..') for part in relative.parts):
+        raise ValueError('成果ファイルは依頼フォルダ内の相対パスで指定してください。')
+    forbidden = {'.git', 'data', '__pycache__', '.env', '.ssh', '.aws', '.azure',
+                 'secrets', 'credentials', 'logs'}
+    if any(part.casefold() in forbidden or part.startswith('.') or
+           any(word in part.casefold() for word in ('secret', 'credential', 'private_key',
+                                                   'access_token', 'api_key'))
+           for part in relative.parts):
+        raise ValueError('成果ファイルとして機密設定や内部データを指定できません。')
+    return relative
+
+
 def artifact_records(project, paths):
     if not isinstance(paths, list) or len(paths) > MAX_ITEMS or any(
             not isinstance(name, str) or not name.strip() or len(name) > 260 for name in paths):
@@ -128,16 +145,7 @@ def artifact_records(project, paths):
     root = Path(project).resolve()
     records = []
     for name in paths:
-        relative = Path(name)
-        if relative.is_absolute() or any(part in ('.', '..') for part in relative.parts):
-            raise ValueError('成果ファイルは依頼フォルダ内の相対パスで指定してください。')
-        forbidden = {'.git', 'data', '__pycache__', '.env', '.ssh', '.aws', '.azure',
-                     'secrets', 'credentials', 'logs'}
-        if any(part.casefold() in forbidden or part.startswith('.') or
-               any(word in part.casefold() for word in ('secret', 'credential', 'private_key',
-                                                       'access_token', 'api_key'))
-               for part in relative.parts):
-            raise ValueError('成果ファイルとして機密設定や内部データを指定できません。')
+        relative = artifact_relative_path(name)
         target = (root / relative).resolve()
         if (not target.is_relative_to(root) or not target.is_file()
                 or target.stat().st_size > 20_000_000):

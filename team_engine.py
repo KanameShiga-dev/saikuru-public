@@ -2358,7 +2358,7 @@ class Engine:
         approval = self.store.get(job.get('plan_approval_id'), 'approval')
         requirements = self.store.get(job.get('requirements_approval_id'), 'approval')
         specs = approved_source(job, approval, requirements)
-        validate_plan(job, approval['payload'])
+        validate_plan(job, approval['payload'], check_current_inputs=False)
         return approval, specs
 
     def install_work_packages(self, job_id, *, expected_job_revision):

@@ -122,7 +122,7 @@ class InputArtifactTests(unittest.TestCase):
     def test_missing_job_context_is_fail_closed(self):
         with self.assertRaises(ValueError): wbs.validate_work_packages(self.value)
 
-    def test_new_flow_plan_and_approved_source_recheck_real_input_version(self):
+    def approved_fixture(self):
         from tests.test_work_packages import WorkPackageStorageTests
         fixture = WorkPackageStorageTests(); self.addCleanup(fixture.doCleanups); fixture.setUp()
         job = fixture.store.update(fixture.job['id'], project=str(self.root), p0_artifacts=[self.record])
@@ -132,10 +132,52 @@ class InputArtifactTests(unittest.TestCase):
         approval = fixture.engine.new_approval(fixture.planner, 'plan', payload)
         approval = fixture.store.update(approval['id'], status='approved')
         job = fixture.store.update(job['id'], plan_approval_id=approval['id'], requirements_approval_id=approval['id'])
+        return fixture, job, approval, payload
+
+    def test_proposal_checks_current_inputs_but_approved_source_retains_approved_version(self):
+        fixture, job, approval, payload = self.approved_fixture()
         self.assertEqual(len(wbs.approved_source(job, approval, approval)), 2)
         (self.root/'existing.py').unlink()
         with self.assertRaises(ValueError): validate_plan(job, payload)
-        with self.assertRaises(ValueError): wbs.approved_source(job, approval, approval)
+        self.assertEqual(len(wbs.approved_source(job, approval, approval)), 2)
+        self.assertEqual(validate_plan(job, payload, check_current_inputs=False)['primary_goal'], 'Fictional lookup')
+
+    def test_legitimate_input_edit_and_registry_update_does_not_break_view_or_idempotent_install(self):
+        fixture, job, approval, payload = self.approved_fixture()
+        mapping = fixture.engine.install_work_packages(job['id'], expected_job_revision=job['state_revision'])
+        before = fixture.engine.work_package_view(job['id'])
+        (self.root/'existing.py').write_text('fictional = "updated"\n', encoding='utf-8')
+        changed = {'path': 'existing.py', 'sha256': hashlib.sha256((self.root/'existing.py').read_bytes()).hexdigest()}
+        current = fixture.store.update(job['id'], p0_artifacts=[changed])
+        with patch('team_p0_contract.artifact_records', side_effect=AssertionError('Read-only view touched current file')):
+            self.assertEqual(fixture.engine.work_package_view(job['id']), before)
+            self.assertEqual(fixture.engine.install_work_packages(job['id'], expected_job_revision=current['state_revision']), mapping)
+        self.assertEqual(fixture.store.get(approval['id'], 'approval')['payload'], payload)
+        with self.assertRaises(ValueError): validate_plan(current, payload)
+        with self.assertRaises(ValueError): wbs.validate_input_artifacts(payload['work_packages'][0]['input_artifacts'], current)
+
+    def test_unregistered_or_deleted_current_input_does_not_hide_approved_view(self):
+        fixture, job, approval, payload = self.approved_fixture()
+        fixture.engine.install_work_packages(job['id'], expected_job_revision=job['state_revision'])
+        before = fixture.engine.work_package_view(job['id'])
+        (self.root/'existing.py').unlink()
+        fixture.store.update(job['id'], p0_artifacts=[])
+        self.assertEqual(fixture.engine.work_package_view(job['id']), before)
+        with self.assertRaises(ValueError): validate_plan(fixture.store.get(job['id']), payload)
+
+    def test_historical_input_mode_still_rejects_foreign_job_unsafe_paths_and_malformed_refs(self):
+        for change in ({'job_id': 'foreign-job'}, {'path': '../outside.py'}, {'path': '/absolute.py'},
+                       {'path': 'C:existing.py'}, {'path': './existing.py'}, {'sha256': 'wrong'}, {'extra': True}):
+            value = copy.deepcopy(self.value)
+            value['work_packages'][0]['input_artifacts'][0].update(change)
+            with self.assertRaises(ValueError): wbs.validate_work_packages(value, self.job, check_current_inputs=False)
+
+    def test_readonly_source_still_checks_approval_digest(self):
+        fixture, job, approval, payload = self.approved_fixture()
+        fixture.engine.install_work_packages(job['id'], expected_job_revision=job['state_revision'])
+        changed = copy.deepcopy(payload); changed['work_packages'][0]['input_artifacts'][0]['sha256'] = '0' * 64
+        fixture.store.update(approval['id'], payload=changed)
+        with self.assertRaises(ValueError): fixture.engine.work_package_view(job['id'])
 
 
 if __name__ == '__main__': unittest.main()

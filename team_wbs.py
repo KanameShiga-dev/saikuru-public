@@ -36,7 +36,7 @@ def _texts(value, label, *, required=True):
     return value
 
 
-def validate_work_packages(payload, job=None):
+def validate_work_packages(payload, job=None, *, check_current_inputs=True):
     """Validate an initial proposal without making it authoritative."""
     from team_checkpoint import scope_paths
     if not isinstance(payload, dict): raise ValueError('work_package_payload_invalid')
@@ -68,7 +68,7 @@ def validate_work_packages(payload, job=None):
         if (not set(links) <= allowed or not set(links) & deliverables
                 or not set(links) & criteria or label in dependencies):
             raise ValueError('work_package_reference_invalid')
-        validate_input_artifacts(spec.get('input_artifacts', []), job)
+        validate_input_artifacts(spec.get('input_artifacts', []), job, check_current=check_current_inputs)
         labels[label] = spec; folded.add(label.casefold())
     if set().union(*(set(spec['goal_links']) for spec in packages)) != allowed:
         raise ValueError('work_package_goal_coverage_missing')
@@ -105,11 +105,13 @@ def validate_work_packages(payload, job=None):
     return deepcopy(packages)
 
 
-def validate_input_artifacts(refs, job):
+def validate_input_artifacts(refs, job, *, check_current=True):
     """Existing inputs only; future outputs use depends_on, not fake hashes.
 
-    Reuse Job.p0_artifacts and its safe file verifier. This does not establish
-    producer WP ownership, review approval, or dispatch permission (W04.03+).
+    Proposal/current-input mode reuses Job.p0_artifacts and its safe file
+    verifier. Historical mode validates syntax and Job only; an approved
+    payload's digest authenticates its approval-time version. Neither mode
+    establishes producer WP review or dispatch permission (W04.03+).
     """
     if not isinstance(refs, list) or len(refs) > 20:
         raise ValueError('work_package_input_artifacts_invalid')
@@ -122,12 +124,23 @@ def validate_input_artifacts(refs, job):
             raise ValueError('work_package_input_artifacts_invalid')
         if not isinstance(job, dict) or ref['job_id'] != job.get('id'):
             raise ValueError('work_package_input_job_mismatch')
+        from team_p0_contract import artifact_relative_path
+        relative = artifact_relative_path(ref['path'])
+        if relative.drive or relative.root or relative.as_posix() != ref['path']:
+            raise ValueError('work_package_input_artifacts_invalid')
+        if ref['path'] in seen:
+            raise ValueError('work_package_input_artifacts_invalid')
+        seen.add(ref['path'])
+        if not check_current:
+            # An approved input describes its approval-time version. Reading
+            # that plan must not depend on today's registry or working tree.
+            continue
         # Reject unregistered/ambiguous refs before reading any file.
         registry = job.get('p0_artifacts') or []
         if not isinstance(registry, list):
             raise ValueError('work_package_input_artifacts_invalid')
         matches = [row for row in registry if isinstance(row, dict) and row.get('path') == ref['path']]
-        if len(matches) != 1 or matches[0].get('sha256') != ref['sha256'] or ref['path'] in seen:
+        if len(matches) != 1 or matches[0].get('sha256') != ref['sha256']:
             raise ValueError('work_package_input_artifact_missing_or_changed')
         from team_p0_contract import artifact_records
         try:
@@ -136,7 +149,6 @@ def validate_input_artifacts(refs, job):
             raise ValueError('work_package_input_artifact_unavailable') from None
         if actual != [{'path': ref['path'], 'sha256': ref['sha256']}]:
             raise ValueError('work_package_input_artifact_missing_or_changed')
-        seen.add(ref['path'])
 
 
 def plan_schema(base):
@@ -180,7 +192,7 @@ def approved_source(job, approval, requirements):
     if any(original.get(key) != current.get(key) for key in (
             'primary_goal', 'deliverables', 'acceptance_criteria', 'non_goals', 'constraints')):
         raise ValueError('work_package_requirements_changed')
-    return validate_work_packages(payload, job)
+    return validate_work_packages(payload, job, check_current_inputs=False)
 
 
 def projection(job, approval, spec):
