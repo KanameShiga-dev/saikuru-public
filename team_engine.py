@@ -2730,6 +2730,119 @@ class Engine:
         except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):
             return blocked('checkpoint_or_authority_invalid')
 
+    def prepare_checkpoint_session(self, source_task_id, target_task_id, *, writer_stopped=False):
+        """Read-only binding for later authorized fresh-attempt orchestration.
+
+        This deliberately does not queue/retry/reserve/start a worker. A full
+        filesystem/authority assessment precedes the binding, and all inputs are
+        compared again under the cooperative project gate. The scheduler must
+        still revalidate the binding immediately before its normal dispatch.
+        """
+        from team_session_policy import checkpoint_session_binding, continuation_reference_digest, _digest
+        from team_checkpoint import load_collection, inspect_collection
+        with self.store.lock, self.handoff.lock:
+            before = self._checkpoint_recovery_inputs(source_task_id, writer_stopped)
+            target = self.store.get(target_task_id, 'task')
+            if any(a.get('status') == 'pending' for a in self.store.for_job('approval', before[1]['id'])):
+                raise ValueError('checkpoint_session_decision_pending')
+        assessment = self.assess_checkpoint_resume(source_task_id, writer_stopped=writer_stopped)
+        with self._checkpoint_project(source_task_id):
+            record, job = before[:2]
+            collection = load_collection(job['project'], self.store.directory / 'checkpoints', record['id'])
+            workspace = inspect_collection(job['project'], self.store.directory / 'checkpoints', collection, before[3])
+            if (collection['manifest_digest'] != record['collection_ref']['digest']
+                    or workspace.get('current') is not True):
+                raise ValueError('checkpoint_session_files_changed')
+            with self.store.lock, self.handoff.lock:
+                after = self._checkpoint_recovery_inputs(source_task_id, writer_stopped)
+                if before != after or target != self.store.get(target_task_id, 'task'):
+                    raise ValueError('checkpoint_session_inputs_changed')
+                checkpoint, job, source = after[:3]
+                binding = checkpoint_session_binding(job, source, target, checkpoint, assessment)
+                binding.update(reference_digest=continuation_reference_digest(after[4], target_task_id),
+                               workspace_digest=_digest(workspace))
+                binding['binding_digest'] = _digest({k: v for k, v in binding.items() if k != 'binding_digest'})
+                return binding
+
+    def request_checkpoint_session(self, source_task_id, target_task_id, *, writer_stopped=False):
+        """Attach continuation data to an ALREADY queued, authorized next task.
+
+        Does not retry a failed task, reopen a job, clear a recovery fence or
+        start a worker. The ordinary scheduler and approval gates still apply.
+        """
+        with self.store.lock:
+            target = self.store.get(target_task_id, 'task')
+            source = self.store.get(source_task_id, 'task')
+            job = self.store.get(target['job_id'], 'job')
+            if (target.get('status') != 'queued' or source.get('status') != 'succeeded'
+                    or source_task_id == target_task_id or job.get('status') != 'running'):
+                raise ValueError('checkpoint_session_requires_queued_successor')
+        binding = self.prepare_checkpoint_session(source_task_id, target_task_id, writer_stopped=writer_stopped)
+        with self.store.atomic():
+            if target != self.store.get(target_task_id, 'task') or source != self.store.get(source_task_id, 'task'):
+                raise ValueError('checkpoint_session_inputs_changed')
+            if target.get('checkpoint_session_binding') == binding:
+                return binding
+            self.store.update(target_task_id, checkpoint_session_binding=binding)
+            self.store.event('checkpoint_session_requested',
+                '保存済み状態から新しい実行セッションへの引継ぎを準備しました。実行前に再確認します。',
+                target_task_id, job['id'], details={'checkpoint_id': binding['checkpoint_id']})
+        return binding
+
+    def _checkpoint_session_context(self, ctx):
+        """Final read-only check immediately before a fresh Provider call."""
+        from team_checkpoint import ready_candidate, reference_snapshot, load_collection, inspect_collection
+        from team_session_policy import continuation_reference_digest, validate_fresh_session, _digest
+        with self.store.lock, self.handoff.lock:
+            self.store.assert_attempt(ctx.task)
+            task = self.store.get(ctx.task['id'], 'task')
+            binding = task['checkpoint_session_binding']
+            job = self.store.get(task['job_id'], 'job')
+            if self.project_blocked(job['project']) or ctx.task.get('profile') != task.get('profile'):
+                raise ValueError('checkpoint_session_project_or_profile_changed')
+            if any(a.get('status') == 'pending' for a in self.store.for_job('approval', job['id'])):
+                raise ValueError('checkpoint_session_decision_pending')
+            for other in self.store.all('task'):
+                if (other['id'] != task['id'] and (other.get('status') == 'running'
+                        or (other.get('current_attempt') or {}).get('status') == 'running')):
+                    parent = self.store.get(other['job_id'], 'job')
+                    if canonical(parent['project']) == canonical(job['project']):
+                        raise ValueError('checkpoint_session_other_writer_active')
+            source = self.store.get(binding['source_task_id'], 'task')
+            checkpoint, _ = ready_candidate(self.store, source)
+            if (checkpoint['id'] != binding['checkpoint_id']
+                    or checkpoint['manifest_digest'] != binding['checkpoint_digest']
+                    or source.get('status') != 'succeeded'
+                    or (source.get('current_attempt') or {}).get('status') not in ('closed', 'fenced')
+                    or (source.get('current_attempt') or {}).get('id') != binding['source_attempt_id']):
+                raise ValueError('checkpoint_session_source_changed')
+            refs = reference_snapshot(self.store, self.handoff, job, source)
+            if continuation_reference_digest(refs, task['id']) != binding['reference_digest']:
+                raise ValueError('checkpoint_session_authority_changed')
+            roots = self.config['approved_roots']
+            manifest = self.handoff.versioned_context(self.store, task['id'], approved_roots=roots,
+                expected_job_revision=job['state_revision'], expected_task_revision=task['state_revision'],
+                expected_attempt_id=task['current_attempt']['id'])
+            metadata = validate_fresh_session(binding, job, task, manifest)
+            approval = self.store.get(job['plan_approval_id'], 'approval')
+            from team_p0_contract import checkpoint_scope
+            paths = checkpoint_scope(job, approval)
+        collection = load_collection(job['project'], self.store.directory / 'checkpoints', checkpoint['id'])
+        workspace = inspect_collection(job['project'], self.store.directory / 'checkpoints', collection, paths)
+        if (collection['manifest_digest'] != checkpoint['collection_ref']['digest']
+                or _digest(workspace) != binding['workspace_digest']):
+            raise ValueError('checkpoint_session_files_changed')
+        with self.store.lock, self.handoff.lock:
+            self.store.assert_attempt(ctx.task)
+            current = self.store.get(task['id'], 'task')
+            current_job = self.store.get(job['id'], 'job')
+            current_source = self.store.get(source['id'], 'task')
+            if (current != task or current_job != job or current_source != source
+                    or reference_snapshot(self.store, self.handoff, job, source) != refs):
+                raise ValueError('checkpoint_session_inputs_changed')
+        ctx.agent_run['checkpoint_session'] = metadata
+        return json.dumps({'checkpoint_reference': metadata, 'current_domain_context': manifest}, ensure_ascii=False)
+
     def sync_handoff(self, job_id):
         with self.store.atomic():
 
@@ -2994,11 +3107,11 @@ class Engine:
 
             + '\n範囲が指定されている場合、その判断を後続担当にも適用する。後回しとされた検証だけが残る場合は質問を繰り返さず、status=handoffで未実施項目をchecksとsummaryに明記する。新しい障害や範囲外の判断はblockedで質問する。handoffは合格や元の依頼全体の完了を意味しない。\n'
 
-            + '\n\n引き継ぎDBの最新情報と履歴（出典・検証状態を確認）:\n' + self.handoff.context(job, ctx.context_files, ctx.context_refs, context_budget(self.config),
+            + '\n\n引き継ぎDBの最新情報と履歴（出典・検証状態を確認）:\n' + ('__SAIKURU_FRESH_CHECKPOINT_CONTEXT__' if ctx.task.get('checkpoint_session_binding') else self.handoff.context(job, ctx.context_files, ctx.context_refs, context_budget(self.config),
                                                                                       ctx.reference_candidates,
                                                                                       review_task_id=ctx.task['id'] if ctx.task['role'] == 'reviewer' else None,
                                                                                       review_instruction=ctx.task['instruction'] if ctx.task['role'] == 'reviewer' else None,
-                                                                                      review_context_mode=review_context_mode))
+                                                                                      review_context_mode=review_context_mode)))
 
 
 
@@ -3757,6 +3870,12 @@ class Engine:
             # that address (or a possible URL query) to the next provider.
             from team_egress_guard import redact_loopback_urls
             prompt = redact_loopback_urls(prompt)
+            if task.get('checkpoint_session_binding'):
+                # Legacy transcripts/native-session identifiers never replace
+                # the current, freshly checked domain context for this path.
+                if prompt.count('__SAIKURU_FRESH_CHECKPOINT_CONTEXT__') != 1:
+                    raise ValueError('checkpoint_session_context_missing')
+                prompt = prompt.replace('__SAIKURU_FRESH_CHECKPOINT_CONTEXT__', self._checkpoint_session_context(ctx))
             result = ADAPTERS[task['profile']['adapter']]().run(ctx, prompt, schema)
             if task['role'] == 'planner':
                 with self.store.atomic():
@@ -3960,6 +4079,22 @@ class Engine:
 
     def tick(self):
 
+        if self.paused or self.shutdown.is_set():
+            return
+        # File/Git inspection must happen outside Store/Handoff locks. A
+        # preparation is only a short-lived candidate, never a dispatch token.
+        session_preflight = {}
+        for candidate in self.store.all('task'):
+            if candidate.get('status') != 'queued' or not candidate.get('checkpoint_session_binding'):
+                continue
+            try:
+                stored = candidate['checkpoint_session_binding']
+                fresh = self.prepare_checkpoint_session(stored['source_task_id'], candidate['id'], writer_stopped=True)
+                if fresh == stored:
+                    session_preflight[candidate['id']] = candidate['state_revision']
+            except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
+                pass
+
         with self.store.lock:
 
             if self.paused or self.shutdown.is_set():
@@ -4077,7 +4212,7 @@ class Engine:
 
                 # 2026-10-19 (user request): a provider whose allowance is known to be used up is not tried first;
                 # the task moves to the other provider before it starts, and the user is told (_failover).
-                if (task['profile'].get('adapter') in self.PROVIDER_NAMES
+                if (not task.get('checkpoint_session_binding') and task['profile'].get('adapter') in self.PROVIDER_NAMES
                         and self._known_exhausted(task['profile'], (getattr(self, 'usage_snapshot', None) or (lambda: {}))())
                         and self._failover(task, job, 'usage_limit', before_start=True)):
                     continue
@@ -4122,6 +4257,14 @@ class Engine:
                                                       for w in working):
                         continue
 
+                if task.get('checkpoint_session_binding'):
+                    if session_preflight.get(task['id']) != task['state_revision']:
+                        self.store.update(task['id'], status='blocked', failure_code='checkpoint_session_changed',
+                            summary='引継ぎ対象の保存状態・承認・モデル設定を再確認してください。自動再開していません。')
+                        self.store.update(job['id'], status='blocked')
+                        self.store.event('checkpoint_session_blocked', '新規セッションへの引継ぎ条件が変わったため停止しました。',
+                            task['id'], job['id'])
+                        continue
                 if job.get('workflow_contract_version') == 1:
                     task = self.store.reserve_attempt(task['id'], task['state_revision'])
                 else:
@@ -4441,6 +4584,8 @@ class Engine:
         the other provider is enabled for the role and usable now. Returns True when switched. Otherwise the task keeps
         waiting (or stops, for a Copilot sign-in) and the user is told once per job why it did not switch. The original
         profile comes back for tasks not yet started once it can run again (_restore_recovered_models)."""
+        if task.get('checkpoint_session_binding'):
+            return False  # Continuation never changes the selected profile.
         from team_config import FAILOVER_DATA_CLASSES, failover_profile
         if job.get('p0_contract_version') == 1:
             return False
@@ -4541,7 +4686,7 @@ class Engine:
 
             policy = task.get('auto_return')
 
-            if not policy or task['status'] not in ('queued', 'failed', 'interrupted', 'blocked') or task['id'] in self.active:
+            if task.get('checkpoint_session_binding') or not policy or task['status'] not in ('queued', 'failed', 'interrupted', 'blocked') or task['id'] in self.active:
 
                 continue
 
