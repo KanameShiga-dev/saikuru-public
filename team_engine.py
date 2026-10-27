@@ -520,6 +520,23 @@ class Context:
         self.engine.store.update(self.task['id'], agent_run=self.agent_run)
 
     @_attempt_callback
+    def record_context_observation(self, token_usage, session_id, *, compacted=False):
+        """Opted-in numeric telemetry only; old generations cannot update it."""
+        from team_usage_metrics import codex_context_observation
+        if self.agent_run is None or self.agent_run.get('provider') != 'codex':
+            return
+        job = self.engine.store.get(self.task['job_id'], 'job')
+        if job.get('workflow_contract_version') != 1:
+            return
+        if not isinstance(session_id, str) or not session_id or session_id != self.agent_run.get('session_id'):
+            return
+        observation = codex_context_observation(token_usage, received_at=now(), compacted=compacted)
+        observation.update(attempt_id=self.task['current_attempt']['id'], run_id=self.agent_run['id'],
+                           session_digest=hashlib.sha256(session_id.encode('utf-8')).hexdigest())
+        self.agent_run['context_observation'] = observation
+        self.engine.store.update(self.task['id'], agent_run=self.agent_run)
+
+    @_attempt_callback
     def observe_message(self, message):
         """Per-API-call usage and tool calls from the stream, kept so a failed or cancelled run still has a
         (partial) measurement. Streamed blocks of one call share an id; the last usage per id is used."""
@@ -613,6 +630,8 @@ class Context:
 
         self.check()
 
+        if self.agent_run.get('session_id') != session_id:
+            self.agent_run.pop('context_observation', None)
         self.agent_run.update(session_id=session_id, launch_method=launch_method, status='running')
 
         self.engine.store.update(self.task['id'], agent_run=self.agent_run)
@@ -2400,6 +2419,48 @@ class Engine:
 
 
 
+    def _reserve_context_save(self, task, *, safe_boundary=False):
+        """Reserve once after worker return; never publishes ready or resumes."""
+        from team_context_optimizer import context_checkpoint_decision
+        from team_p0_contract import workflow_version
+        if safe_boundary is not True:
+            raise ValueError('文脈の保存予約は安全な工程境界で行ってください。')
+        with self.store.atomic():
+            job = self.store.get(task['job_id'], 'job')
+            if workflow_version(job) is None:
+                return None
+            self.store.assert_attempt(task)
+            current = self.store.get(task['id'], 'task')
+            if task['id'] in self.active:
+                raise ValueError('担当の処理中には保存境界を確定しません。')
+            previous = current.get('context_save_request') or {}
+            if previous.get('attempt_id') == task['current_attempt']['id']:
+                return previous
+            run = current.get('agent_run') or {}
+            observation = run.get('context_observation') or {}
+            session = run.get('session_id')
+            if (not isinstance(session, str) or not session
+                    or observation.get('attempt_id') != task['current_attempt']['id']
+                    or observation.get('run_id') != run.get('id')
+                    or observation.get('session_digest') != hashlib.sha256(session.encode('utf-8')).hexdigest()):
+                observation = None
+            try:
+                decision = context_checkpoint_decision(observation, at=now(), policy=self.config.get('context_checkpoint_policy'))
+            except ValueError:
+                decision = context_checkpoint_decision(None, at=now())
+                decision['reason'] = 'invalid_context_policy'
+            if not decision['save_at_boundary']:
+                return None
+            request = {'id': uid(), 'schema_version': 1, 'attempt_id': task['current_attempt']['id'],
+                       'state': 'reserved', 'boundary': 'worker_return', 'decision': decision,
+                       'ready': False, 'resume_allowed': False, 'created_at': now()}
+            request['event_seq'] = self.store.event('context_save_reserved',
+                '文脈の余力を確認し、工程境界での保存を予約しました。保存の確定・再開は別途確認します。',
+                task['id'], job['id'], details={'request_id': request['id'], 'attempt_id': request['attempt_id'],
+                    'measurement': decision['measurement'], 'reason': decision['reason']})
+            self.store.update(task['id'], context_save_request=request)
+            return request
+
     def _checkpoint_inputs(self, task_id, writer_stopped):
         from team_checkpoint import reference_snapshot, CheckpointUnavailable
         from team_p0_contract import checkpoint_scope
@@ -3889,7 +3950,13 @@ class Engine:
 
 
 
-                self.store.close_attempt(task['id'], 'closed', agent_outcome)
+                if self.store.get(task['job_id'], 'job').get('workflow_contract_version') == 1:
+                    try:
+                        self._reserve_context_save(task, safe_boundary=True)
+                    finally:
+                        self.store.close_attempt(task['id'], 'closed', agent_outcome)
+                else:
+                    self.store.close_attempt(task['id'], 'closed', agent_outcome)
 
     def tick(self):
 
@@ -4625,7 +4692,7 @@ class Engine:
         # Native workers can write outside the recorded tool protocol. Absence
         # of operation_* events is not evidence that a launched worker had no effect.
         attempt_id = (task.get('current_attempt') or {}).get('id')
-        if task.get('agent_run_id') or any(run.get('task_id') == task_id or run.get('attempt_id') == attempt_id
+        if task.get('agent_run') or task.get('agent_run_id') or any(run.get('task_id') == task_id or run.get('attempt_id') == attempt_id
                                          for run in self.store.for_job('agent_run', job['id'])):
             raise ValueError('担当プロセスの作用が未照合です。この経路では再開できません。')
         if any(a.get('status') == 'pending' and a.get('kind') in ('tool', 'question', 'context_conflict')

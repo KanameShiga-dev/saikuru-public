@@ -180,6 +180,17 @@ def decode_claude_result(message, schema, assistant_text=''):
                                      'format')
 
 
+def observe_codex_context(ctx, method, params):
+    """Optional observational hook; no permission, execution or cancellation."""
+    callback = getattr(ctx, 'record_context_observation', None)
+    if not callable(callback) or not isinstance(params, dict):
+        return
+    if method == 'thread/tokenUsage/updated':
+        callback(params.get('tokenUsage'), params.get('threadId'))
+    elif method in ('item/started', 'item/completed') and (params.get('item') or {}).get('type') == 'contextCompaction':
+        callback({}, params.get('threadId'), compacted=True)
+
+
 class CodexAdapter:
     def run(self, ctx, prompt, schema):
         from team_egress_guard import require_safe_egress
@@ -231,6 +242,7 @@ class CodexAdapter:
         def handle(msg):
             method = msg.get('method', '')
             params = msg.get('params') or {}
+            observe_codex_context(ctx, method, params)
             if 'id' in msg and method:
                 if method in ('item/commandExecution/requestApproval', 'item/fileChange/requestApproval'):
                     payload = {'source': 'codex', 'operation': method, 'details': params}

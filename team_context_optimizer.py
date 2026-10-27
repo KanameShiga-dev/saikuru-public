@@ -344,3 +344,46 @@ def apply(prompt, selection):
     if prompt.count(needle) != 1:
         return None
     return prompt.replace(needle, json.dumps(selection['replacement'], ensure_ascii=False)[1:-1])
+
+
+CONTEXT_CHECKPOINT_POLICY = {'handoff_reserve_tokens': 4096, 'safety_fraction': 0.10,
+                             'max_age_seconds': 30.0}
+
+
+def context_checkpoint_decision(observation, *, at, policy=None):
+    """Pure reservation decision, not an interrupt, summary or resume permission.
+
+    Threshold formula is synthetically calibrated only. Actual occupancy is
+    accepted solely from an explicit future measured source, never Codex last
+    input, cumulative tokens, characters or subscription quota.
+    """
+    import math
+    chosen = dict(CONTEXT_CHECKPOINT_POLICY)
+    if policy is not None:
+        if not isinstance(policy, dict) or set(policy) - set(chosen):
+            raise ValueError('文脈保存方針の項目が不正です。')
+        chosen.update(policy)
+    reserve, fraction, max_age = (chosen[k] for k in ('handoff_reserve_tokens', 'safety_fraction', 'max_age_seconds'))
+    finite = lambda v: type(v) in (int, float) and math.isfinite(v)
+    if (type(reserve) is not int or not 1 <= reserve <= 1_000_000 or not finite(fraction) or not 0 <= fraction < 1
+            or not finite(max_age) or not 0 < max_age <= 3600 or not finite(at)):
+        raise ValueError('文脈保存方針の値が不正です。')
+    row = observation if isinstance(observation, dict) else {}
+    capacity, used, measured_at = (row.get(k) for k in ('capacity_tokens', 'used_tokens', 'observed_at'))
+    valid = (type(row.get('schema_version')) is int and row['schema_version'] == 1
+             and type(capacity) is int and 0 < capacity <= 2**63 - 1 and type(used) is int and 0 <= used <= capacity
+             and finite(measured_at) and 0 <= at - measured_at <= max_age and not row.get('invalidated_by'))
+    measurement = row.get('measurement') if valid else 'unknown'
+    if measurement not in ('measured', 'proxy'): measurement = 'unknown'
+    # A proxy is never promoted to measured, even if the envelope is relabelled.
+    if measurement == 'measured' and row.get('metric') != 'context_occupancy_tokens': measurement = 'unknown'
+    if measurement == 'proxy' and row.get('metric') != 'last_turn_input_tokens': measurement = 'unknown'
+    threshold = max(0, int(capacity * (1 - fraction)) - reserve) if type(capacity) is int and 0 < capacity <= 2**63 - 1 else None
+    save = measurement != 'measured' or used >= threshold
+    reason = ('context_usage_unknown' if measurement == 'unknown' else 'proxy_not_live_occupancy' if measurement == 'proxy'
+              else 'handoff_reserve_reached' if save else 'measured_headroom_sufficient')
+    return {'schema_version': 1, 'measurement': measurement, 'save_at_boundary': save, 'reason': reason,
+            'threshold_tokens': threshold, 'handoff_reserve_tokens': reserve, 'safety_fraction': fraction,
+            'remaining_tokens': capacity - used if measurement == 'measured' else None,
+            'proxy_pressure_ratio': used / capacity if measurement == 'proxy' else None,
+            'calibration': 'synthetic_formula_v1_not_provider_calibrated', 'execution_permission': 'none'}

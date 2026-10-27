@@ -120,3 +120,27 @@ def context_budget(config):
     if mode not in BUDGET_MODES or type(chars) is not int or not 1000 <= chars <= 100000:
         return {'mode': 'off', 'reuse_chars': 8000}
     return {'mode': mode, 'reuse_chars': chars}
+
+
+def codex_context_observation(token_usage, *, received_at, compacted=False):
+    """Local receipt of Codex's LAST TURN INPUT proxy, never live occupancy.
+
+    Cumulative totals and character counts cannot fill missing context fields.
+    No prompt, native session identifier, token/cost estimate or default 0 stored.
+    """
+    import math
+    if isinstance(received_at, bool) or not isinstance(received_at, (int, float)) or not math.isfinite(received_at):
+        raise ValueError('文脈観測の時刻が不正です。')
+    source = token_usage if isinstance(token_usage, dict) else {}
+    last = source.get('last') if isinstance(source.get('last'), dict) else {}
+    capacity = source.get('modelContextWindow')
+    capacity = capacity if type(capacity) is int and 0 < capacity <= 2**63 - 1 else None
+    used = last.get('inputTokens')
+    used = used if type(used) is int and 0 <= used <= 2**63 - 1 else None
+    known = not compacted and capacity is not None and used is not None and used <= capacity
+    return {'schema_version': 1, 'provider': 'codex',
+            'measurement': 'proxy' if known else 'unknown', 'metric': 'last_turn_input_tokens',
+            'capacity_tokens': capacity, 'used_tokens': used if known else None,
+            'observed_at': float(received_at), 'time_source': 'local_receipt',
+            'invalidated_by': 'compaction' if compacted else None,
+            'reason': 'last_turn_is_not_occupancy' if known else ('compaction' if compacted else 'unavailable_or_invalid')}
