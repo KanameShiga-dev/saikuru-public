@@ -8,6 +8,7 @@ from copy import deepcopy
 import hashlib
 import json
 import re
+import time
 
 MAX_PACKAGES = 6  # Preserve the existing initial plan's 1..6 Task bound.
 GUIDE = ('\n新方式の計画はwork_packagesとcheckpoint_pathsを含める。work_packagesは'
@@ -214,3 +215,197 @@ def validate_projection(job, approval, specs, records):
                 or 'task_ids' in row or 'depends_on' in row):
             raise ValueError('work_package_projection_changed')
     return {row['wbs_id']: row['id'] for row in records}
+
+
+def task_evidence_digest(task):
+    return digest({key: task.get(key) for key in ('id', 'role', 'agent_name', 'status', 'result',
+        'validation_runs', 'test_asset_snapshot', 'test_assets', 'current_attempt', 'workflow_artifact_records')})
+
+
+def workspace_resources(job, approval):
+    from team_handoff import canonical
+    boundary = (approval.get('workflow_revision') or {}).get('workspace_boundary') or {}
+    paths = [job['project']]
+    if boundary.get('status') == 'ready': paths.append(boundary['integration_root'])
+    return sorted({canonical(path) for path in paths})
+
+
+def plan_instruction_matches(task, expected):
+    from team_instructions import compact_instruction
+    history = task.get('instruction_history') or []
+    if not isinstance(history, list) or len(history) > 1000: return False
+    for row in history:
+        if (not isinstance(row,dict) or row.get('instruction') != expected
+                or row.get('reason') not in ('再試行前の指示整理','重複指示の整理')
+                or not isinstance(row.get('submitted_note'),str)):
+            return False
+        expected = compact_instruction(expected,row['submitted_note'])
+    return task.get('instruction') == expected
+
+
+def feature_review_receipt(store, job, plan, requirements, wp, specs, records, cache):
+    """Read an existing typed decision; never issue or infer feature approval.
+
+    W04.05 owns target creation, technical checks and authenticated decisions.
+    The returned file refs are observations to verify outside the Store lock.
+    """
+    if wp['id'] in cache: return cache[wp['id']]
+    if wp.get('execution_state') != 'succeeded' or wp.get('review_status') != 'approved':
+        raise ValueError('dependency_feature_review_required')
+    review = store.get(wp.get('feature_review_approval_id'), 'approval')
+    payload = review.get('payload') or {}; target = payload.get('feature_target')
+    if (review.get('job_id') != job['id'] or review.get('kind') != 'feature_review'
+            or review.get('status') != 'approved' or review.get('intended_role') != 'end_user'
+            or not isinstance(target, dict) or review.get('digest') != hashlib.sha256(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()):
+        raise ValueError('dependency_feature_review_invalid')
+    target_hash = digest(target)
+    if (wp.get('feature_target_digest') != target_hash or payload.get('feature_target_digest') != target_hash
+            or type(target.get('schema_version')) is not int or target['schema_version'] != 1
+            or target.get('job_id') != job['id'] or target.get('work_package_id') != wp['id']
+            or type(target.get('requirement_revision')) is not int or type(target.get('plan_revision')) is not int
+            or target.get('requirement_revision') != job['requirement_revision']
+            or target.get('plan_revision') != job['plan_revision']
+            or target.get('requirements_approval_digest') != requirements['digest']
+            or target.get('plan_approval_digest') != plan['digest']
+            or target.get('criteria') != {'goal_links':wp['goal_links'], 'done_when':wp['done_when']}
+            or target.get('blocking_refs') != []):
+        raise ValueError('dependency_feature_target_changed')
+    ack = review.get('review_acknowledgement') or {}
+    if (ack.get('action') != 'feature_review_confirmation' or ack.get('actor') != 'authenticated_local_app_session'
+            or ack.get('target_digest') != target_hash):
+        raise ValueError('dependency_feature_confirmation_required')
+    row = store.db.execute("SELECT body FROM events WHERE json_extract(body,'$.type')='feature_review_decided' "
+        "AND json_extract(body,'$.details.approval_id')=? ORDER BY seq DESC LIMIT 1", (review['id'],)).fetchone()
+    decision = (json.loads(row[0]).get('details') or {}) if row else {}
+    expected = {'approval_id':review['id'], 'work_package_id':wp['id'], 'target_digest':target_hash,
+        'decision':'approved', 'actor':'authenticated_local_app_session',
+        'requirement_revision':job['requirement_revision'], 'plan_revision':job['plan_revision']}
+    if any(decision.get(key) != value for key,value in expected.items()):
+        raise ValueError('dependency_feature_decision_required')
+    members = [t for t in store.for_job('task',job['id']) if t.get('work_package_id') == wp['id']]
+    if (not members or any(t.get('status') != 'succeeded' for t in members)
+            or not any(t.get('role') == 'reviewer' for t in members)
+            or target.get('evidence_refs') != {t['id']:task_evidence_digest(t) for t in members}):
+        raise ValueError('dependency_feature_evidence_changed')
+    allowed = set(plan['payload']['checkpoint_paths']) | set(plan['payload']['code_test_plan'].get('existing_tests', []))
+    files = {}
+    from team_p0_contract import artifact_relative_path
+    for key in ('source_snapshot', 'test_snapshot'):
+        snapshot = target.get(key)
+        if not isinstance(snapshot, dict) or not snapshot or len(snapshot) > 84:
+            raise ValueError('dependency_feature_snapshot_required')
+        for path, sha in snapshot.items():
+            artifact_relative_path(path)
+            if path not in allowed or not isinstance(sha,str) or not re.fullmatch('[0-9a-f]{64}',sha):
+                raise ValueError('dependency_feature_snapshot_invalid')
+            if path in files and files[path] != sha: raise ValueError('dependency_feature_snapshot_invalid')
+            files[path] = sha
+    artifacts = target.get('artifacts')
+    raw_registry = job.get('p0_artifacts') or []
+    registry = {row['path']:row['sha256'] for row in raw_registry}
+    if len(registry) != len(raw_registry): raise ValueError('dependency_feature_artifacts_changed')
+    if (not isinstance(artifacts,list) or not artifacts or any(not isinstance(row,dict)
+            or set(row) != {'path','sha256'} or files.get(row['path']) != row['sha256']
+            or registry.get(row['path']) != row['sha256'] for row in artifacts)):
+        raise ValueError('dependency_feature_artifacts_changed')
+    dependencies = {}
+    by_label = {row['wbs_id']:row for row in records}
+    for label in specs[wp['wbs_id']]['depends_on']:
+        proof = feature_review_receipt(store,job,plan,requirements,by_label[label],specs,records,cache)
+        dependencies[by_label[label]['id']] = {'approval_id':proof['approval_id'],'target_digest':proof['target_digest']}
+        for path,sha in proof['files'].items():
+            if path in files and files[path] != sha: raise ValueError('dependency_feature_snapshot_invalid')
+            files[path] = sha
+    if target.get('dependency_targets') != dependencies:
+        raise ValueError('dependency_feature_target_changed')
+    proof = {'approval_id':review['id'],'target_digest':target_hash,'files':files}
+    cache[wp['id']] = proof
+    return proof
+
+
+def dispatch_state(store, job_id, *, active=(), running_task_id=None):
+    """Database-only single-series candidate selection; not permission to run."""
+    from team_handoff import canonical
+    job = store.get(job_id,'job')
+    plan = store.get(job.get('plan_approval_id'),'approval')
+    requirements = store.get(job.get('requirements_approval_id'),'approval')
+    specs_list = approved_source(job,plan,requirements)
+    specs = {s['wbs_id']:s for s in specs_list}
+    records = [r for r in store.for_job('work_package',job_id) if r.get('plan_revision') == job['plan_revision']]
+    mapping = validate_projection(job,plan,specs_list,records)
+    tasks = store.for_job('task',job_id); approvals = store.for_job('approval',job_id)
+    resources = workspace_resources(job,plan)
+    busy = []
+    for other in store.all('task'):
+        if other['id'] == running_task_id: continue
+        attempt = other.get('current_attempt') or {}
+        if other['status'] not in ('running','awaiting_approval') and attempt.get('status') != 'running' and other['id'] not in active:
+            continue
+        other_job = store.get(other['job_id'],'job')
+        held = attempt.get('workflow_resources') or [canonical(other_job['project'])]
+        if other['job_id'] == job_id or set(resources) & set(held): busy.append(other['id'])
+    base = {'job':job,'plan':plan,'requirements':requirements,'records':records,'tasks':tasks,'approvals':approvals,'busy':busy}
+    signature = digest(base)
+    result = {'status':'waiting','candidate_task_id':None,'reasons':[], 'state_signature':signature}
+    if job['status'] != 'running': return dict(result,reasons=['job_not_running'])
+    if busy: return dict(result,reasons=['workspace_or_series_busy'])
+    if any(a['status'] == 'pending' for a in approvals): return dict(result,reasons=['pending_decision'])
+    by_id = {r['id']:r for r in records}; cache = {}; waiting = []
+    queued = [t for t in tasks if t['status'] == 'queued' or t['id'] == running_task_id]
+    for task in queued:
+        if task.get('role') == 'planner': continue
+        reasons = []
+        if (task.get('plan_revision') != job['plan_revision'] or task.get('requirement_revision') != job['requirement_revision']
+                or task.get('spec_source_approval_id') != plan['id']): reasons.append('task_plan_not_current')
+        if task.get('recovery_check_required'): reasons.append('recovery_confirmation_required')
+        if task.get('retry_at') and time.time() < task['retry_at']: reasons.append('retry_wait')
+        wp = by_id.get(task.get('work_package_id'))
+        inputs, files, proofs = [], {}, {}
+        try:
+            if wp:
+                index = task.get('plan_task_index')
+                planned = plan['payload']['tasks']
+                if type(index) is not int or not 0 <= index < len(planned): raise ValueError('task_plan_spec_required')
+                spec = planned[index]
+                if (mapping.get(spec['wbs_id']) != wp['id'] or any(task.get(k) != spec[k] for k in ('title','role','goal_links'))
+                        or not plan_instruction_matches(task,spec['instruction'])):
+                    raise ValueError('task_plan_spec_changed')
+                prior = [t for t in tasks if t.get('plan_revision') == job['plan_revision']
+                         and t.get('spec_source_approval_id') == plan['id'] and t.get('plan_task_index') == index-1]
+                expected_after = plan['task_id'] if index == 0 else prior[0]['id'] if len(prior) == 1 else None
+                if task.get('after') != expected_after or expected_after is None: raise ValueError('task_after_changed')
+                if wp['execution_state'] not in ('planned','ready','running'): raise ValueError('work_package_not_executable')
+                for label in specs[wp['wbs_id']]['depends_on']:
+                    proof = feature_review_receipt(store,job,plan,requirements,by_id[mapping[label]],specs,records,cache)
+                    proofs[mapping[label]] = {k:proof[k] for k in ('approval_id','target_digest')}
+                    files.update(proof['files'])
+                for ref in specs[wp['wbs_id']].get('input_artifacts', []):
+                    current = dict(ref)
+                    producers = [t for t in tasks if t.get('work_package_id') == wp['id'] and t.get('status') == 'succeeded'
+                        and t.get('plan_revision') == job['plan_revision'] and ref['path'] in ((t.get('result') or {}).get('artifacts') or [])]
+                    if producers:
+                        matches = [r for r in producers[-1].get('workflow_artifact_records') or [] if r['path'] == ref['path']]
+                        if len(matches) != 1: raise ValueError('input_artifact_registry_invalid')
+                        current['sha256'] = matches[0]['sha256']
+                    inputs.append(current)
+            elif task.get('workflow_job_task') is True:
+                for row in records:
+                    proof = feature_review_receipt(store,job,plan,requirements,row,specs,records,cache)
+                    proofs[row['id']] = {k:proof[k] for k in ('approval_id','target_digest')}; files.update(proof['files'])
+            else: raise ValueError('task_work_package_authority_required')
+            if task.get('after'):
+                predecessor = store.get(task['after'],'task')
+                if predecessor['job_id'] != job_id or predecessor['status'] != 'succeeded': reasons.append('after_not_succeeded')
+        except (ValueError,KeyError,TypeError) as error:
+            code = str(error)
+            reasons.append(code if re.fullmatch('[a-z_]+',code) else 'dependency_feature_proof_invalid')
+        if reasons:
+            waiting.append({'task_id':task['id'],'reasons':sorted(set(reasons))}); continue
+        descriptor = {'task_id':task['id'],'job_id':job_id,'work_package_id':wp['id'] if wp else None,
+            'requirement_revision':job['requirement_revision'],'requirements_approval_id':job['requirements_approval_id'],
+            'plan_revision':job['plan_revision'],'plan_approval_id':plan['id'],'plan_digest':plan['digest'],
+            'task_spec_digest':digest({k:task.get(k) for k in ('title','instruction','role','profile','goal_links','after')}),
+            'dependency_targets':proofs,'resources':resources,'input_refs':inputs,'dependency_files':files}
+        return dict(result,status='ready',candidate_task_id=task['id'],reasons=[],descriptor=descriptor,waiting=waiting)
+    return dict(result,reasons=['no_ready_task'],waiting=waiting)

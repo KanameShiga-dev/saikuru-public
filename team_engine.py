@@ -1244,6 +1244,11 @@ class Engine:
 
         if package_fields is not None:
             task.update(package_fields)
+        if job.get('workflow_contract_version') == 1 and job.get('plan_approval_id') and role != 'planner':
+            approval = self.store.get(job['plan_approval_id'], 'approval')
+            if isinstance((approval.get('workflow_revision') or {}).get('workspace_boundary'), dict):
+                task.update(plan_revision=job['plan_revision'], requirement_revision=job['requirement_revision'],
+                            spec_source_approval_id=job['plan_approval_id'], workflow_job_task=package_fields is None)
         return self.store.put('task', task)
 
 
@@ -2470,6 +2475,75 @@ class Engine:
 
 
 
+    def workflow_dispatch_view(self, job_id, *, running_task_id=None):
+        """A fresh observation, never a reusable launch permission."""
+        from team_wbs import dispatch_state, validate_input_artifacts, digest
+        try:
+            with self.store.lock:
+                result = dispatch_state(self.store, job_id, active=set(self.active), running_task_id=running_task_id)
+                job = self.store.get(job_id, 'job')
+                task = self.store.get(result['candidate_task_id'], 'task') if result['candidate_task_id'] else None
+            if result['status'] != 'ready': return result
+            self._execution_workspace(task)
+            descriptor = result['descriptor']
+            validate_input_artifacts(descriptor['input_refs'], job)
+            from team_p0_contract import artifact_records
+            for path, sha in descriptor['dependency_files'].items():
+                if artifact_records(job['project'], [path]) != [{'path':path,'sha256':sha}]:
+                    raise ValueError('dependency_artifact_changed')
+            result['file_observation_digest'] = digest({'inputs':descriptor['input_refs'],'dependencies':descriptor['dependency_files']})
+            return result
+        except (ValueError, KeyError, TypeError, OSError, ProviderError, sqlite3.Error) as error:
+            reason = error.code if isinstance(error,ProviderError) else str(error)
+            if not re.fullmatch(r'(?:work_package|dependency|workspace|workflow)_[a-z_]+',reason):
+                reason = 'workflow_authority_or_files_changed'
+            return {'status':'blocked','candidate_task_id':None,'reasons':[reason]}
+
+    def _uses_wbs_dispatch(self, job, task=None):
+        if job.get('workflow_contract_version') != 1: return False
+        if task and task.get('work_package_id'): return True
+        if not job.get('plan_approval_id'): return False
+        plan = self.store.get(job['plan_approval_id'], 'approval')
+        return isinstance((plan.get('workflow_revision') or {}).get('workspace_boundary'), dict)
+
+    def _reserve_workflow_attempt(self, task, observed):
+        from team_wbs import dispatch_state, digest
+        from team_store import StaleAttempt
+        with self.store.atomic():
+            fresh = dispatch_state(self.store, task['job_id'], active=set(self.active))
+            if (observed.get('status') != 'ready' or fresh.get('status') != 'ready'
+                    or fresh.get('candidate_task_id') != task['id'] or observed.get('candidate_task_id') != task['id']
+                    or fresh['state_signature'] != observed.get('state_signature')
+                    or fresh['descriptor'] != observed.get('descriptor')
+                    or observed.get('file_observation_digest') != digest({'inputs':fresh['descriptor']['input_refs'],
+                                                                      'dependencies':fresh['descriptor']['dependency_files']})):
+                raise StaleAttempt('実行候補が変わりました。最新の状態を確認してください。')
+            reserved = self.store.reserve_attempt(task['id'], task['state_revision'])
+            descriptor = fresh['descriptor']
+            reserved = self.store.update(task['id'], current_attempt=dict(reserved['current_attempt'],
+                workflow_dispatch=descriptor, workflow_resources=descriptor['resources'],
+                workflow_file_observation=observed['file_observation_digest']))
+            if descriptor['work_package_id']:
+                self.store.update(descriptor['work_package_id'], execution_state='running')
+            self.store.event('workflow_dispatch_reserved', '現行版と依存条件を確認し、逐次実行の枠を予約しました。',
+                task['id'], task['job_id'], {'attempt_id':reserved['current_attempt']['id'],
+                    'plan_revision':descriptor['plan_revision'],'work_package_id':descriptor['work_package_id']})
+            return reserved
+
+    def _assert_workflow_dispatch(self, task):
+        job = self.store.get(task['job_id'], 'job')
+        if job.get('workflow_contract_version') != 1 or task.get('role') == 'planner': return
+        plan = self.store.get(job.get('plan_approval_id'), 'approval')
+        if not task.get('work_package_id') and not isinstance((plan.get('workflow_revision') or {}).get('workspace_boundary'), dict):
+            return
+        observed = self.workflow_dispatch_view(job['id'], running_task_id=task['id'])
+        attempt = task.get('current_attempt') or {}
+        if (observed.get('status') != 'ready' or observed.get('candidate_task_id') != task['id']
+                or observed.get('descriptor') != attempt.get('workflow_dispatch')
+                or observed.get('file_observation_digest') != attempt.get('workflow_file_observation')):
+            raise ProviderError('実行予約または依存条件が変わったため開始を止めました。',
+                                'workflow_dispatch', model_call_state='not_started')
+
     def workspace_view(self, job_id):
         """Current workspace diagnostics, without granting execution or merge."""
         from team_p0_contract import checkpoint_scope
@@ -2480,15 +2554,18 @@ class Engine:
                 return {'status':'blocked','reason':'workspace_approved_root_required'}
             approval = self.store.get(job.get('plan_approval_id'), 'approval')
             paths = checkpoint_scope(job, approval)
-            current = workspace_projection(job['project'], paths)
             expected = (approval.get('workflow_revision') or {}).get('workspace_boundary')
-            if not isinstance(expected, dict) or expected.get('status') != 'ready':
-                return {'status':'blocked','reason':'workspace_binding_requires_g3','current':current}
-            if current.get('status') != 'ready':
-                return {'status':'blocked','reason':current['reason'],'current':current}
-            if workspace_identity(current) != workspace_identity(expected):
-                return {'status':'blocked','reason':'workspace_identity_changed','current':current}
-            return {'status':'ready','execution_permission':'none','current':current}
+        current = workspace_projection(job['project'], paths)
+        with self.store.lock:
+            if self.store.get(job_id, 'job')['state_revision'] != job['state_revision']:
+                return {'status':'blocked','reason':'workspace_state_changed','current':current}
+        if not isinstance(expected, dict) or expected.get('status') != 'ready':
+            return {'status':'blocked','reason':'workspace_binding_requires_g3','current':current}
+        if current.get('status') != 'ready':
+            return {'status':'blocked','reason':current['reason'],'current':current}
+        if workspace_identity(current) != workspace_identity(expected):
+            return {'status':'blocked','reason':'workspace_identity_changed','current':current}
+        return {'status':'ready','execution_permission':'none','current':current}
 
     def _execution_workspace(self, task):
         job = self.store.get(task['job_id'], 'job')
@@ -3733,6 +3810,8 @@ class Engine:
             if task['role'] == 'builder' and job.get('p0_contract_version') == 1 and result.get('status') == 'done':
                 from team_p0_contract import artifact_records
                 records = artifact_records(job['project'], result.get('artifacts') or [])
+                if job.get('workflow_contract_version') == 1:
+                    self.store.update(task['id'], workflow_artifact_records=records)
                 if records:
                     existing = {row['path']: row for row in job.get('p0_artifacts') or []}
                     existing.update({row['path']: row for row in records})
@@ -4020,6 +4099,7 @@ class Engine:
         try:
 
             self._execution_workspace(task)
+            self._assert_workflow_dispatch(task)
             ctx = Context(self, task)
 
             with self.store.lock:
@@ -4405,6 +4485,9 @@ class Engine:
                 candidates.append(task)
             return candidates
 
+    def _start_task_thread(self, task):
+        threading.Thread(target=self._run, args=(task,), daemon=True).start()
+
     def tick(self):
 
         if self.paused or self.shutdown.is_set():
@@ -4412,6 +4495,13 @@ class Engine:
         # File/Git inspection must happen outside Store/Handoff locks. A
         # preparation is only a short-lived candidate, never a dispatch token.
         session_preflight = {}
+        workflow_preflight = {}
+        with self.store.lock:
+            workflow_jobs = [j['id'] for j in self.store.all('job')
+                             if j['status'] == 'running' and j.get('plan_revision',0) > 0 and self._uses_wbs_dispatch(j)]
+        for job_id in workflow_jobs:
+            observed = self.workflow_dispatch_view(job_id)
+            if observed.get('status') == 'ready': workflow_preflight[observed['candidate_task_id']] = observed
         from team_session_policy import SessionPreparationDeferred
         for candidate in self._checkpoint_session_candidates():
             try:
@@ -4440,6 +4530,8 @@ class Engine:
 
             busy = {canonical(self.store.get(t['job_id'])['project']) for t in working} | self._checkpoint_projects
 
+            busy |= {key for t in working for key in (t.get('current_attempt') or {}).get('workflow_resources', [])}
+
             for task in tasks:
 
                 if len(working) >= self.config['max_parallel_projects']:
@@ -4451,6 +4543,9 @@ class Engine:
                     continue
 
                 job = self.store.get(task['job_id'])
+                workflow = task.get('role') != 'planner' and self._uses_wbs_dispatch(job, task)
+                if workflow and task['id'] not in workflow_preflight:
+                    continue
 
                 if task.get('checkpoint_session_binding'):
                     verified = session_preflight.get(task['id'])
@@ -4606,15 +4701,23 @@ class Engine:
                             task['id'], job['id'])
                         continue
                 if job.get('workflow_contract_version') == 1:
-                    task = self.store.reserve_attempt(task['id'], task['state_revision'])
+                    if workflow:
+                        from team_store import StaleAttempt
+                        try:
+                            task = self._reserve_workflow_attempt(task, workflow_preflight[task['id']])
+                        except StaleAttempt:
+                            continue
+                    else:
+                        task = self.store.reserve_attempt(task['id'], task['state_revision'])
                 else:
                     task = self.store.update(task['id'], status='running', attempt=task['attempt'] + 1, started_at=now(), retry_at=None)
 
                 busy.add(canonical(job['project']))
+                busy.update((task.get('current_attempt') or {}).get('workflow_resources', []))
 
                 working.append(task)
 
-                threading.Thread(target=self._run, args=(task,), daemon=True).start()
+                self._start_task_thread(task)
 
 
 
