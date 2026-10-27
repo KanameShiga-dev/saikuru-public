@@ -218,8 +218,10 @@ class FailoverTests(unittest.TestCase):
         import team_usage
         with tempfile.TemporaryDirectory() as cwd, mock.patch.object(team_adapters, 'Process', FakeProcess), \
                 mock.patch.object(team_usage, 'COPILOT_LEDGER', Path(cwd) / 'copilot-credits.json'):
+            ctx = SimpleNamespace(check=mock.Mock())
             with self.assertRaises(team_adapters.ProviderError) as failure:
-                team_adapters.CopilotAdapter()._call(SimpleNamespace(), ['copilot'], 'PROMPT', cwd, {}, set())
+                team_adapters.CopilotAdapter()._call(ctx, ['copilot'], 'PROMPT', cwd, {}, set())
+            ctx.check.assert_called()
             self.assertTrue(team_usage.copilot_usage(30000)['rows'][0]['monthly']['exhausted'])   # shown as 0%
         self.assertIn('monthly quota', str(failure.exception))
         self.assertIsNotNone(usage_limit_retry_at(str(failure.exception)))
@@ -270,8 +272,10 @@ class FailoverTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as cwd, mock.patch.object(team_adapters, 'Process', FakeProcess), \
                 mock.patch.object(team_usage, 'COPILOT_LEDGER', Path(cwd) / 'copilot-credits.json'):
+            ctx = SimpleNamespace(check=mock.Mock())
             with self.assertRaises(team_adapters.ProviderError) as failure:
-                team_adapters.CopilotAdapter()._call(SimpleNamespace(), ['fixture'], 'Synthetic', cwd, {}, set())
+                team_adapters.CopilotAdapter()._call(ctx, ['fixture'], 'Synthetic', cwd, {}, set())
+            ctx.check.assert_called()
             self.assertIn('monthly quota', str(failure.exception))
             self.assertIsNotNone(usage_limit_retry_at(str(failure.exception)))
 

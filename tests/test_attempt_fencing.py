@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from team_config import default_config
+from team_common_agents import load_agent
 from team_engine import Context, Engine
 from team_p0_contract import initial, initial_workflow
 from team_store import Store, StaleAttempt
@@ -207,6 +208,32 @@ class AttemptFencingTests(unittest.TestCase):
         self.assertEqual(self.store.get(old['id'])['current_attempt']['status'], 'closed')
         self.assertNotIn(old['id'], self.engine.active)
         self.assertEqual(len(self.store.job_events(self.job['id'], 'attempt_closed')), 1)
+
+    def test_agent_run_and_history_retain_their_reserved_attempt_ids(self):
+        self.engine.commands = {'codex': ['fictional-cli'], 'claude': ['fictional-cli']}
+        self.engine.usage_snapshot = lambda: {}
+        old = self.reserve()
+        ctx = Context(self.engine, old)
+        ctx.prepare_agent(load_agent('builder', old['profile']['adapter']))
+        self.assertEqual(ctx.agent_run['attempt_id'], old['current_attempt']['id'])
+        new = self.next_attempt()
+        resumed = Context(self.engine, new)
+        resumed.prepare_agent(load_agent('builder', new['profile']['adapter']))
+        record = self.store.get(new['id'])
+        self.assertEqual(record['agent_run']['attempt_id'], new['current_attempt']['id'])
+        self.assertEqual(record['agent_run_history'][-1]['attempt_id'], old['current_attempt']['id'])
+        self.assertNotEqual(record['agent_run']['attempt_id'], record['agent_run_history'][-1]['attempt_id'])
+
+    def test_legacy_agent_run_is_not_stamped_with_a_workflow_attempt_id(self):
+        self.engine.commands = {'codex': ['fictional-cli'], 'claude': ['fictional-cli']}
+        self.engine.usage_snapshot = lambda: {}
+        job = self.store.put('job', dict(id='legacy-job', goal='Fictional legacy', project=str(self.project),
+                                       status='running', route='full', auto_execute=False))
+        task = self.engine.new_task(job, 'Legacy build', 'Fictional only', 'builder')
+        task = self.store.update(task['id'], attempt=1, status='running')
+        ctx = Context(self.engine, task)
+        ctx.prepare_agent(load_agent('builder', task['profile']['adapter']))
+        self.assertNotIn('attempt_id', self.store.get(task['id'])['agent_run'])
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@ import base64
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,6 +32,14 @@ class FakeStore:
 
     def event(self, *args):
         self.events.append(args)
+
+    @contextmanager
+    def attempt_scope(self, task):
+        # These cases isolate legacy permission rules, not workflow fencing.
+        # Versioned workers must use the real Store in test_attempt_fencing.
+        if 'state_revision' in task or task.get('current_attempt') is not None:
+            raise AssertionError('This legacy fixture cannot verify a versioned worker')
+        yield
 
 
 class FakeEngine:

@@ -370,6 +370,9 @@ class Context:
                                            'evaluation_mode': (self.engine.store.get(self.task['job_id'], 'job').get('evaluation') or {}).get('mode')},
                           'quota_before': self.engine.usage_snapshot().get(self.task['profile']['adapter'], {})}
 
+        if self.engine.store.get(self.task['job_id'], 'job').get('workflow_contract_version') == 1:
+            self.agent_run['attempt_id'] = self.task['current_attempt']['id']
+
         with self.engine.store.lock:
 
             previous = self.engine.store.get(self.task['id']).get('agent_run')
