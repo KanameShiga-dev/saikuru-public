@@ -19,7 +19,7 @@ def proposal(two=False):
             'command': 'python -B -m unittest', 'existing_tests': []},
         'checkpoint_paths': ['app.py'],
         'work_packages': [{'wbs_id': 'W1.01', 'title': 'Fictional feature', 'goal_links': links,
-            'done_when': ['Fictional lookup tested'], 'depends_on': []}],
+            'done_when': ['Fictional lookup tested'], 'depends_on': [], 'input_artifacts': []}],
         'tasks': [{'title': 'Fictional build', 'instruction': 'Build fictional lookup', 'role': 'builder',
             'goal_links': links, 'wbs_id': 'W1.01'}]}
     if two:

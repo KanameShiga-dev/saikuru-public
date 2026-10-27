@@ -111,7 +111,7 @@ def validate_plan(job, result):
         raise ValueError('開発計画には現行版で実行するテストと確認条件が必要です。')
     if workflow_version(job) == 1:
         from team_wbs import validate_work_packages
-        validate_work_packages(result)
+        validate_work_packages(result, job)
     return contract
 
 
