@@ -2470,6 +2470,43 @@ class Engine:
 
 
 
+    def workspace_view(self, job_id):
+        """Current workspace diagnostics, without granting execution or merge."""
+        from team_p0_contract import checkpoint_scope
+        from team_harness import workspace_projection, workspace_identity
+        with self.store.lock:
+            job = self.store.get(job_id, 'job')
+            if canonical(job['project']) not in [canonical(p) for p in self.config['approved_roots']]:
+                return {'status':'blocked','reason':'workspace_approved_root_required'}
+            approval = self.store.get(job.get('plan_approval_id'), 'approval')
+            paths = checkpoint_scope(job, approval)
+            current = workspace_projection(job['project'], paths)
+            expected = (approval.get('workflow_revision') or {}).get('workspace_boundary')
+            if not isinstance(expected, dict) or expected.get('status') != 'ready':
+                return {'status':'blocked','reason':'workspace_binding_requires_g3','current':current}
+            if current.get('status') != 'ready':
+                return {'status':'blocked','reason':current['reason'],'current':current}
+            if workspace_identity(current) != workspace_identity(expected):
+                return {'status':'blocked','reason':'workspace_identity_changed','current':current}
+            return {'status':'ready','execution_permission':'none','current':current}
+
+    def _execution_workspace(self, task):
+        job = self.store.get(task['job_id'], 'job')
+        if job.get('workflow_contract_version') != 1 or task.get('role') == 'planner':
+            return None  # Read-only planner bootstrap retains its G2 gate.
+        approval = self.store.get(job['plan_approval_id'], 'approval') if job.get('plan_approval_id') else {}
+        has_binding = isinstance((approval.get('workflow_revision') or {}).get('workspace_boundary'), dict)
+        if not task.get('work_package_id') and not has_binding:
+            return None  # Historical/internal fixtures have no new G3 binding.
+        # Membership/source/version validation is separate from Git inspection.
+        self._work_package_source(job)
+        if task.get('work_package_id') and task.get('plan_revision') != job['plan_revision']:
+            raise ProviderError('作業領域の対象版が古いため停止しました。', 'workspace_boundary', model_call_state='not_started')
+        view = self.workspace_view(job['id'])
+        if view['status'] != 'ready':
+            raise ProviderError('作業領域と承認済み範囲の再確認が必要です。', 'workspace_boundary', model_call_state='not_started')
+        return view['current']
+
     def _work_package_source(self, job):
         from team_wbs import approved_source
         from team_p0_contract import validate_plan
@@ -3982,6 +4019,7 @@ class Engine:
 
         try:
 
+            self._execution_workspace(task)
             ctx = Context(self, task)
 
             with self.store.lock:
@@ -5412,6 +5450,18 @@ class Engine:
         tool = body.get('tool', '')
 
         data = body.get('input') or {}
+        if ctx.task.get('work_package_id') or self.store.get(ctx.task['job_id'], 'job').get('workflow_contract_version') == 1:
+            try:
+                workspace = self._execution_workspace(ctx.task)
+                if workspace and tool in ('Edit', 'Write'):
+                    root = Path(workspace['execution_root'])
+                    target = Path(str(data.get('file_path') or ''))
+                    if not target.is_absolute(): target = root/target
+                    target = target.resolve()
+                    if not target.is_relative_to(root) or target.relative_to(root).as_posix() not in workspace['approved_paths']:
+                        return {'allow':False,'note':'承認済みのファイル範囲外です。計画の再確認が必要です。'}
+            except (ValueError, OSError, ProviderError):
+                return {'allow':False,'note':'作業領域の同一性を確認できません。変更を止めて再確認してください。'}
         if tool in ('Edit', 'Write') and ctx.task.get('role') == 'builder':
             job = self.store.get(ctx.task['job_id'], 'job')
             from team_code_test_contract import commands

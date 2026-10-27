@@ -78,7 +78,10 @@ def analysis(store, job, payload, context=None):
                             if set(spec['depends_on']) & affected}
         if grown == affected: break
         affected = grown
+    from team_harness import workspace_projection
+    workspace = workspace_projection(job['project'], payload['checkpoint_paths'])
     return {'schema_version': 1, 'job_id': job['id'], 'expected_job_revision': job['state_revision'],
+        'workspace_boundary': workspace,
         'proposal_context': copy.deepcopy(context),
         'base_versions': {k: job.get(k) for k in VERSION_FIELDS},
         'base_plan_digest': old_approval['digest'] if old_approval else None,

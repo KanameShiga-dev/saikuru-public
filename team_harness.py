@@ -47,6 +47,91 @@ def _clean(value, limit=1200):
     return value[:limit].strip()
 
 
+def execution_workspace(project, approved_paths):
+    """Read-only dedicated Source/Worktrees mapping, not creation or merge.
+
+    Registration proves current Git membership, not historical invocation of
+    an entry script. New checkouts must use the displayed formal entry.
+    """
+    from team_checkpoint import _git, _status, _path, scope_paths
+    paths = scope_paths(approved_paths)
+    execution = Path(os.path.abspath(project))
+    home = execution.parent.parent
+    source = home/'Source'
+    entry = home/'new_worktree.py'
+    def no_links(path):
+        if not path.is_relative_to(home): raise ValueError('workspace_path_outside_area')
+        while True:
+            if _is_reparse(path): raise ValueError('workspace_link_not_allowed')
+            if path == home: break
+            path = path.parent
+    if execution.parent.name != 'Worktrees' or not execution.is_dir():
+        raise ValueError('workspace_dedicated_worktree_required')
+    for path in (execution, source, source/'.git', entry): no_links(path)
+    if not (source/'.git').is_dir() or not entry.is_file() or entry.stat().st_size > 100000:
+        raise ValueError('workspace_formal_entry_or_source_missing')
+    gitfile = execution/'.git'; no_links(gitfile)
+    if not gitfile.is_file() or gitfile.stat().st_size > 4096:
+        raise ValueError('workspace_linked_gitfile_required')
+    pointer = gitfile.read_text(encoding='utf-8').strip()
+    if not pointer.startswith('gitdir: '): raise ValueError('workspace_gitdir_invalid')
+    admin = Path(os.path.abspath(execution/pointer[8:]))
+    if not admin.is_relative_to(source/'.git/worktrees'):
+        raise ValueError('workspace_repository_mismatch')
+    no_links(admin)
+    if not admin.is_dir(): raise ValueError('workspace_gitdir_invalid')
+    execution = execution.resolve(); source = source.resolve()
+    def scalar(root, args): return _git(root, args).decode('utf-8').strip()
+    if (Path(scalar(execution, ['rev-parse','--show-toplevel'])).resolve() != execution
+            or Path(scalar(source, ['rev-parse','--show-toplevel'])).resolve() != source
+            or Path(scalar(execution, ['rev-parse','--path-format=absolute','--git-common-dir'])).resolve() != source/'.git'):
+        raise ValueError('workspace_repository_mismatch')
+    record = None
+    for block in _git(source, ['worktree','list','--porcelain','-z']).split(b'\0\0'):
+        fields = {}
+        for token in block.split(b'\0'):
+            if token:
+                key, _, value = token.decode('utf-8').partition(' '); fields[key] = value
+        if fields.get('worktree') and Path(fields['worktree']).resolve() == execution: record = fields
+    if record is None or 'locked' in record or 'prunable' in record:
+        raise ValueError('workspace_registration_unavailable')
+    branch = scalar(execution, ['symbolic-ref','--quiet','HEAD'])
+    integration_branch = scalar(source, ['symbolic-ref','--quiet','HEAD'])
+    head = scalar(execution, ['rev-parse','--verify','HEAD'])
+    integration_head = scalar(source, ['rev-parse','--verify','HEAD'])
+    if (record.get('branch') != branch or record.get('HEAD') != head or branch == integration_branch
+            or not all(re.fullmatch('[0-9a-f]{40,64}', value) for value in (head, integration_head))):
+        raise ValueError('workspace_branch_or_head_invalid')
+    for name in paths: _path(execution, name)
+    if any(row.startswith(b'160000 ') for row in _git(execution, ['ls-files','--stage','-z']).split(b'\0')):
+        raise ValueError('workspace_submodule_unsupported')
+    try:
+        dirty = _status(_git(execution, ['status','--porcelain=v1','-z','--untracked-files=all','--ignore-submodules=all']), set(paths))
+    except ValueError:
+        raise ValueError('workspace_dirty_outside_approved_scope') from None
+    return {'schema_version':1, 'status':'ready', 'execution_root':str(execution),
+        'integration_root':str(source), 'execution_branch':branch, 'execution_head':head,
+        'integration_branch':integration_branch, 'integration_head':integration_head,
+        'official_creation_entry':str(entry.resolve()), 'entry_sha256':hashlib.sha256(entry.read_bytes()).hexdigest(),
+        'creation_provenance':'not_attested_by_git_registration', 'approved_paths':paths,
+        'dirty_changes':dirty, 'integration_dirty':'not_inspected',
+        'permission_effect':'none', 'automatic_git_mutation':False}
+
+
+def workspace_projection(project, approved_paths):
+    try:
+        return execution_workspace(project, approved_paths)
+    except (ValueError, OSError, UnicodeError, TypeError) as error:
+        known = str(error)
+        reason = known if re.fullmatch('workspace_[a-z_]+', known) else 'workspace_identity_unavailable'
+        return {'schema_version':1,'status':'blocked','reason':reason,'permission_effect':'none','automatic_git_mutation':False}
+
+
+def workspace_identity(boundary):
+    """Stable authority excludes permitted working-tree edits, not Git moves."""
+    return {key:value for key,value in boundary.items() if key not in ('dirty_changes', 'integration_dirty')}
+
+
 def _fact(item, key):
     value = _clean(item.get(key, ''))
     if not value or value in ('未確認', 'UNKNOWN'):
