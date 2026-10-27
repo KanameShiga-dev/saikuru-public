@@ -550,6 +550,37 @@ class HandoffDB:
             self.db.execute('INSERT OR REPLACE INTO skill_active VALUES (?,?,?,1)',
                 (canonical(target_project),item['name'],version_id))
 
+    def versioned_context(self, store, task_id, **binding):
+        """Explicit opted-in approved execution context; no legacy substitution."""
+        from team_context_pages import build_minimal_context
+        return build_minimal_context(store, self, task_id, **binding)
+
+    def resolve_versioned_reference(self, store, task_id, manifest_digest, reference_id, **binding):
+        from team_context_pages import resolve_minimal_reference
+        return resolve_minimal_reference(store, self, task_id, manifest_digest, reference_id, **binding)
+
+    def write_versioned_context(self, store, task_id, **binding):
+        from team_context_pages import write_minimal_pages
+        manifest = self.versioned_context(store, task_id, **binding)
+        with store.lock:
+            project = store.get(manifest['job_id'], 'job')['project']
+        index = write_minimal_pages(manifest, store.directory / 'context-manifests', project=project,
+                                    expected_digest=manifest['manifest_digest'])
+        if self.versioned_context(store, task_id, **binding) != manifest:
+            raise ValueError('保存中に文脈が変化しました。再構成してください。')
+        return index
+
+    def read_versioned_context(self, store, task_id, snapshot_id, **binding):
+        from team_context_pages import read_minimal_pages
+        current = self.versioned_context(store, task_id, **binding)
+        with store.lock:
+            project = store.get(current['job_id'], 'job')['project']
+        stored = read_minimal_pages(store.directory / 'context-manifests', snapshot_id, project=project,
+                                    expected_digest=current['manifest_digest'])
+        if self.versioned_context(store, task_id, **binding) != current:
+            raise ValueError('読取り中に文脈が変化しました。再構成してください。')
+        return stored
+
     def context(self, job, allowed_files=None, refs=None, budget=None, references=None,
                 review_task_id=None, review_instruction=None, review_context_mode='off'):
         job_id=job['id'];project=canonical(job['project'])
