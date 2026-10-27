@@ -816,13 +816,23 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/cancel':
                 engine.cancel_job(body['id'])
                 result = {'ok': True}
+            elif path == '/api/maintenance/recovery/confirm':
+                if not self.maintenance_authorized():
+                    raise PermissionError('保守担当の認証が必要です。')
+                if set(body) != {'id', 'task_revision', 'job_revision', 'attempt_id', 'writer_stopped', 'checked_changes'}:
+                    raise ValueError('停止確認の項目が不正です。')
+                result = engine.confirm_recovery(body['id'], body['task_revision'], body['job_revision'], body['attempt_id'],
+                    writer_stopped=body['writer_stopped'], checked_changes=body['checked_changes'])
             elif path == '/api/retry':
                 if body.get('checked_changes') is not True:
                     raise ValueError('既に行われた変更を確認してください。')
                 retry_task = self.app.store.get(body['id'], 'task')
                 retry_job = self.app.store.get(retry_task['job_id'], 'job')
-                if (retry_job.get('p0_contract_version') == 1
-                        and (retry_job.get('p0_interruption') or {}).get('recovery_status') == 'maintenance_required'
+                recovery_control = retry_job.get('workflow_contract_version') == 1 and (
+                    retry_task.get('recovery_check_required') or retry_task.get('recovery_confirmation')
+                    or self.app.store.has_operation_history(retry_job['id']))
+                if ((recovery_control or (retry_job.get('p0_contract_version') == 1
+                        and (retry_job.get('p0_interruption') or {}).get('recovery_status') == 'maintenance_required'))
                         and not self.maintenance_authorized()):
                     raise PermissionError('保守担当の認証が必要です。')
                 engine.retry(body['id'], body.get('note', ''), body.get('handoff_allowed') is True)

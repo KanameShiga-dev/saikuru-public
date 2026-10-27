@@ -197,6 +197,15 @@ class Store:
                     and (not getattr(self._worker, 'checkpoint_commit', None)
                          or self._worker.checkpoint_commit != obj.get('resume_checkpoint_id'))):
                 raise ValueError('Checkpoint参照は専用の確定手続きで設定してください。')
+            if kind == 'task':
+                recovery_writer = getattr(self._worker, 'recovery_commit', None) == obj['id']
+                if (previous and previous.get('recovery_check_required') and not obj.get('recovery_check_required')
+                        and not recovery_writer):
+                    raise ValueError('停止確認は専用の保守手続きで記録してください。')
+                if (obj.get('recovery_confirmation') is not None
+                        and obj.get('recovery_confirmation') != (previous or {}).get('recovery_confirmation')
+                        and not recovery_writer):
+                    raise ValueError('保守確認の記録は直接作成できません。')
             if previous and (obj['job_id'] != previous['job_id']
                              or obj.get('work_package_id') != previous.get('work_package_id')):
                 raise ValueError('保存済み記録の所属は変更できません。')
@@ -295,6 +304,37 @@ class Store:
                 self.update(checkpoint_id, state='invalid')
                 self.event('checkpoint_invalid', 'Checkpointの参照が変化したため確定しません。',
                            record['task_id'], record['job_id'], details={'checkpoint_id': checkpoint_id})
+
+    def has_operation_history(self, job_id):
+        """Unknown/untyped operations are not proof of no effect, even on exit 0."""
+        with self.lock:
+            return bool(self.db.execute("SELECT 1 FROM events WHERE json_extract(body,'$.job_id')=? "
+                "AND json_extract(body,'$.type') GLOB 'operation_*' LIMIT 1", (job_id,)).fetchone())
+
+    def confirm_recovery(self, task_id, task_revision, job_revision, attempt_id):
+        """Internal CAS for authenticated maintenance service; never queues work."""
+        with self.atomic():
+            task = self.get(task_id, 'task')
+            job = self.get(task['job_id'], 'job')
+            attempt = task.get('current_attempt') or {}
+            if (workflow_version(job) != 1 or type(task_revision) is not int or type(job_revision) is not int
+                    or task.get('state_revision') != task_revision or job.get('state_revision') != job_revision
+                    or job.get('status') not in ('failed', 'blocked', 'interrupted')
+                    or task.get('status') not in ('failed', 'blocked', 'interrupted')
+                    or not isinstance(attempt_id, str) or not attempt_id or attempt.get('id') != attempt_id
+                    or attempt.get('status') not in ('closed', 'fenced') or self.has_operation_history(job['id'])):
+                raise ValueError('現在の停止状態・試行・操作の確認が必要です。')
+            marker = {'attempt_id': attempt_id, 'job_revision': job_revision,
+                      'task_revision': task_revision + 1}
+            marker['event_seq'] = self.event('recovery_confirmed', '保守用経路で作業停止の確認を記録しました。',
+                task_id, job['id'], details={'attempt_id': attempt_id, 'task_revision': task_revision,
+                                           'job_revision': job_revision, 'operations': 'none'})
+            previous = getattr(self._worker, 'recovery_commit', None)
+            self._worker.recovery_commit = task_id
+            try:
+                return self.update(task_id, recovery_check_required=False, recovery_confirmation=marker)
+            finally:
+                self._worker.recovery_commit = previous
 
     def update(self, object_id, _transition_reason=None, **values):
         with self.lock:
@@ -441,7 +481,16 @@ class Store:
     def recover(self):
         with self.atomic():
             for task in self.all('task'):
-                if task['status'] in ('running', 'awaiting_approval'):
+                versioned = 'state_revision' in task
+                interrupted = task['status'] in ('running', 'awaiting_approval')
+                retry_queued = versioned and task['status'] == 'queued' and bool(task.get('current_attempt'))
+                if versioned and (interrupted or retry_queued):
+                    job = self.get(task['job_id'], 'job')
+                    if job.get('status') in ('cancelled', 'accepted', 'accepted_with_pending_checks'):
+                        self.close_attempt(task['id'], 'fenced', 'terminal-restart')
+                        self.update(task['id'], status='cancelled', recovery_check_required=True)
+                        continue
+                if interrupted or retry_queued:
                     if 'state_revision' in task:
                         self.close_attempt(task['id'], 'fenced', 'restart')
                         self.update(task['id'], recovery_check_required=True)

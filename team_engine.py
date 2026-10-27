@@ -4086,7 +4086,7 @@ class Engine:
 
     def cancel_job(self, job_id):
 
-        with self.store.lock:
+        with self.store.atomic():
 
             self.store.get(job_id, 'job')
 
@@ -4602,12 +4602,116 @@ class Engine:
             self.store.event('document_resumed','指定成果物 '+format_name+' の制作を再開しました。過去の成果と判断履歴は保持します。',task['id'],job_id)
             return {'job_id':job_id,'task_id':task['id'],'checks':checks}
 
+    def _recovery_control_inputs(self, task_id):
+        from team_p0_contract import workflow_version, checkpoint_scope
+        task = self.store.get(task_id, 'task')
+        job = self.store.get(task['job_id'], 'job')
+        if (workflow_version(job) != 1 or job.get('status') not in ('failed', 'blocked', 'interrupted')
+                or task.get('status') not in ('failed', 'blocked', 'interrupted')
+                or (task.get('current_attempt') or {}).get('status') not in ('closed', 'fenced')):
+            raise ValueError('この停止状態は保守確認の対象ではありません。')
+        if (canonical(job['project']) not in [canonical(p) for p in self.config['approved_roots']]
+                or self.project_blocked(job['project'])):
+            raise ValueError('対象のプロジェクトを確認できません。')
+        if any(canonical(ctx.project) == canonical(job['project']) for ctx in self.active.values()):
+            raise ValueError('担当の停止を先に確認してください。')
+        for other in self.store.all('task'):
+            if other.get('status') == 'running' or (other.get('current_attempt') or {}).get('status') == 'running':
+                parent = self.store.get(other['job_id'], 'job')
+                if canonical(parent['project']) == canonical(job['project']):
+                    raise ValueError('担当の停止を先に確認してください。')
+        if self.store.has_operation_history(job['id']):
+            raise ValueError('操作の作用が未照合です。この経路では再開できません。')
+        # Native workers can write outside the recorded tool protocol. Absence
+        # of operation_* events is not evidence that a launched worker had no effect.
+        attempt_id = (task.get('current_attempt') or {}).get('id')
+        if task.get('agent_run_id') or any(run.get('task_id') == task_id or run.get('attempt_id') == attempt_id
+                                         for run in self.store.for_job('agent_run', job['id'])):
+            raise ValueError('担当プロセスの作用が未照合です。この経路では再開できません。')
+        if any(a.get('status') == 'pending' and a.get('kind') in ('tool', 'question', 'context_conflict')
+               for a in self.store.for_job('approval', job['id'])):
+            raise ValueError('未解決の操作・質問・矛盾があります。')
+        bootstrap = task.get('role') == 'planner' and job.get('plan_revision') == 0
+        if not bootstrap:
+            checkpoint_scope(job, self.store.get(job.get('plan_approval_id'), 'approval'))
+            requirements = self.store.get(job.get('requirements_approval_id'), 'approval')
+            if (requirements.get('job_id') != job['id'] or requirements.get('kind') != 'plan'
+                    or requirements.get('status') != 'approved'):
+                raise ValueError('現在の承認済み要求が必要です。')
+        return task, job, bootstrap
+
+    def confirm_recovery(self, task_id, task_revision, job_revision, attempt_id, *, writer_stopped=False, checked_changes=False):
+        """Authenticated maintenance service only; caller proof is not UI receipt."""
+        if writer_stopped is not True or checked_changes is not True:
+            raise ValueError('担当の停止と現在の変更を確認してください。')
+        with self._checkpoint_project(task_id):
+            with self.store.atomic():
+                self._recovery_control_inputs(task_id)
+                task = self.store.confirm_recovery(task_id, task_revision, job_revision, attempt_id)
+            return {'confirmed': True, 'task_id': task_id, 'task_revision': task['state_revision'],
+                    'queued': False, 'resume_allowed': False, 'next_action': 'manual_retry_after_checkpoint_verification'}
+
+    def _recovery_retry_binding(self, task_id):
+        task, job, bootstrap = self._recovery_control_inputs(task_id)
+        marker = task.get('recovery_confirmation') or {}
+        if (task.get('recovery_check_required') or set(marker) != {'attempt_id', 'job_revision', 'task_revision', 'event_seq'}
+                or any(type(marker.get(key)) is not int or marker[key] < 1 for key in ('job_revision', 'task_revision', 'event_seq'))
+                or marker.get('attempt_id') != (task.get('current_attempt') or {}).get('id')
+                or marker.get('job_revision') != job['state_revision']):
+            raise ValueError('現在の試行・状態版に対する保守確認が必要です。')
+        row = self.store.db.execute('SELECT body FROM events WHERE seq=?', (marker['event_seq'],)).fetchone()
+        event = json.loads(row[0]) if row else {}
+        if (event.get('type') != 'recovery_confirmed' or event.get('task_id') != task_id
+                or event.get('job_id') != job['id'] or event.get('details') != {
+                    'attempt_id': marker['attempt_id'], 'task_revision': marker['task_revision'] - 1,
+                    'job_revision': marker['job_revision'], 'operations': 'none'}):
+            raise ValueError('保守確認の記録が一致しません。')
+        if task['state_revision'] != marker['task_revision']:
+            ready, _ = self.store.checkpoint_binding(task.get('resume_checkpoint_id'))
+            if (task['state_revision'] != marker['task_revision'] + 1
+                    or ready['snapshot_revisions']['task'] != marker['task_revision']
+                    or ready['attempt_id'] != marker['attempt_id']):
+                raise ValueError('保守確認後に状態が変化しました。再確認してください。')
+        return (task['state_revision'], job['state_revision'], marker['event_seq']), bootstrap
+
     def retry(self, task_id, note, handoff_allowed=False):
+        from team_p0_contract import workflow_version
+        expected = None
+        with self.store.lock:
+            task = self.store.get(task_id, 'task')
+            job = self.store.get(task['job_id'], 'job')
+            if workflow_version(job) == 1 and (task.get('recovery_check_required') or task.get('recovery_confirmation')):
+                expected, bootstrap = self._recovery_retry_binding(task_id)
+        if expected is not None and not bootstrap:
+            assessment = self.assess_checkpoint_resume(task_id, writer_stopped=True)
+            if assessment['status'] != 'candidate' or task_id not in assessment['candidate_task_ids']:
+                raise ValueError('Checkpointと現在の承認・検証・変更を確認してください。')
+        return self._retry_confirmed(task_id, note, handoff_allowed, expected)
+
+    def _retry_confirmed(self, task_id, note, handoff_allowed=False, recovery_expected=None):
+
 
         with self.store.atomic():
 
             task = self.store.get(task_id, 'task')
             task_job = self.store.get(task['job_id'], 'job')
+            if task_job.get('workflow_contract_version') == 1:
+                if task_job.get('status') not in ('planning', 'running', 'failed', 'blocked', 'interrupted'):
+                    raise ValueError('終了済みまたは不明な依頼は再試行できません。')
+                if self.store.has_operation_history(task_job['id']):
+                    raise ValueError('操作の作用が未照合です。この経路では再試行できません。')
+                if task.get('recovery_check_required') or task.get('recovery_confirmation') or recovery_expected is not None:
+                    actual, _ = self._recovery_retry_binding(task_id)
+                    if recovery_expected is None or actual != recovery_expected:
+                        raise ValueError('再試行の確認後に状態が変化しました。')
+                if task.get('role') != 'planner':
+                    approval = self.store.get(task_job.get('plan_approval_id'), 'approval')
+                    if approval.get('job_id') != task_job['id'] or approval.get('status') != 'approved' or approval.get('kind') != 'plan':
+                        raise ValueError('現在の承認済み計画が必要です。')
+                    requirements = self.store.get(task_job.get('requirements_approval_id'), 'approval')
+                    if (requirements.get('job_id') != task_job['id'] or requirements.get('kind') != 'plan'
+                            or requirements.get('status') != 'approved'):
+                        raise ValueError('現在の承認済み要求が必要です。')
             if 'g2_gate_version' in task_job and task_job['status'] == 'cancelled':
                 raise ValueError('中止した依頼は再試行できません。新しい依頼として出してください。')
             if task.get('role') == 'planner' and task_job.get('g2_gate_version') != 1:
@@ -4653,7 +4757,8 @@ class Engine:
                 history = (task.get('review_result_history', []) + [{'result': task['result'], 'recorded_at': now()}])[-20:]
                 revision['review_result_history'] = history
 
-            self.store.update(task_id, status='queued', **revision, result=None, summary='', recovery=None, recovery_advice=None, failure_code=None,
+            recovery_changes = {'recovery_confirmation': None} if task_job.get('workflow_contract_version') == 1 else {}
+            self.store.update(task_id, status='queued', **revision, **recovery_changes, result=None, summary='', recovery=None, recovery_advice=None, failure_code=None,
                               retry_at=None, quota_waits=0)
 
             job_changes = {'status': 'planning' if task['role'] == 'planner' else 'running'}
