@@ -9,7 +9,7 @@ import subprocess
 import sys
 from contextlib import closing
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 from team_store import Store
 from team_engine import Engine
@@ -79,6 +79,9 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.store.get('t')['status'], 'interrupted')
         self.assertEqual(self.store.get('a')['status'], 'expired')
         engine = SimpleNamespace(store=self.store, active={}, sync_handoff=lambda job: None)
+        # This fixture covers the legacy path using real Store/retry logic.
+        self.assertNotIn('workflow_contract_version', self.store.get('j'))
+        engine._retry_confirmed = MethodType(Engine._retry_confirmed, engine)
         Engine.retry(engine, 't', 'Synthetic changes inspected')
         self.assertEqual(self.store.get('t')['status'], 'queued')
         self.assertEqual(self.store.get('a')['status'], 'expired')
