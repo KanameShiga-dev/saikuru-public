@@ -17,6 +17,74 @@ COPILOT_AUTH = re.compile(r"not (?:logged|signed) in|copilot login|authenticatio
                           r"|\b401\b|re-?authenticate|(?:oauth )?token (?:has )?(?:expired|is invalid|invalid)", re.I)
 RESET_AT = re.compile(r'resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?', re.I)
 
+_WORKFLOW_FAILURE_GUIDANCE = {
+    'authentication': ('認証状態の確認が必要です', '本人が対象Providerの認証状態を確認し、保守確認後に再試行を判断してください。', 'waiting'),
+    'provider_limit': ('Providerが利用上限を報告しました', '利用枠の回復を確認してから、現在の承認と途中成果を保守担当が確認してください。自動再送はしません。', 'waiting'),
+    'timeout': ('担当の実行時間上限で停止しました', '途中成果と処理の成否を確認し、同じ操作を再送せず再開方法を保守担当が判断してください。', 'maintenance'),
+    'sandbox_setup': ('実行環境の準備で停止しました', 'サンドボックスの設定・権限を変えずに原因を切り分け、修復と再試験は別途承認範囲を確認してください。', 'maintenance'),
+    'safety': ('安全上の確認が必要です', '安全な送信・操作範囲を確認してください。安全制約や認証を弱めて再開しないでください。', 'safety_blocked'),
+    'cancelled': ('実行を中断しました', '保存済み成果を確認してください。中断の解除や新たな実行には利用者の判断が必要です。', 'cancelled'),
+    'execution': ('実行結果の確認が必要です', '途中成果・操作の成否・現在の承認を確認してください。不明な操作を再送しないでください。', 'maintenance'),
+}
+
+
+def workflow_failure_plan(code, message='', *, cancelled=False, model_call_state='unknown'):
+    """Bounded advisory classification only. Never permission, retry or a command.
+
+    Provider text is untrusted and used only as a bounded classification hint;
+    it is never copied into guidance. A native session/probe is not proof that
+    an operation had no effect. Missing usage or model-call status is unknown.
+    """
+    text = message[:4096] if isinstance(message, str) else ''
+    if cancelled:
+        category = 'cancelled'
+    elif p0_failure_category(code) == 'SAFETY_BLOCKED':
+        category = 'safety'
+    elif code == 'codex_sandbox':
+        category = 'sandbox_setup'
+    elif code in ('claude_auth', 'copilot_auth', 'codex_auth', 'authentication'):
+        category = 'authentication'
+    elif code in ('usage_limit', 'usage_limit_wait', 'rate_limit', 'quota_exceeded'):
+        category = 'provider_limit'
+    elif code in ('task_timeout', 'timeout'):
+        category = 'timeout'
+    elif re.search(r'\bunauthenticated\b|\bunauthorized\b|failed to authenticate|authentication failed|oauth.{0,40}expired|not (?:logged|signed) in', text, re.I):
+        category = 'authentication'
+    elif USAGE_LIMIT.search(text):
+        category = 'provider_limit'
+    elif re.search(r'\btimed? out\b|\btimeout\b|実行時間の上限', text, re.I):
+        category = 'timeout'
+    else:
+        category = 'execution'
+    title, next_action, state = _WORKFLOW_FAILURE_GUIDANCE[category]
+    model_state = model_call_state if model_call_state in ('not_started', 'started') else 'unknown'
+    return {'schema_version': 1, 'category': category, 'state': state,
+            'title': title, 'next_action': next_action, 'model_call_state': model_state,
+            'operation_state': 'unknown', 'resume_allowed': False, 'automatic_retry': False,
+            'automatic_model_change': False, 'execution_permission': 'none',
+            'required_before_retry': ['current_authorization', 'stopped_workers', 'effects_reconciled',
+                                      'current_checkpoint_or_explicit_new_request'],
+            'manual_alternative': '保存済み成果を確認し、必要なら利用者が手作業または別の依頼を選んでください。'}
+
+
+def workflow_failure_advice(task):
+    """Render fixed guidance, never arbitrary strings from saved metadata."""
+    plan = task.get('failure_recovery')
+    if (not isinstance(plan, dict) or type(plan.get('schema_version')) is not int
+            or plan['schema_version'] != 1 or not isinstance(plan.get('category'), str)
+            or plan['category'] not in _WORKFLOW_FAILURE_GUIDANCE
+            or plan.get('execution_permission') != 'none' or plan.get('resume_allowed') is not False
+            or plan.get('automatic_retry') is not False or plan.get('automatic_model_change') is not False
+            or not plan.get('attempt_id') or plan['attempt_id'] != (task.get('current_attempt') or {}).get('id')
+            or type(plan.get('attempt_ordinal')) is not int or plan['attempt_ordinal'] != task.get('attempt')):
+        return None
+    title, next_step, state = _WORKFLOW_FAILURE_GUIDANCE[plan['category']]
+    return {'attempt': task.get('attempt'), 'checked_at': time.time(), 'evidence': [],
+            'code': 'workflow_' + plan['category'], 'title': title,
+            'explanation': '処理の成否や途中成果の確認が必要です。保存やセッションの存在だけでは再開できません。',
+            'next_step': next_step, 'draft': '', 'can_retry': False, 'resume_allowed': False,
+            'state': state, 'execution_permission': 'none'}
+
 
 def retry_local_read(operation, max_retries=2):
     """Retry only an idempotent local read on a transient SQLite lock."""
@@ -41,12 +109,14 @@ def p0_interruption(task, previous, code, category='MAINTENANCE_REQUIRED'):
     code = str(code or 'execution')[:80]
     if category not in ('MAINTENANCE_REQUIRED', 'SAFETY_BLOCKED'):
         category = 'MAINTENANCE_REQUIRED'
+    guidance = workflow_failure_advice(task)
+    failure_kind = ':' + task['failure_recovery']['category'] if guidance else ''
     signature = hashlib.sha256(
-        (code + ':' + task.get('role', '') + ':' +
+        (code + failure_kind + ':' + task.get('role', '') + ':' +
          str((task.get('profile') or {}).get('adapter', ''))).encode()).hexdigest()[:20]
     count = (int(previous.get('attempt_count', 0)) + 1
              if isinstance(previous, dict) and previous.get('failure_signature') == signature else 1)
-    return {
+    result = {
         'interrupted_task_id': task['id'], 'interruption_reason': code,
         'recovery_status': 'safety_blocked' if category == 'SAFETY_BLOCKED' else 'maintenance_required',
         'resume_target': task['id'], 'failure_signature': signature,
@@ -54,6 +124,10 @@ def p0_interruption(task, previous, code, category='MAINTENANCE_REQUIRED'):
         'error_category': category,
         'next_action': '安全上の問題を確認する' if category == 'SAFETY_BLOCKED' else '保守担当が実行環境を確認する',
     }
+    if guidance:
+        result.update(failure_category=task['failure_recovery']['category'],
+                      next_action=guidance['next_step'], resume_allowed=False, automatic_retry=False)
+    return result
 
 
 def usage_limit_retry_at(message, now_ts=None):
@@ -134,6 +208,9 @@ def handoff_report_advice(task):
 
 
 def advice(task, project):
+    workflow = workflow_failure_advice(task)
+    if workflow:
+        return workflow
     completed = handoff_report_advice(task)
     if completed:
         return completed

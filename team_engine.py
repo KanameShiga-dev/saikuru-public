@@ -673,6 +673,8 @@ class Context:
 
         if working > self.engine.config['task_timeout_seconds']:
 
+            if store is not None and store.get(self.task['job_id'], 'job').get('workflow_contract_version') == 1:
+                raise ProviderError('実行時間の上限に達しました。変更を確認してから再試行してください。', 'task_timeout')
             raise ProviderError('実行時間の上限に達しました。変更を確認してから再試行してください。')
 
 
@@ -1194,6 +1196,8 @@ class Engine:
         if job.get('p0_contract_version') != 1:
             return
         from team_recovery import p0_interruption
+        if job.get('workflow_contract_version') == 1:
+            task = self.store.get(task['id'], 'task')
         interruption = p0_interruption(task, job.get('p0_interruption'), code, category)
         self.store.update(job['id'], status='blocked', p0_interruption=interruption)
         self.store.event('p0_maintenance_required' if category != 'SAFETY_BLOCKED' else 'p0_safety_blocked',
@@ -3982,7 +3986,9 @@ class Engine:
             with self.store.lock:
 
                 current = self.store.get(task['id'])
-                p0_development = self.store.get(task['job_id'], 'job').get('p0_contract_version') == 1
+                failure_job = self.store.get(task['job_id'], 'job')
+                workflow_failure = failure_job.get('workflow_contract_version') == 1
+                p0_development = failure_job.get('p0_contract_version') == 1 or workflow_failure
 
                 cancelled = isinstance(exc, Cancelled) or current['status'] == 'cancelled'
 
@@ -4003,6 +4009,12 @@ class Engine:
                 agent_outcome = 'cancelled' if cancelled else 'failed'
 
                 failure_code = getattr(exc, 'code', 'cancelled' if cancelled else 'execution')
+                if workflow_failure:
+                    from team_recovery import workflow_failure_plan
+                    plan = workflow_failure_plan(failure_code, str(exc), cancelled=cancelled,
+                        model_call_state=getattr(exc, 'model_call_state', 'unknown'))
+                    plan.update(attempt_id=(task.get('current_attempt') or {}).get('id'), attempt_ordinal=task.get('attempt'))
+                    self.store.update(task['id'], failure_recovery=plan)
 
                 recovery = None
 
@@ -5027,7 +5039,10 @@ class Engine:
                 history = (task.get('review_result_history', []) + [{'result': task['result'], 'recorded_at': now()}])[-20:]
                 revision['review_result_history'] = history
 
-            recovery_changes = {'recovery_confirmation': None} if task_job.get('workflow_contract_version') == 1 else {}
+            recovery_changes = {}
+            if task_job.get('workflow_contract_version') == 1:
+                revision['recovery_history'][-1]['failure_recovery'] = task.get('failure_recovery')
+                recovery_changes = {'recovery_confirmation': None, 'failure_recovery': None}
             self.store.update(task_id, status='queued', **revision, **recovery_changes, result=None, summary='', recovery=None, recovery_advice=None, failure_code=None,
                               retry_at=None, quota_waits=0)
 

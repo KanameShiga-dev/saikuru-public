@@ -19,9 +19,10 @@ class Cancelled(Exception):
 
 
 class ProviderError(Exception):
-    def __init__(self, message, code='provider'):
+    def __init__(self, message, code='provider', *, model_call_state='unknown'):
         super().__init__(message)
         self.code = code
+        self.model_call_state = model_call_state if model_call_state in ('not_started', 'started') else 'unknown'
 
 
 def _set_scoped_test_temp(ctx, env):
@@ -305,9 +306,9 @@ class CodexAdapter:
                         'cwd': ctx.project, 'sandboxPolicy': {'type': 'readOnly', 'networkAccess': False},
                         'timeoutMs': 10000})
                     if probe.get('exitCode') != 0 or probe.get('stdout', '').strip() != 'AGENT_TEAM_NATIVE_OK':
-                        raise ProviderError('CodexのWindowsサンドボックスでコマンドを起動できません。setup refresh・実行環境の読み取り権限を復旧してから再試行してください。モデル実行は開始していません。', 'codex_sandbox')
+                        raise ProviderError('CodexのWindowsサンドボックスでコマンドを起動できません。setup refresh・実行環境の読み取り権限を復旧してから再試行してください。モデル実行は開始していません。', 'codex_sandbox', model_call_state='not_started')
                 except ProviderError as exc:
-                    raise ProviderError('CodexのWindowsサンドボックスの起動確認に失敗しました。モデル実行は開始していません。詳細: ' + str(exc)[:800], 'codex_sandbox') from exc
+                    raise ProviderError('CodexのWindowsサンドボックスの起動確認に失敗しました。モデル実行は開始していません。詳細: ' + str(exc)[:800], 'codex_sandbox', model_call_state='not_started') from exc
             from team_attachments import provider_input
             prompt += report_format_instruction(schema)
             request('turn/start', {'threadId': thread_id, 'input': provider_input(ctx, prompt, 'codex'),
