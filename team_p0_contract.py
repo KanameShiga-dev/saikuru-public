@@ -6,6 +6,8 @@ only through the existing G3 decision path. No model can change job.goal.
 
 from copy import deepcopy
 import hashlib
+import hmac
+import json
 from pathlib import Path
 
 
@@ -41,6 +43,23 @@ def initial_workflow(job, *, enabled=False):
     result.update(requirement_revision=0, requirements_approval_id=None,
                   plan_revision=0, plan_approval_id=None)
     return result
+
+
+def checkpoint_scope(job, approval):
+    """The file allowlist is an approved payload field, never a worker argument."""
+    if (workflow_version(job) != 1 or type(job.get('plan_revision')) is not int or job['plan_revision'] < 1
+            or approval.get('id') != job.get('plan_approval_id') or approval.get('job_id') != job.get('id')
+            or approval.get('kind') != 'plan' or approval.get('status') != 'approved'):
+        raise ValueError('Checkpointには現行の承認済み計画が必要です。')
+    payload = approval.get('payload')
+    if (not isinstance(payload, dict) or not isinstance(approval.get('digest'), str)
+            or len(approval['digest']) != 64 or any(c not in '0123456789abcdef' for c in approval['digest'])):
+        raise ValueError('Checkpointの承認対象を確認できません。')
+    expected = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    if not hmac.compare_digest(approval['digest'], expected):
+        raise ValueError('Checkpointの承認対象が変化しています。')
+    from team_checkpoint import scope_paths
+    return scope_paths(payload.get('checkpoint_paths'))
 
 
 def initial(goal):
