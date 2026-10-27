@@ -105,6 +105,33 @@ class HandoffDB:
             else:
                 self.db.rollback()
 
+    def checkpoint_receipt(self, project, record, event, *, write=False):
+        """Idempotent Store-derived metadata only; never regenerate facts/Skills."""
+        source = 'checkpoint-ready:' + record['id'] + ':' + str(event['seq'])
+        payload = {'origin': 'store', 'event_seq': event['seq'], 'checkpoint_id': record['id'],
+                   'manifest_digest': record['manifest_digest'], 'ready_binding': record['ready_binding']}
+        expected = (canonical(project), record['job_id'], record['task_id'], 'checkpoint_ready', payload)
+        with self.lock:
+            if write:
+                if self.db.in_transaction:
+                    raise ValueError('Handoffに未完了の保存があります。')
+                self.db.execute('BEGIN IMMEDIATE')
+            try:
+                row = self.db.execute('SELECT project,job_id,task_id,kind,payload FROM records WHERE source_id=?', (source,)).fetchone()
+                if row:
+                    if (*row[:4], json.loads(row[4])) != expected:
+                        raise ValueError('HandoffのCheckpoint参照が一致しません。')
+                elif write:
+                    self.db.execute('INSERT INTO records(project,job_id,task_id,kind,source_id,happened_at,payload) VALUES (?,?,?,?,?,?,?)',
+                        (*expected[:4], source, event['at'], json.dumps(payload, ensure_ascii=False)))
+                if write:
+                    self.db.commit()
+                return bool(row) or write
+            except BaseException:
+                if write:
+                    self.db.rollback()
+                raise
+
     def fact(self, project, job_id, key, value, evidence, authority, source_id):
         key, value, evidence = str(key).strip()[:160], str(value).strip()[:2000], str(evidence).strip()[:500]
         if not key or not value:

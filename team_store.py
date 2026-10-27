@@ -186,10 +186,17 @@ class Store:
                 if (task.get('job_id') != job['id']
                         or obj.get('work_package_id') != task.get('work_package_id')):
                     raise ValueError('Checkpointの担当・所属が不正です。')
-                if obj.get('state') not in ('writing', 'invalid'):
+                publishing = getattr(self._worker, 'checkpoint_commit', None) == obj['id']
+                if previous and previous.get('state') == 'ready':
+                    raise ValueError('確定Checkpointは変更できません。')
+                if obj.get('state') not in (('writing', 'invalid', 'ready') if publishing else ('writing', 'invalid')):
                     raise ValueError('Checkpoint確定は専用の保存手続きが必要です。')
                 if previous and previous['state'] == 'invalid' and obj['state'] != 'invalid':
                     raise ValueError('無効なCheckpointは再利用できません。')
+            if (kind == 'task' and obj.get('resume_checkpoint_id') != (previous or {}).get('resume_checkpoint_id')
+                    and (not getattr(self._worker, 'checkpoint_commit', None)
+                         or self._worker.checkpoint_commit != obj.get('resume_checkpoint_id'))):
+                raise ValueError('Checkpoint参照は専用の確定手続きで設定してください。')
             if previous and (obj['job_id'] != previous['job_id']
                              or obj.get('work_package_id') != previous.get('work_package_id')):
                 raise ValueError('保存済み記録の所属は変更できません。')
@@ -210,6 +217,84 @@ class Store:
             if not row or (kind and row[0] != kind):
                 raise ValueError('対象が見つかりません。')
             return json.loads(row[1])
+
+    def commit_checkpoint(self, record, references):
+        """Internal publisher: caller verifies files outside Store lock first.
+
+        No permission or filesystem validation is inferred from this method.
+        Its transaction only binds the exact observed Store revisions/event.
+        """
+        from team_checkpoint import validate_draft_record
+        with self.atomic():
+            current = self.get(record['id'], 'checkpoint')
+            if current != record:
+                raise StaleAttempt('Checkpointの下書きが変化しました。')
+            task = self.get(record['task_id'], 'task')
+            job = self.get(record['job_id'], 'job')
+            validate_draft_record(current, job, task, references)
+            if current['resume_preconditions'] != ['checkpoint_not_ready']:
+                raise ValueError('未解決の条件があるCheckpointは確定できません。')
+            revisions = references['snapshot_revisions']
+            wp = self.get(task['work_package_id'], 'work_package') if task.get('work_package_id') else None
+            actual = {'job': job['state_revision'], 'task': task['state_revision'],
+                      'work_package': wp['state_revision'] if wp else None}
+            if actual != revisions:
+                raise StaleAttempt('Checkpointの対象版が変化しました。')
+            if (task.get('current_attempt', {}).get('status') not in ('closed', 'fenced')
+                    or task.get('recovery_check_required')
+                    or job.get('status') not in ('planning', 'running', 'blocked', 'failed', 'interrupted', 'awaiting_acceptance')):
+                raise StaleAttempt('Checkpointを確定できる状態ではありません。')
+            previous = getattr(self._worker, 'checkpoint_commit', None)
+            self._worker.checkpoint_commit = record['id']
+            try:
+                task = self.update(task['id'], resume_checkpoint_id=record['id'])
+                binding = dict(actual, task=task['state_revision'])
+                seq = self.event('checkpoint_ready', 'Checkpointの保存を確定しました。', task['id'], job['id'],
+                    details={'checkpoint_id': record['id'], 'manifest_digest': record['manifest_digest'],
+                             'revisions': binding})
+                return self.put('checkpoint', dict(current, state='ready', ready_binding=dict(binding, event_seq=seq)))
+            finally:
+                self._worker.checkpoint_commit = previous
+
+    def checkpoint_binding(self, checkpoint_id):
+        """Persistence candidate only: does not verify files or authorize resume."""
+        from team_checkpoint import DRAFT_FIELDS, checkpoint_digest
+        with self.lock:
+            record = self.get(checkpoint_id, 'checkpoint')
+            binding = record.get('ready_binding')
+            if (set(record) != DRAFT_FIELDS or type(record.get('schema_version')) is not int
+                    or record['schema_version'] != 1 or record.get('state') != 'ready'
+                    or record.get('manifest_digest') != checkpoint_digest(record)
+                    or not isinstance(binding, dict) or set(binding) != {'job', 'task', 'work_package', 'event_seq'}
+                    or any(type(binding[key]) is not int or binding[key] < 1 for key in ('job', 'task', 'event_seq'))
+                    or (binding['work_package'] is not None and (type(binding['work_package']) is not int or binding['work_package'] < 1))):
+                raise ValueError('Checkpointの確定記録が不正です。')
+            task = self.get(record['task_id'], 'task')
+            job = self.get(record['job_id'], 'job')
+            wp = self.get(task['work_package_id'], 'work_package') if task.get('work_package_id') else None
+            revisions = {'job': job['state_revision'], 'task': task['state_revision'],
+                         'work_package': wp['state_revision'] if wp else None}
+            if (workflow_version(job) != 1 or task['job_id'] != job['id']
+                    or task.get('resume_checkpoint_id') != checkpoint_id
+                    or task.get('work_package_id') != record.get('work_package_id')
+                    or (task.get('current_attempt') or {}).get('id') != record['attempt_id']
+                    or any(binding[key] != value for key, value in revisions.items())):
+                raise ValueError('Checkpointの確定対象が変化しています。')
+            row = self.db.execute('SELECT body FROM events WHERE seq=?', (binding['event_seq'],)).fetchone()
+            event = json.loads(row[0]) if row else {}
+            if (event.get('type') != 'checkpoint_ready' or event.get('job_id') != job['id']
+                    or event.get('task_id') != task['id'] or event.get('details') != {
+                        'checkpoint_id': checkpoint_id, 'manifest_digest': record['manifest_digest'], 'revisions': revisions}):
+                raise ValueError('Checkpointの確定イベントが一致しません。')
+            return record, dict(event, seq=binding['event_seq'])
+
+    def invalidate_checkpoint(self, checkpoint_id):
+        with self.atomic():
+            record = self.get(checkpoint_id, 'checkpoint')
+            if record.get('state') == 'writing':
+                self.update(checkpoint_id, state='invalid')
+                self.event('checkpoint_invalid', 'Checkpointの参照が変化したため確定しません。',
+                           record['task_id'], record['job_id'], details={'checkpoint_id': checkpoint_id})
 
     def update(self, object_id, _transition_reason=None, **values):
         with self.lock:

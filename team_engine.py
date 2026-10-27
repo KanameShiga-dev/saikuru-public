@@ -16,6 +16,7 @@ import time
 import sys
 from dataclasses import replace
 from functools import wraps
+from contextlib import contextmanager
 
 from pathlib import Path
 
@@ -823,6 +824,7 @@ class Engine:
         self.handoff = HandoffDB(store.directory)
 
         self.active = {}
+        self._checkpoint_projects = set()
 
         self.shutdown = threading.Event()
 
@@ -2414,6 +2416,11 @@ class Engine:
             raise ValueError('この状態ではCheckpointを収集できません。')
         if any(canonical(ctx.project) == canonical(job['project']) for ctx in self.active.values()):
             raise ValueError('実行中の担当がいるためCheckpointを収集できません。')
+        for other in self.store.all('task'):
+            if (other.get('current_attempt') or {}).get('status') == 'running' or other.get('status') == 'running':
+                parent = self.store.get(other['job_id'], 'job')
+                if canonical(parent['project']) == canonical(job['project']):
+                    raise ValueError('停止未確認の担当がいるためCheckpointを確定できません。')
         approval = self.store.get(job.get('plan_approval_id'), 'approval')
         paths = checkpoint_scope(job, approval)
         refs = reference_snapshot(self.store, self.handoff, job, task)
@@ -2421,13 +2428,30 @@ class Engine:
             raise ValueError('成果物がCheckpointの承認範囲に含まれていません。')
         return job, task, paths, refs
 
+    @contextmanager
+    def _checkpoint_project(self, task_id):
+        # Cooperative process-local writer gate. Unknown OS writers still require
+        # explicit caller confirmation; this does not replace writer-epoch gates.
+        with self.store.lock:
+            task = self.store.get(task_id, 'task')
+            project = canonical(self.store.get(task['job_id'], 'job')['project'])
+            if project in self._checkpoint_projects:
+                raise ValueError('このプロジェクトはCheckpoint保存中です。')
+            self._checkpoint_projects.add(project)
+        try:
+            yield
+        finally:
+            with self.store.lock:
+                self._checkpoint_projects.discard(project)
+
     def collect_checkpoint(self, task_id, *, writer_stopped=False):
         """Internal draft collection only. No public route, ready pointer or resume."""
         from team_checkpoint import collect_project, checkpoint_digest, draft_preconditions
-        with self.store.lock:
-            job, task, paths, refs = self._checkpoint_inputs(task_id, writer_stopped)
+        with self._checkpoint_project(task_id):
+            with self.store.lock:
+                job, task, paths, refs = self._checkpoint_inputs(task_id, writer_stopped)
             collection = collect_project(job['project'], paths, self.store.directory / 'checkpoints')
-            with self.store.atomic():
+            with self.store.atomic(), self.handoff.lock:
                 current_job, current_task, current_paths, current_refs = self._checkpoint_inputs(task_id, writer_stopped)
                 if paths != current_paths or refs != current_refs:
                     raise ValueError('収集中にCheckpointの対象版・判断が変化しました。')
@@ -2450,41 +2474,88 @@ class Engine:
                 record['manifest_digest'] = checkpoint_digest(record)
                 return self.store.put('checkpoint', record)
 
+    def _checkpoint_draft_inputs(self, checkpoint_id, writer_stopped):
+        from team_checkpoint import validate_draft_record
+        record = self.store.get(checkpoint_id, 'checkpoint')
+        job, task, paths, refs = self._checkpoint_inputs(record['task_id'], writer_stopped)
+        validate_draft_record(record, job, task, refs)
+        return record, job, task, paths, refs
+
     def verify_checkpoint_draft(self, checkpoint_id, *, writer_stopped=False):
-        from team_checkpoint import DRAFT_FIELDS, checkpoint_digest, draft_preconditions, load_collection, verify_collection
+        from team_checkpoint import verify_draft_files
         try:
             with self.store.lock:
-                record = self.store.get(checkpoint_id, 'checkpoint')
-                if (set(record) != DRAFT_FIELDS or type(record.get('schema_version')) is not int
-                        or record['schema_version'] != 1 or record.get('state') != 'writing'
-                        or record.get('ready_binding') is not None
-                        or any(type(record.get(key)) is not int or record[key] < 1 for key in (
-                            'attempt_ordinal', 'attempt_start_event_seq', 'snapshot_generation',
-                            'requirement_revision', 'plan_revision'))
-                        or not isinstance(record.get('collection_ref'), dict)
-                        or set(record['collection_ref']) != {'id', 'digest'}
-                        or record.get('manifest_digest') != checkpoint_digest(record)):
-                    raise ValueError('Checkpointの下書きが不正です。')
-                job, task, paths, refs = self._checkpoint_inputs(record['task_id'], writer_stopped)
-                if (record['job_id'] != job['id'] or record['attempt_id'] != task['current_attempt']['id']
-                        or record['work_package_id'] != task.get('work_package_id')
-                        or record['attempt_ordinal'] != task['attempt']
-                        or record['attempt_start_event_seq'] != task['current_attempt']['start_event_seq']
-                        or record['collection_ref']['id'] != record['id']
-                        or record['resume_position'] != {'task_id': task['id'], 'stage': 'after_attempt'}
-                        or any(record.get(key) != job.get(key) for key in (
-                            'requirement_revision', 'requirements_approval_id', 'plan_revision', 'plan_approval_id'))
-                        or any(record.get(key) != value for key, value in refs.items())):
-                    raise ValueError('Checkpointの参照が変化しています。')
-                collection = load_collection(job['project'], self.store.directory / 'checkpoints', record['collection_ref']['id'])
-                if collection['manifest_digest'] != record['collection_ref']['digest']:
-                    raise ValueError('Checkpointの対象版が一致しません。')
-                verify_collection(job['project'], self.store.directory / 'checkpoints', collection, paths)
-                if record['resume_preconditions'] != draft_preconditions(refs, collection):
-                    raise ValueError('Checkpointの再開条件が一致しません。')
+                task_id = self.store.get(checkpoint_id, 'checkpoint')['task_id']
+            with self._checkpoint_project(task_id):
+                with self.store.lock:
+                    inputs = self._checkpoint_draft_inputs(checkpoint_id, writer_stopped)
+                record, job, task, paths, refs = inputs
+                verify_draft_files(record, job, paths, refs, self.store.directory / 'checkpoints')
+                with self.store.lock, self.handoff.lock:
+                    if self._checkpoint_draft_inputs(checkpoint_id, writer_stopped) != inputs:
+                        raise ValueError('Checkpointの参照が変化しています。')
             return {'valid': True, 'ready': False, 'resume_allowed': False, 'reasons': ['checkpoint_not_ready']}
         except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):
             return {'valid': False, 'ready': False, 'resume_allowed': False, 'reasons': ['reference_mismatch']}
+
+    def finalize_checkpoint(self, checkpoint_id, *, writer_stopped=False):
+        """Internal publication, never resume authority or a worker-stop command."""
+        from team_checkpoint import verify_draft_files
+        with self.store.lock:
+            record = self.store.get(checkpoint_id, 'checkpoint')
+            task_id = record['task_id']
+        with self._checkpoint_project(task_id):
+            try:
+                with self.store.lock:
+                    inputs = self._checkpoint_draft_inputs(checkpoint_id, writer_stopped)
+                record, job, task, paths, refs = inputs
+                verify_draft_files(record, job, paths, refs, self.store.directory / 'checkpoints')
+                if record['resume_preconditions'] != ['checkpoint_not_ready']:
+                    raise ValueError('未解決の再開条件があります。')
+                with self.store.atomic(), self.handoff.lock:
+                    if self._checkpoint_draft_inputs(checkpoint_id, writer_stopped) != inputs:
+                        raise ValueError('Checkpointの参照が変化しています。')
+                    self.store.commit_checkpoint(record, refs)
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                # Missing caller stop confirmation is not evidence of a bad draft.
+                if writer_stopped is True:
+                    self.store.invalidate_checkpoint(checkpoint_id)
+                raise ValueError('Checkpointは確定できません。参照と停止状態を確認してください。') from error
+            # Commit is already durable. Handoff failure must never undo/report
+            # rollback of Store or rewrite its immutable ready/event binding.
+            return self.resync_checkpoint(checkpoint_id)
+
+    def resync_checkpoint(self, checkpoint_id):
+        """Replay one metadata receipt only, never Handoff.sync/facts/Skills."""
+        with self.store.atomic(), self.handoff.lock:
+            record, event = self.store.checkpoint_binding(checkpoint_id)
+            job = self.store.get(record['job_id'], 'job')
+            try:
+                already = self.handoff.checkpoint_receipt(job['project'], record, event)
+                self.handoff.checkpoint_receipt(job['project'], record, event, write=True)
+            except (ValueError, OSError, sqlite3.Error):
+                self.store.event('checkpoint_handoff_pending', 'Checkpointの派生更新を再同期する必要があります。',
+                    record['task_id'], record['job_id'], details={'checkpoint_id': checkpoint_id, 'ready_event_seq': event['seq']})
+                return {'store_ready': True, 'handoff_synced': False, 'resume_allowed': False,
+                        'reasons': ['handoff_sync_required']}
+            if not already:
+                self.store.event('checkpoint_handoff_synced', 'Checkpointの派生更新を同期しました。',
+                    record['task_id'], record['job_id'], details={'checkpoint_id': checkpoint_id, 'ready_event_seq': event['seq']})
+            return {'store_ready': True, 'handoff_synced': True, 'resume_allowed': False,
+                    'reasons': ['resume_verification_required']}
+
+    def checkpoint_persistence(self, checkpoint_id):
+        """Read-only persistence health, not file/current-authority validation."""
+        try:
+            with self.store.lock, self.handoff.lock:
+                record, event = self.store.checkpoint_binding(checkpoint_id)
+                job = self.store.get(record['job_id'], 'job')
+                synced = self.handoff.checkpoint_receipt(job['project'], record, event)
+            return {'store_ready': True, 'handoff_synced': synced, 'resume_allowed': False,
+                    'reasons': ['resume_verification_required' if synced else 'handoff_sync_required']}
+        except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):
+            return {'store_ready': False, 'handoff_synced': False, 'resume_allowed': False,
+                    'reasons': ['checkpoint_binding_invalid']}
 
     def sync_handoff(self, job_id):
         with self.store.atomic():
@@ -3722,7 +3793,7 @@ class Engine:
 
             working = [t for t in tasks if t['status'] in ('running', 'awaiting_approval') or t['id'] in self.active]
 
-            busy = {canonical(self.store.get(t['job_id'])['project']) for t in working}
+            busy = {canonical(self.store.get(t['job_id'])['project']) for t in working} | self._checkpoint_projects
 
             for task in tasks:
 

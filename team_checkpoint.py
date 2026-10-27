@@ -406,7 +406,8 @@ def reference_snapshot(store, handoff, job, task):
         from team_handoff import canonical
         skills = handoff.db.execute('SELECT a.name,a.version_id,a.enabled,v.payload FROM skill_active a '
             'LEFT JOIN skill_versions v ON v.id=a.version_id WHERE a.project=? ORDER BY a.name', (canonical(job['project']),)).fetchall()
-        watermark = handoff.db.execute('SELECT COALESCE(max(seq),0) FROM records WHERE job_id=?', (job['id'],)).fetchone()[0]
+        # Our Store-derived receipt is not a new independent Handoff authority.
+        watermark = handoff.db.execute("SELECT COALESCE(max(seq),0) FROM records WHERE job_id=? AND kind!='checkpoint_ready'", (job['id'],)).fetchone()[0]
     observation = {'records_seq': watermark, 'facts_digest': digest(facts),
                    'conflicts_digest': digest(conflicts), 'skills_digest': digest(skills),
                    'unresolved_conflicts': any(row[3] == 'pending' for row in conflicts)}
@@ -424,3 +425,43 @@ def reference_snapshot(store, handoff, job, task):
                               'task_validation': digest(task.get('validation_runs')),
                               'test_assets': digest(task.get('test_asset_snapshot'))},
             'decision_refs': decisions, 'operation_refs': operations, 'handoff_observation': observation}
+
+
+def validate_draft_record(record, job, task, refs):
+    """Pure typed binding check, with no filesystem IO or new authority."""
+    revisions = record.get('snapshot_revisions')
+    if (not isinstance(revisions, dict) or set(revisions) != {'job', 'task', 'work_package'}
+            or any(type(revisions[key]) is not int or revisions[key] < 1 for key in ('job', 'task'))
+            or (revisions['work_package'] is not None and (type(revisions['work_package']) is not int or revisions['work_package'] < 1))):
+        raise ValueError('Checkpointの観測版が不正です。')
+    if (set(record) != DRAFT_FIELDS or type(record.get('schema_version')) is not int
+            or record['schema_version'] != 1 or record.get('state') != 'writing'
+            or record.get('ready_binding') is not None
+            or any(type(record.get(key)) is not int or record[key] < 1 for key in (
+                'attempt_ordinal', 'attempt_start_event_seq', 'snapshot_generation', 'requirement_revision', 'plan_revision'))
+            or not isinstance(record.get('collection_ref'), dict)
+            or set(record['collection_ref']) != {'id', 'digest'}
+            or record.get('manifest_digest') != checkpoint_digest(record)):
+        raise ValueError('Checkpointの下書きが不正です。')
+    if (record['job_id'] != job['id'] or record['task_id'] != task['id']
+            or record['attempt_id'] != task['current_attempt']['id']
+            or record['work_package_id'] != task.get('work_package_id')
+            or record['attempt_ordinal'] != task['attempt']
+            or record['attempt_start_event_seq'] != task['current_attempt']['start_event_seq']
+            or record['collection_ref']['id'] != record['id']
+            or record['resume_position'] != {'task_id': task['id'], 'stage': 'after_attempt'}
+            or any(record.get(key) != job.get(key) for key in (
+                'requirement_revision', 'requirements_approval_id', 'plan_revision', 'plan_approval_id'))
+            or any(record.get(key) != value for key, value in refs.items())):
+        raise ValueError('Checkpointの参照が変化しています。')
+
+
+def verify_draft_files(record, job, paths, refs, directory):
+    """Run only outside Store/Handoff locks; caller rechecks references at commit."""
+    collection = load_collection(job['project'], directory, record['collection_ref']['id'])
+    if collection['manifest_digest'] != record['collection_ref']['digest']:
+        raise ValueError('Checkpointの対象版が一致しません。')
+    verify_collection(job['project'], directory, collection, paths)
+    if record['resume_preconditions'] != draft_preconditions(refs, collection):
+        raise ValueError('Checkpointの再開条件が一致しません。')
+    return collection
