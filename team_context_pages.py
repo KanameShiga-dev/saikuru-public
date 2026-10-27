@@ -48,18 +48,24 @@ def _screen_context(value):
     forbidden = {'messages', 'conversation', 'transcript', 'password', 'secret', 'api_key', 'private_key', 'credentials',
                  'access_token', 'refresh_token', 'authorization', 'cookie', 'native_answers', 'environment',
                  'session_token', 'session_id', 'maintenance_token', 'raw_events'}
-    def visit(item, depth=0):
+    def visit(item, depth=0, path=()):
+        section = path[1] if len(path) > 1 and path[0] == 'sections' else 'manifest'
         if depth > 24: raise ValueError('文脈の構造が深すぎます。')
         if isinstance(item, dict):
             if any(not isinstance(key, str) or key.casefold() in forbidden for key in item):
                 raise ValueError('文脈に認証情報・会話記録は含められません。')
-            for nested in item.values(): visit(nested, depth + 1)
+            for key, nested in item.items(): visit(nested, depth + 1, path + (key,))
         elif isinstance(item, list):
-            for nested in item: visit(nested, depth + 1)
+            for nested in item: visit(nested, depth + 1, path + ('item',))
         elif isinstance(item, str):
             import re
-            if re.search(r'(?im)^\s*(?:user|assistant|system|developer|human|ユーザー|アシスタント|利用者)\s*[:：]', item):
-                raise ValueError('文脈に会話全文・役割を偽装する断片は含められません。')
+            labels = re.findall(r'(?im)^\s*(user|assistant|system|developer|human|ユーザー|アシスタント|利用者)\s*[:：]', item)
+            aliases = {'human': 'user', 'ユーザー': 'user', '利用者': 'user', 'アシスタント': 'assistant'}
+            roles = {aliases.get(label.casefold(), label.casefold()) for label in labels}
+            if len(roles) > 1:
+                raise ValueError('context_transcript:' + section)
+            if labels and section in ('facts', 'remaining_work'):
+                raise ValueError('context_role_fragment:' + section)
     visit(value)
     text = json.dumps(value, ensure_ascii=False)
     if len(text) > MAX_CONTEXT_CHARS:
