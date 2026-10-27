@@ -1482,6 +1482,85 @@ class Engine:
 
         return approval
 
+    def _new_workflow_plan_approval(self, task, payload):
+        from team_plan_revision import analysis, approval_digest
+        job = self.store.get(task['job_id'], 'job')
+        target = analysis(self.store, job, payload)
+        if len(json.dumps(target, ensure_ascii=False)) > 50000:
+            raise ValueError('workflow_revision_analysis_too_large')
+        approval = self.new_approval(task, 'plan', payload)
+        return self.store.update(approval['id'], workflow_revision=target,
+                                 workflow_revision_digest=approval_digest(target))
+
+    def propose_plan_revision(self, job_id, payload, expected_job_revision, *, actor):
+        """Authenticated user proposal only; no provider run or scope mutation."""
+        if actor != 'authenticated_local_app_session' or getattr(self.store._worker, 'task', None) is not None:
+            raise ValueError('workflow_revision_user_action_required')
+        from team_p0_contract import workflow_version, validate_plan
+        with self.store.atomic():
+            job = self.store.get(job_id, 'job')
+            if (workflow_version(job) != 1 or job['plan_revision'] < 1
+                    or type(expected_job_revision) is not int or job['state_revision'] != expected_job_revision
+                    or job['status'] not in ('running', 'blocked', 'failed', 'awaiting_acceptance', 'accepted', 'accepted_with_pending_checks')):
+                raise ValueError('workflow_revision_job_not_current')
+            tasks = self.store.for_job('task', job_id)
+            if any(t['id'] in self.active or t['status'] == 'running'
+                   or t.get('recovery_check_required')
+                   or (t.get('current_attempt') or {}).get('status') == 'running' for t in tasks):
+                raise ValueError('workflow_revision_writer_not_stopped')
+            if any(a['status'] == 'pending' and a['kind'] != 'completion' for a in self.store.for_job('approval', job_id)):
+                raise ValueError('workflow_revision_pending_decision')
+            validate_plan(job, payload)
+            if payload.get('questions'):
+                raise ValueError('workflow_revision_questions_unresolved')
+            self.store.update(job_id, status='awaiting_approval')
+            planner = self.new_task(self.store.get(job_id), '利用者が提示した改訂計画を確認する',
+                                    '対象版・差分・依存成果物を利用者が確認するまで実装しない。', 'planner')
+            planner = self.store.update(planner['id'], status='succeeded', result=copy.deepcopy(payload),
+                                        plan_origin='authenticated_user_proposal', finished_at=now())
+            approval = self._new_workflow_plan_approval(planner, payload)
+            self.store.event('workflow_revision_proposed', '改訂範囲と入力の版を確認し、再承認を待っています。',
+                             planner['id'], job_id, {'approval_id': approval['id']})
+            return {'ok': True, 'approval_id': approval['id'],
+                    'workflow_revision': approval['workflow_revision'],
+                    'workflow_revision_digest': approval['workflow_revision_digest']}
+
+    def _check_workflow_plan_decision(self, approval, task, job, confirmation):
+        from team_plan_revision import analysis, approval_digest
+        target = approval.get('workflow_revision')
+        if (job['status'] != 'awaiting_approval' or task.get('role') != 'planner'
+                or not isinstance(target, dict) or confirmation != approval.get('workflow_revision_digest')
+                or confirmation != approval_digest(target) or target != analysis(self.store, job, approval['payload'])
+                or approval.get('digest') != approval_digest(approval['payload'])
+                or approval_digest(task.get('result')) != approval['digest']):
+            raise ValueError('workflow_revision_confirmation_not_current')
+        if any(a['id'] != approval['id'] and a['status'] == 'pending' and a['kind'] != 'completion'
+               for a in self.store.for_job('approval', job['id'])):
+            raise ValueError('workflow_revision_pending_decision')
+        if getattr(self.store._worker, 'task', None) is not None or any(
+                t['id'] in self.active or t['status'] == 'running'
+                or t.get('recovery_check_required')
+                or (t.get('current_attempt') or {}).get('status') == 'running'
+                for t in self.store.for_job('task', job['id'])):
+            raise ValueError('workflow_revision_writer_not_stopped')
+
+    def _publish_workflow_plan(self, approval, task, job, confirmation):
+        self.store.update(approval['id'], workflow_confirmation=confirmation)
+        for old in self.store.for_job('approval', job['id']):
+            if old['id'] != approval['id'] and old['status'] == 'pending':
+                self.store.update(old['id'], status='superseded', note='計画版の変更により再確認が必要です。')
+        for old in self.store.for_job('task', job['id']):
+            if old['id'] != task['id'] and old['status'] in ('queued', 'awaiting_approval'):
+                self.store.update(old['id'], status='cancelled', summary='旧計画の未完了工程。新計画で再確認が必要です。')
+        for wp in self.store.for_job('work_package', job['id']):
+            if wp.get('plan_revision') == job['plan_revision']:
+                self.store.update(wp['id'], review_status='invalidated',
+                                  invalidation_reason='plan_revision_changed_no_implicit_transfer')
+        current = self.store.publish_workflow_plan(job['id'], approval['id'], job['state_revision'])
+        self.store.event('workflow_plan_published', '確認済みの要求・計画版を保存しました。過去の受領・証拠は履歴として保持します。',
+                         task['id'], job['id'], {'approval_id': approval['id'], 'plan_revision': current['plan_revision'],
+                                                'requirement_revision': current['requirement_revision']})
+
     @staticmethod
     def _g2_payload_digest(payload):
         return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
@@ -1767,7 +1846,8 @@ class Engine:
 
 
 
-    def decide(self, approval_id, allow, note, answers=None, attachment_ids=None, review_checklist=None):
+    def decide(self, approval_id, allow, note, answers=None, attachment_ids=None, review_checklist=None,
+               workflow_confirmation=None):
 
         with self.store.lock:
 
@@ -1807,6 +1887,10 @@ class Engine:
             if approval['status'] != 'pending':
 
                 raise ValueError('この要求は処理済みです。')
+
+            workflow_plan = approval['kind'] == 'plan' and job.get('workflow_contract_version') == 1
+            if workflow_plan and allow:
+                self._check_workflow_plan_decision(approval, task, job, workflow_confirmation)
 
             if approval['kind'] == 'completion' and allow:
 
@@ -1899,6 +1983,8 @@ class Engine:
 
                     if allow:
 
+                        if workflow_plan:
+                            self._publish_workflow_plan(approval, task, job, workflow_confirmation)
                         self._expand_plan(task, task['result'])
 
                     else:
@@ -2446,7 +2532,7 @@ class Engine:
         from team_document_capabilities import require_plan
         require_plan(job,result)
 
-        if job.get('p0_contract_version') == 1:
+        if job.get('p0_contract_version') == 1 and not workflow:
             from team_p0_contract import approved_plan
             contract = approved_plan(job, result)
             job = self.store.update(job['id'], goal_contract=contract)
@@ -2463,6 +2549,12 @@ class Engine:
 
             new = self.new_task(job, spec['title'], spec['instruction'], spec['role'], after,
                                 **({'plan_task_index': index} if workflow else {}))
+            if workflow:
+                revision = self.store.get(job['plan_approval_id'], 'approval').get('workflow_revision') or {}
+                if (revision.get('base_versions', {}).get('plan_revision', 0) > 0
+                        and spec['wbs_id'] not in revision.get('affected_work_packages', [])):
+                    self.store.update(new['id'], status='blocked', failure_code='workflow_transfer_required',
+                                      summary='影響外の工程は再実行せず、新版への証拠移送を確認するまで停止します。')
             if job.get('p0_contract_version') == 1 and not workflow:
                 new = self.store.update(new['id'], goal_links=list(spec['goal_links']), goal_id=job['id'])
 
@@ -3664,7 +3756,10 @@ class Engine:
                     return
 
                 self.store.update(job['id'], status='awaiting_approval')
-                self.new_approval(task, 'plan', result)
+                if job.get('workflow_contract_version') == 1:
+                    self._new_workflow_plan_approval(task, result)
+                else:
+                    self.new_approval(task, 'plan', result)
 
             elif result['status'] == 'blocked':
 

@@ -783,6 +783,11 @@ class Handler(BaseHTTPRequestHandler):
                 result = engine.record_artifact_url(str(body.get('id', '')), str(body.get('url', '')), str(body.get('note', '')))
             elif path == '/api/jobs/rework':
                 result = engine.rework_from_rejection(str(body.get('id', '')), body.get('note', ''))
+            elif path == '/api/jobs/plan-revision':
+                if set(body) != {'id', 'plan', 'job_revision'}:
+                    raise ValueError('改訂計画・依頼ID・表示した依頼版だけを指定してください。')
+                result = engine.propose_plan_revision(body['id'], body['plan'], body['job_revision'],
+                                                     actor='authenticated_local_app_session')
             elif path == '/api/decide':
                 if type(body.get('allow')) is not bool:
                     raise ValueError('承認または拒否を選んでください。')
@@ -790,7 +795,7 @@ class Handler(BaseHTTPRequestHandler):
                 if pending.get('intended_role') == 'maintainer' and not self.maintenance_authorized():
                     raise PermissionError('保守担当の認証が必要です。')
                 engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'),
-                              body.get('review_checklist'))
+                              body.get('review_checklist'), workflow_confirmation=body.get('workflow_confirmation'))
                 result = {'ok': True}
             elif path == '/api/jobs/formal-acceptance':
                 result = engine.accept_completion(str(body.get('approval_id', '')),

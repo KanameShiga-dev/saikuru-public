@@ -64,7 +64,10 @@ class Store:
                         if (obj.get('goal') != original.get('goal')
                                 or (obj.get('goal_contract') or {}).get('original_request') != original.get('goal')):
                             raise ValueError('元の依頼は変更できません。要求変更は利用者の承認が必要です。')
-                        if original.get('status') not in ('planning', 'awaiting_approval'):
+                        publishing = (getattr(self._worker, 'workflow_plan_commit', None)
+                                      == obj.get('plan_approval_id') and obj.get('plan_approval_id') is not None)
+                        protected_workflow = workflow_version(original) == 1 and original.get('requirement_revision', 0) > 0
+                        if (protected_workflow or original.get('status') not in ('planning', 'awaiting_approval')) and not publishing:
                             fixed = ('primary_goal', 'deliverables', 'acceptance_criteria',
                                      'non_goals', 'constraints')
                             previous_contract = original.get('goal_contract') or {}
@@ -108,6 +111,38 @@ class Store:
                 self.db.commit()
             return obj
 
+    def publish_workflow_plan(self, job_id, approval_id, expected_revision):
+        """Publish consented versions only, outside any worker attempt scope."""
+        if getattr(self._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_publish_workflow_plan')
+        with self.atomic():
+            from team_plan_revision import approval_digest, VERSION_FIELDS, CONTRACT_FIELDS
+            from team_p0_contract import validate_plan
+            job = self.get(job_id, 'job')
+            approval = self.get(approval_id, 'approval')
+            target = approval.get('workflow_revision') or {}
+            if (workflow_version(job) != 1 or job['status'] != 'awaiting_approval'
+                    or type(expected_revision) is not int or job['state_revision'] != expected_revision
+                    or target.get('expected_job_revision') != expected_revision
+                    or target.get('base_versions') != {k: job.get(k) for k in VERSION_FIELDS}
+                    or approval.get('job_id') != job_id or approval.get('kind') != 'plan'
+                    or approval.get('status') != 'approved'
+                    or approval.get('digest') != approval_digest(approval['payload'])
+                    or approval.get('workflow_confirmation') != approval_digest(target)):
+                raise ValueError('workflow_revision_consent_not_current')
+            contract = validate_plan(job, approval['payload'])
+            changed = any((job.get('goal_contract') or {}).get(k) != contract[k] for k in CONTRACT_FIELDS)
+            previous = getattr(self._worker, 'workflow_plan_commit', None)
+            self._worker.workflow_plan_commit = approval_id
+            try:
+                return self.update(job_id, goal_contract=contract,
+                    requirement_revision=job['requirement_revision'] + int(changed or job['requirement_revision'] == 0),
+                    requirements_approval_id=approval_id if changed or job['requirement_revision'] == 0 else job['requirements_approval_id'],
+                    plan_revision=job['plan_revision'] + 1, plan_approval_id=approval_id,
+                    validation_evidence=None)
+            finally:
+                self._worker.workflow_plan_commit = previous
+
     def _workflow_storage(self, kind, obj):
         """Additive storage checks; dispatch/fenced callbacks arrive in W02.02.
 
@@ -126,6 +161,10 @@ class Store:
                 raise ValueError('既存依頼の作業フロー版は変更できません。')
             if version is None:
                 return
+            if previous and getattr(self._worker, 'task', None) is not None and any(
+                    obj.get(key) != previous.get(key) for key in
+                    ('requirement_revision', 'requirements_approval_id', 'plan_revision', 'plan_approval_id')):
+                raise ValueError('worker_cannot_publish_workflow_plan')
             for revision_key, approval_key in (
                     ('requirement_revision', 'requirements_approval_id'), ('plan_revision', 'plan_approval_id')):
                 revision = obj.get(revision_key)
