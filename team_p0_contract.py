@@ -109,6 +109,9 @@ def validate_plan(job, result):
     test_plan = result.get('code_test_plan') or {}
     if test_plan.get('required') is not True or not test_plan.get('cases') or not test_plan.get('command'):
         raise ValueError('開発計画には現行版で実行するテストと確認条件が必要です。')
+    if workflow_version(job) == 1:
+        from team_wbs import validate_work_packages
+        validate_work_packages(result)
     return contract
 
 

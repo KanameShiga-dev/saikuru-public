@@ -1205,7 +1205,15 @@ class Engine:
                          {'failure_signature': interruption['failure_signature'],
                           'attempt_count': interruption['attempt_count'], 'category': category})
 
-    def new_task(self, job, title, instruction, role, after=None, repair=0, agent_name=None):
+    def new_task(self, job, title, instruction, role, after=None, repair=0, agent_name=None, *, plan_task_index=None):
+        if plan_task_index is not None:
+            with self.store.atomic():
+                current, fields = self._plan_task_fields(job, title, instruction, role, after,
+                                                         repair, agent_name, plan_task_index)
+                return self._new_task_record(current, title, instruction, role, after, repair, agent_name, fields)
+        return self._new_task_record(job, title, instruction, role, after, repair, agent_name)
+
+    def _new_task_record(self, job, title, instruction, role, after=None, repair=0, agent_name=None, package_fields=None):
 
         profile_id = self.config['roles'][role]
 
@@ -1234,6 +1242,8 @@ class Engine:
         if isinstance(task['auto_return'], dict) and 'switched_attempt' in task['auto_return']:
             task['auto_return']['switched_attempt'] = task.get('attempt', 0)   # counted from this task's own runs
 
+        if package_fields is not None:
+            task.update(package_fields)
         return self.store.put('task', task)
 
 
@@ -2342,9 +2352,97 @@ class Engine:
 
 
 
+    def _work_package_source(self, job):
+        from team_wbs import approved_source
+        from team_p0_contract import validate_plan
+        approval = self.store.get(job.get('plan_approval_id'), 'approval')
+        requirements = self.store.get(job.get('requirements_approval_id'), 'approval')
+        specs = approved_source(job, approval, requirements)
+        validate_plan(job, approval['payload'])
+        return approval, specs
+
+    def install_work_packages(self, job_id, *, expected_job_revision):
+        """Materialize approved definitions only; never approval or dispatch."""
+        from team_wbs import projection, validate_projection
+        with self.store.atomic():
+            job = self.store.get(job_id, 'job')
+            if type(expected_job_revision) is not int or job.get('state_revision') != expected_job_revision:
+                raise ValueError('work_package_job_revision_changed')
+            approval, specs = self._work_package_source(job)
+            current = [row for row in self.store.for_job('work_package', job_id)
+                       if row.get('plan_revision') == job['plan_revision']]
+            expected = {spec['wbs_id']: projection(job, approval, spec) for spec in specs}
+            if current:
+                return validate_projection(job, approval, specs, current)
+            result = {}
+            for label, fields in expected.items():
+                row = self.store.put('work_package', dict(fields, id=uid(), execution_state='planned',
+                    review_status='not_requested', created_at=now()))
+                result[label] = row['id']
+            self.store.event('work_packages_installed', '承認済み計画の作業パッケージを保存しました。',
+                job_id=job_id, details={'plan_approval_id': approval['id'], 'count': len(result)})
+            return result
+
+    def work_package_view(self, job_id):
+        """Read-only projection; dependency/task lists are never stored on WP."""
+        from team_wbs import validate_projection
+        with self.store.lock:
+            job = self.store.get(job_id, 'job')
+            approval, specs = self._work_package_source(job)
+            records = [row for row in self.store.for_job('work_package', job_id)
+                       if row.get('plan_revision') == job['plan_revision']]
+            if not records:
+                return {'materialized': False, 'work_packages': [], 'execution_permission': 'none'}
+            mapping = validate_projection(job, approval, specs, records)
+            by_id = {row['id']: row for row in records}
+            tasks = self.store.for_job('task', job_id)
+            return {'materialized': True, 'execution_permission': 'none', 'work_packages': [
+                dict(by_id[mapping[spec['wbs_id']]], depends_on=list(spec['depends_on']),
+                     task_ids=[t['id'] for t in tasks if t.get('work_package_id') == mapping[spec['wbs_id']]])
+                for spec in specs]}
+
+    def _plan_task_fields(self, expected_job, title, instruction, role, after, repair, agent_name, task_index):
+        """Initial-save membership only; never reassign a persisted Task."""
+        job = self.store.get(expected_job['id'], 'job')
+        if (type(expected_job.get('state_revision')) is not int
+                or expected_job['state_revision'] != job['state_revision'] or repair != 0 or agent_name is not None):
+            raise ValueError('work_package_job_revision_changed')
+        approval, _ = self._work_package_source(job)
+        planned = approval['payload']['tasks']
+        if type(task_index) is not int or not 0 <= task_index < len(planned):
+            raise ValueError('work_package_task_index_invalid')
+        spec = planned[task_index]
+        if (title != spec['title'] or instruction != spec['instruction'] or role != spec['role']
+                or (after is not None and self.store.get(after, 'task')['job_id'] != job['id'])):
+            raise ValueError('work_package_task_spec_changed')
+        if any(t.get('plan_revision') == job['plan_revision'] and t.get('spec_source_approval_id') == approval['id']
+               and t.get('plan_task_index') == task_index for t in self.store.for_job('task', job['id'])):
+            raise ValueError('work_package_task_already_created')
+        mapping = self.install_work_packages(job['id'], expected_job_revision=job['state_revision'])
+        return job, {'work_package_id': mapping[spec['wbs_id']], 'plan_revision': job['plan_revision'],
+            'spec_source_approval_id': approval['id'], 'requirement_revision': job['requirement_revision'],
+            'plan_task_index': task_index, 'goal_links': list(spec['goal_links']), 'goal_id': job['id']}
+
     def _expand_plan(self, task, result):
+        from team_p0_contract import workflow_version
+        job = self.store.get(task['job_id'], 'job')
+        if workflow_version(job) == 1:
+            with self.store.atomic():
+                return self._expand_plan_body(task, result)
+        return self._expand_plan_body(task, result)
+
+    def _expand_plan_body(self, task, result):
 
         job = self.store.get(task['job_id'], 'job')
+        from team_p0_contract import workflow_version
+        workflow = workflow_version(job) == 1
+        if workflow:
+            from team_wbs import digest
+            approval, _ = self._work_package_source(job)
+            if (task.get('role') != 'planner' or approval.get('task_id') != task.get('id')
+                    or digest(result) != digest(approval['payload'])):
+                raise ValueError('work_package_unapproved_result')
+            self.install_work_packages(job['id'], expected_job_revision=job['state_revision'])
         from team_document_capabilities import require_plan
         require_plan(job,result)
 
@@ -2361,11 +2459,12 @@ class Engine:
 
         after = task['id']
 
-        for spec in result['tasks']:
+        for index, spec in enumerate(result['tasks']):
 
-            new = self.new_task(job, spec['title'], spec['instruction'], spec['role'], after)
-            if job.get('p0_contract_version') == 1:
-                self.store.update(new['id'], goal_links=list(spec['goal_links']), goal_id=job['id'])
+            new = self.new_task(job, spec['title'], spec['instruction'], spec['role'], after,
+                                **({'plan_task_index': index} if workflow else {}))
+            if job.get('p0_contract_version') == 1 and not workflow:
+                new = self.store.update(new['id'], goal_links=list(spec['goal_links']), goal_id=job['id'])
 
             after = new['id']
 
@@ -3791,6 +3890,9 @@ class Engine:
             ctx.prepare_agent(definition)
 
             prompt = self._instructions(ctx)
+            if task['role'] == 'planner' and self.store.get(task['job_id'], 'job').get('workflow_contract_version') == 1:
+                from team_wbs import GUIDE
+                prompt += GUIDE
 
             if definition.name == 'common-security-reviewer':
                 from team_security_audit import evidence
@@ -3887,6 +3989,9 @@ class Engine:
             else:
                 schema = (RESULT_SCHEMA_TESTS if task['role'] == 'builder' and
                           (job_for_schema.get('code_test_plan') or {}).get('required') else RESULT_SCHEMA)
+            if task['role'] == 'planner' and job_for_schema.get('workflow_contract_version') == 1:
+                from team_wbs import plan_schema
+                schema = plan_schema(schema)
             if task['role'] == 'planner':
                 ctx.check()
                 if not self._claim_g2_for_run(task['id'], task['attempt']):
