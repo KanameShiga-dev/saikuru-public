@@ -48,7 +48,7 @@ def _clean(value, limit=1200):
 
 
 def execution_workspace(project, approved_paths):
-    """Read-only dedicated Source/Worktrees mapping, not creation or merge.
+    """Read-only dedicated and global formal-Worktree mappings.
 
     Registration proves current Git membership, not historical invocation of
     an entry script. New checkouts must use the displayed formal entry.
@@ -56,19 +56,27 @@ def execution_workspace(project, approved_paths):
     from team_checkpoint import _git, _status, _path, scope_paths
     paths = scope_paths(approved_paths)
     execution = Path(os.path.abspath(project))
-    home = execution.parent.parent
-    source = home/'Source'
-    entry = home/'new_worktree.py'
+    if execution.parent.name == 'Worktrees':
+        layout = 'saikuru_dedicated'
+        home = execution.parent.parent
+        source = home/'Source'
+        entry = home/'new_worktree.py'
+    elif execution.parent.parent.name == 'Worktrees':
+        layout = 'workspace_global'
+        home = execution.parent.parent.parent
+        source = None  # Resolve only from the verified linked Git metadata.
+        entry = home/'scripts/new_workspace_worktree.py'
+    else:
+        raise ValueError('workspace_formal_worktree_required')
     def no_links(path):
         if not path.is_relative_to(home): raise ValueError('workspace_path_outside_area')
         while True:
             if _is_reparse(path): raise ValueError('workspace_link_not_allowed')
             if path == home: break
             path = path.parent
-    if execution.parent.name != 'Worktrees' or not execution.is_dir():
-        raise ValueError('workspace_dedicated_worktree_required')
-    for path in (execution, source, source/'.git', entry): no_links(path)
-    if not (source/'.git').is_dir() or not entry.is_file() or entry.stat().st_size > 100000:
+    if not execution.is_dir(): raise ValueError('workspace_formal_worktree_required')
+    for path in (execution, entry): no_links(path)
+    if not entry.is_file() or entry.stat().st_size > 100000:
         raise ValueError('workspace_formal_entry_or_source_missing')
     gitfile = execution/'.git'; no_links(gitfile)
     if not gitfile.is_file() or gitfile.stat().st_size > 4096:
@@ -76,8 +84,16 @@ def execution_workspace(project, approved_paths):
     pointer = gitfile.read_text(encoding='utf-8').strip()
     if not pointer.startswith('gitdir: '): raise ValueError('workspace_gitdir_invalid')
     admin = Path(os.path.abspath(execution/pointer[8:]))
+    if layout == 'workspace_global':
+        common = admin.parent.parent
+        if (admin.parent.name != 'worktrees' or common.name != '.git'
+                or not common.parent.is_relative_to(home/'Projects') or common.parent == home/'Projects'):
+            raise ValueError('workspace_repository_mismatch')
+        source = common.parent
     if not admin.is_relative_to(source/'.git/worktrees'):
         raise ValueError('workspace_repository_mismatch')
+    for path in (source, source/'.git'): no_links(path)
+    if not (source/'.git').is_dir(): raise ValueError('workspace_formal_source_missing')
     no_links(admin)
     if not admin.is_dir(): raise ValueError('workspace_gitdir_invalid')
     execution = execution.resolve(); source = source.resolve()
@@ -109,7 +125,7 @@ def execution_workspace(project, approved_paths):
         dirty = _status(_git(execution, ['status','--porcelain=v1','-z','--untracked-files=all','--ignore-submodules=all']), set(paths))
     except ValueError:
         raise ValueError('workspace_dirty_outside_approved_scope') from None
-    return {'schema_version':1, 'status':'ready', 'execution_root':str(execution),
+    return {'schema_version':1, 'status':'ready', 'workspace_layout':layout, 'execution_root':str(execution),
         'integration_root':str(source), 'execution_branch':branch, 'execution_head':head,
         'integration_branch':integration_branch, 'integration_head':integration_head,
         'official_creation_entry':str(entry.resolve()), 'entry_sha256':hashlib.sha256(entry.read_bytes()).hexdigest(),

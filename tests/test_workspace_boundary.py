@@ -19,9 +19,13 @@ class WorkspaceTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name); self.home = self.base/'Saikuru'; self.source = self.home/'Source'
         self.source.mkdir(parents=True); (self.base/'scripts').mkdir()
-        real_home = Path(__file__).resolve().parents[3]
+        from team_ledger import ROOT
+        tools_root = Path(os.environ.get('SAIKURU_WORKSPACE_TOOLS_ROOT', str(ROOT)))
+        real_home = tools_root/'Saikuru'
+        if not (real_home/'new_worktree.py').is_file() or not (tools_root/'scripts/new_workspace_worktree.py').is_file():
+            self.skipTest('Formal workspace tools not installed; set SAIKURU_WORKSPACE_TOOLS_ROOT for a portable fixture run')
         shutil.copyfile(real_home/'new_worktree.py', self.home/'new_worktree.py')
-        shutil.copyfile(real_home.parent/'scripts/new_workspace_worktree.py', self.base/'scripts/new_workspace_worktree.py')
+        shutil.copyfile(tools_root/'scripts/new_workspace_worktree.py', self.base/'scripts/new_workspace_worktree.py')
         self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
         self.git(self.source, '-c', 'init.defaultBranch=main', 'init')
         self.git(self.source, 'config', 'user.name', 'Fictional Fixture')
@@ -173,6 +177,54 @@ class WorkspaceTests(unittest.TestCase):
         head = self.git(self.project, 'rev-parse', 'HEAD').decode('ascii').strip()
         self.git(self.project, 'update-index', '--add', '--cacheinfo', '160000,'+head+',vendor')
         self.assertEqual(workspace_projection(self.project, ['app.py'])['reason'], 'workspace_submodule_unsupported')
+
+    def global_workspace(self):
+        source = self.base/'Projects/Apps/fictional-product'; source.mkdir(parents=True)
+        self.git(source, '-c', 'init.defaultBranch=main', 'init')
+        self.git(source, 'config', 'user.name', 'Fictional Fixture')
+        self.git(source, 'config', 'user.email', 'fixture@users.noreply.github.com')
+        (source/'app.py').write_text('fictional = True\n', encoding='utf-8')
+        self.git(source, 'add', '--', 'app.py'); self.git(source, 'commit', '-m', 'Fictional global source')
+        result = subprocess.run([sys.executable, str(self.base/'scripts/new_workspace_worktree.py'),
+            '--repository', str(source), '--project', 'fictional-product', '--name', 'dev',
+            '--branch', 'codex/fictional-global', '--create-branch'], env=self.env, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0)
+        return source, self.base/'Worktrees/fictional-product/dev'
+
+    def test_global_formal_worktree_and_projects_repository_mapping(self):
+        source, execution = self.global_workspace()
+        result = execution_workspace(execution, ['app.py'])
+        self.assertEqual(result['status'], 'ready')
+        self.assertEqual(result['workspace_layout'], 'workspace_global')
+        self.assertEqual(result['integration_root'], str(source.resolve()))
+        self.assertEqual(result['execution_root'], str(execution.resolve()))
+        self.assertEqual(result['official_creation_entry'], str((self.base/'scripts/new_workspace_worktree.py').resolve()))
+
+    def test_global_dirty_changes_preserved_and_outside_scope_blocked(self):
+        source, execution = self.global_workspace()
+        (source/'app.py').write_text('fictional source user edit\n', encoding='utf-8')
+        (execution/'app.py').write_text('fictional allowed edit\n', encoding='utf-8')
+        self.assertEqual(execution_workspace(execution, ['app.py'])['dirty_changes'][0]['path'], 'app.py')
+        (execution/'outside.py').write_text('fictional unrelated user edit\n', encoding='utf-8')
+        self.assertEqual(workspace_projection(execution, ['app.py'])['reason'], 'workspace_dirty_outside_approved_scope')
+        self.assertEqual((source/'app.py').read_text(encoding='utf-8'), 'fictional source user edit\n')
+        self.assertTrue((execution/'outside.py').exists())
+
+    def test_global_source_must_be_under_projects_and_primary_requires_policy(self):
+        source, execution = self.global_workspace()
+        self.assertEqual(workspace_projection(source, ['app.py'])['reason'], 'workspace_formal_worktree_required')
+        invalid = self.base/'Worktrees/fictional-product/bad'; invalid.mkdir()
+        (invalid/'.git').write_text('gitdir: '+str(self.source/'.git/worktrees/dev')+'\n', encoding='utf-8')
+        self.assertEqual(workspace_projection(invalid, ['app.py'])['reason'], 'workspace_repository_mismatch')
+
+    def test_global_worktree_is_bound_by_g3_and_usable_at_execution_boundary(self):
+        source, execution = self.global_workspace()
+        self.project = execution
+        fixture, task = self.bind_engine()
+        view = fixture.engine.workspace_view(fixture.job_id)
+        self.assertEqual(view['status'], 'ready')
+        self.assertEqual(view['current']['integration_root'], str(source.resolve()))
+        self.assertEqual(fixture.engine._execution_workspace(task)['workspace_layout'], 'workspace_global')
 
 
 if __name__ == '__main__': unittest.main()
