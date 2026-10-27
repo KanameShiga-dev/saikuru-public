@@ -20,6 +20,11 @@ FORBIDDEN = {'data', 'logs', 'attachments', 'node_modules', 'venv', 'legacy', 's
              'credentials', 'conversations', 'transcripts', 'chat_history'}
 HEX = re.compile(r'^[0-9a-f]{64}$')
 IDENTIFIER = re.compile(r'^[0-9a-f]{32}$')
+
+
+class CheckpointUnavailable(ValueError):
+    """A temporary/caller gate, not proof that the stored draft is corrupt."""
+
 DRAFT_FIELDS = {'id', 'schema_version', 'state', 'state_revision', 'updated_at', 'job_id', 'task_id',
     'work_package_id', 'attempt_id', 'attempt_ordinal', 'attempt_start_event_seq', 'snapshot_generation',
     'requirement_revision', 'requirements_approval_id', 'plan_revision', 'plan_approval_id', 'collection_ref',
@@ -322,7 +327,8 @@ def load_collection(project, directory, collection_id):
     return manifest
 
 
-def verify_collection(project, directory, manifest, allowed_paths):
+def inspect_collection(project, directory, manifest, allowed_paths):
+    """Validate stored blobs and report scoped changes without restoring files."""
     root = _root(project)
     storage = _storage(root, directory)
     paths = scope_paths(allowed_paths)
@@ -356,7 +362,14 @@ def verify_collection(project, directory, manifest, allowed_paths):
             if hashlib.sha256(data).hexdigest() != sha:
                 raise ValueError('Checkpointの差分が変化しています。')
     current, _ = _observe(root, paths)
-    if current != manifest['git_snapshot']:
+    previous = manifest['git_snapshot']
+    changed = [name for name in paths if previous['files'][name] != current['files'][name]]
+    return {'current': current == previous, 'changed_paths': changed,
+            'head_changed': current['head'] != previous['head']}
+
+
+def verify_collection(project, directory, manifest, allowed_paths):
+    if not inspect_collection(project, directory, manifest, allowed_paths)['current']:
         raise ValueError('Git・index・作業ファイルが保存時から変化しています。')
     return True
 
@@ -423,8 +436,60 @@ def reference_snapshot(store, handoff, job, task):
             'artifact_refs': [{'path': item['path'], 'sha256': item['sha256']} for item in artifacts],
             'evidence_refs': {'job_validation': digest(job.get('validation_evidence')),
                               'task_validation': digest(task.get('validation_runs')),
-                              'test_assets': digest(task.get('test_asset_snapshot'))},
+                              'test_assets': digest(task.get('test_asset_snapshot')),
+                              'recovery_context': recovery_context(store, job)},
             'decision_refs': decisions, 'operation_refs': operations, 'handoff_observation': observation}
+
+
+def recovery_context(store, job):
+    """Bounded semantic hashes, never raw task instructions/profiles/results."""
+    job_fields = ('goal', 'goal_contract', 'project', 'route', 'document_source',
+                  'p0_contract_version', 'workflow_contract_version', 'validation_commands',
+                  'code_test_plan', 'auto_execute', 'requirement_revision', 'requirements_approval_id',
+                  'plan_revision', 'plan_approval_id')
+    task_fields = ('title', 'instruction', 'role', 'profile', 'after', 'work_package_id',
+                   'repair', 'agent_name', 'review_cycle', 'confirmation_origin', 'plan_revision',
+                   'spec_source_approval_id', 'validation_commands')
+    tasks = store.for_job('task', job['id'])
+    if len(tasks) > 256:
+        raise ValueError('再開照合の担当件数を超えています。')
+    entries = {}
+    for task in tasks:
+        identifier = task.get('id')
+        if not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', identifier):
+            raise ValueError('再開照合の担当識別子が不正です。')
+        if task.get('status') not in ('queued', 'running', 'awaiting_approval', 'succeeded', 'failed', 'blocked', 'interrupted', 'cancelled', 'handed_off'):
+            raise ValueError('再開照合の担当状態が不正です。')
+        entries[identifier] = {'semantic': digest({key: task.get(key) for key in task_fields}),
+            'validation': digest(task.get('validation_runs')), 'tests': digest(task.get('test_asset_snapshot')),
+            'status': task.get('status'), 'attempt_id': (task.get('current_attempt') or {}).get('id'),
+            'result_status': digest((task.get('result') or {}).get('status'))}
+    return {'schema_version': 1, 'job': digest({key: job.get(key) for key in job_fields}), 'tasks': entries}
+
+
+def ready_candidate(store, task):
+    """Validate original immutable publication; advanced current state is separate.
+
+    Never falls back to an older ready snapshot. Never authorizes execution.
+    """
+    record = store.get(task.get('resume_checkpoint_id'), 'checkpoint')
+    binding = record.get('ready_binding')
+    if (set(record) != DRAFT_FIELDS or record.get('state') != 'ready'
+            or type(record.get('schema_version')) is not int or record['schema_version'] != 1
+            or record.get('manifest_digest') != checkpoint_digest(record)
+            or record.get('task_id') != task['id'] or record.get('job_id') != task['job_id']
+            or not isinstance(binding, dict) or set(binding) != {'job', 'task', 'work_package', 'event_seq'}
+            or any(type(binding[key]) is not int or binding[key] < 1 for key in ('job', 'task', 'event_seq'))
+            or (binding['work_package'] is not None and (type(binding['work_package']) is not int or binding['work_package'] < 1))):
+        raise ValueError('Checkpointの確定参照を確認できません。')
+    revisions = {key: binding[key] for key in ('job', 'task', 'work_package')}
+    row = store.db.execute('SELECT body FROM events WHERE seq=?', (binding['event_seq'],)).fetchone()
+    event = json.loads(row[0]) if row else {}
+    if (event.get('type') != 'checkpoint_ready' or event.get('job_id') != task['job_id']
+            or event.get('task_id') != task['id'] or event.get('details') != {
+                'checkpoint_id': record['id'], 'manifest_digest': record['manifest_digest'], 'revisions': revisions}):
+        raise ValueError('Checkpointの確定イベントを確認できません。')
+    return record, dict(event, seq=binding['event_seq'])
 
 
 def validate_draft_record(record, job, task, refs):

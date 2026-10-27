@@ -220,3 +220,89 @@ def advice(task, project):
             next_step='「ボードから復旧する」で、登録済み移管を確認するか、後続工程へ移す必須作業を指定してください。',
             draft='', can_retry=False)
     return answer
+
+class CheckpointRecoveryBlocked(ValueError):
+    """Fixed internal reason code; never contains a path or provider message."""
+
+
+def checkpoint_recovery_decision(job, task, tasks, record, refs, workspace, assets):
+    """Pure conservative selection; never resets or queues successful tasks."""
+    reasons, affected = set(), set()
+    current = (refs.get('evidence_refs') or {}).get('recovery_context') or {}
+    observed = (record.get('evidence_refs') or {}).get('recovery_context') or {}
+    by_id = {item['id']: item for item in tasks}
+    all_ids = set(by_id)
+    old, new = observed.get('tasks') or {}, current.get('tasks') or {}
+    if (type(observed.get('schema_version')) is not int or observed['schema_version'] != 1
+            or not old or set(old) != all_ids or set(new) != all_ids):
+        reasons.add('recovery_context_missing_or_changed'); affected |= all_ids
+    if observed.get('job') != current.get('job'):
+        reasons.add('requirements_or_policy_changed'); affected |= all_ids
+    for identifier in all_ids & set(old) & set(new):
+        before, after = old[identifier], new[identifier]
+        if any(before.get(k) != after.get(k) for k in ('semantic', 'validation', 'tests', 'result_status', 'attempt_id')):
+            reasons.add('task_evidence_changed'); affected.add(identifier)
+        if before.get('status') != after.get('status'):
+            reasons.add('task_state_changed'); affected.add(identifier)
+    if ((record.get('evidence_refs') or {}).get('job_validation')
+            != (refs.get('evidence_refs') or {}).get('job_validation')):
+        reasons.add('job_validation_changed'); affected |= all_ids
+    if any(record.get(key) != job.get(key) for key in (
+            'requirement_revision', 'requirements_approval_id', 'plan_revision', 'plan_approval_id')):
+        reasons.add('approval_changed'); affected |= all_ids
+    for field, code in (('decision_refs', 'decision_changed'), ('handoff_observation', 'handoff_changed'),
+                        ('artifact_refs', 'artifact_references_changed'), ('operation_refs', 'operation_reconciliation_required')):
+        if record.get(field) != refs.get(field):
+            reasons.add(code); affected |= all_ids
+    if record.get('operation_refs') or record.get('resume_preconditions') != ['checkpoint_not_ready']:
+        reasons.add('operation_reconciliation_required'); affected |= all_ids
+    if workspace['head_changed']:
+        reasons.add('git_head_changed'); affected |= all_ids
+    changed = set(workspace['changed_paths'])
+    asset_owners = {name: {identifier for identifier in by_id
+                          if name in assets.get(identifier, {}).get('tracked_paths', [])} for name in changed}
+    if changed:
+        reasons.add('workspace_changed')
+        if any(not owners for owners in asset_owners.values()):
+            reasons.add('change_scope_unresolved'); affected |= all_ids
+        else:
+            for owners in asset_owners.values(): affected |= owners
+    elif not workspace['current']:
+        reasons.add('workspace_metadata_changed'); affected |= all_ids
+    for identifier, evidence in assets.items():
+        if not evidence['valid']:
+            reasons.add(evidence['reason']); affected.add(identifier)
+    # Current Task.after is only the existing execution projection. Unknown,
+    # cyclic or foreign edges block selection; approved WP DAG gates are separate.
+    for identifier, item in by_id.items():
+        parent = item.get('after')
+        seen = {identifier}
+        while parent:
+            if parent not in by_id or parent in seen:
+                reasons.add('dependency_unresolved'); affected |= all_ids; break
+            seen.add(parent); parent = by_id[parent].get('after')
+    while True:
+        expanded = affected | {identifier for identifier, item in by_id.items() if item.get('after') in affected}
+        if expanded == affected: break
+        affected = expanded
+    preserved = sorted(identifier for identifier, item in by_id.items()
+                       if item.get('status') == 'succeeded' and old.get(identifier, {}).get('status') == 'succeeded'
+                       and identifier not in affected)
+    candidate_ids = []
+    if not reasons:
+        for identifier, item in by_id.items():
+            if item.get('status') not in ('queued', 'blocked', 'failed', 'interrupted'):
+                continue
+            if (old.get(identifier, {}).get('status') == 'succeeded' or item.get('recovery_check_required')
+                    or (item.get('current_attempt') or {}).get('status') == 'running'):
+                continue
+            if item.get('after') and item['after'] not in preserved:
+                continue
+            candidate_ids.append(identifier)
+    if any(item.get('recovery_check_required') for item in tasks):
+        reasons.add('writer_reconciliation_required'); candidate_ids = []
+    return {'status': 'blocked' if reasons else 'candidate', 'resume_allowed': False,
+            'reasons': sorted(reasons) if reasons else ['authorization_and_fresh_attempt_required'],
+            'checkpoint_id': record['id'], 'changed_paths': sorted(changed),
+            'preserved_succeeded_task_ids': preserved, 'revalidate_task_ids': sorted(affected),
+            'candidate_task_ids': sorted(candidate_ids), 'assessment_only': True}

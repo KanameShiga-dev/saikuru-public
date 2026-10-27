@@ -2401,26 +2401,26 @@ class Engine:
 
 
     def _checkpoint_inputs(self, task_id, writer_stopped):
-        from team_checkpoint import reference_snapshot
+        from team_checkpoint import reference_snapshot, CheckpointUnavailable
         from team_p0_contract import checkpoint_scope
         if writer_stopped is not True:
-            raise ValueError('書き手の停止を確認してからCheckpointを収集してください。')
+            raise CheckpointUnavailable('書き手の停止を確認してからCheckpointを収集してください。')
         task = self.store.get(task_id, 'task')
         job = self.store.get(task['job_id'], 'job')
         if (canonical(job['project']) not in [canonical(p) for p in self.config['approved_roots']]
                 or self.project_blocked(job['project'])):
-            raise ValueError('Checkpointのプロジェクトが未登録または停止中です。')
+            raise CheckpointUnavailable('Checkpointのプロジェクトが未登録または停止中です。')
         if (job.get('status') not in ('planning', 'running', 'blocked', 'failed', 'interrupted', 'awaiting_acceptance')
                 or (task.get('current_attempt') or {}).get('status') not in ('closed', 'fenced')
                 or task.get('recovery_check_required')):
-            raise ValueError('この状態ではCheckpointを収集できません。')
+            raise CheckpointUnavailable('この状態ではCheckpointを収集できません。')
         if any(canonical(ctx.project) == canonical(job['project']) for ctx in self.active.values()):
-            raise ValueError('実行中の担当がいるためCheckpointを収集できません。')
+            raise CheckpointUnavailable('実行中の担当がいるためCheckpointを収集できません。')
         for other in self.store.all('task'):
             if (other.get('current_attempt') or {}).get('status') == 'running' or other.get('status') == 'running':
                 parent = self.store.get(other['job_id'], 'job')
                 if canonical(parent['project']) == canonical(job['project']):
-                    raise ValueError('停止未確認の担当がいるためCheckpointを確定できません。')
+                    raise CheckpointUnavailable('停止未確認の担当がいるためCheckpointを確定できません。')
         approval = self.store.get(job.get('plan_approval_id'), 'approval')
         paths = checkpoint_scope(job, approval)
         refs = reference_snapshot(self.store, self.handoff, job, task)
@@ -2500,7 +2500,7 @@ class Engine:
 
     def finalize_checkpoint(self, checkpoint_id, *, writer_stopped=False):
         """Internal publication, never resume authority or a worker-stop command."""
-        from team_checkpoint import verify_draft_files
+        from team_checkpoint import verify_draft_files, CheckpointUnavailable
         with self.store.lock:
             record = self.store.get(checkpoint_id, 'checkpoint')
             task_id = record['task_id']
@@ -2516,6 +2516,8 @@ class Engine:
                     if self._checkpoint_draft_inputs(checkpoint_id, writer_stopped) != inputs:
                         raise ValueError('Checkpointの参照が変化しています。')
                     self.store.commit_checkpoint(record, refs)
+            except CheckpointUnavailable:
+                raise
             except (ValueError, OSError, KeyError, TypeError) as error:
                 # Missing caller stop confirmation is not evidence of a bad draft.
                 if writer_stopped is True:
@@ -2556,6 +2558,116 @@ class Engine:
         except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):
             return {'store_ready': False, 'handoff_synced': False, 'resume_allowed': False,
                     'reasons': ['checkpoint_binding_invalid']}
+
+    def _checkpoint_recovery_inputs(self, task_id, writer_stopped):
+        from team_checkpoint import ready_candidate, reference_snapshot, HEX
+        from team_recovery import CheckpointRecoveryBlocked as Blocked
+        from team_p0_contract import checkpoint_scope, workflow_version
+        if writer_stopped is not True:
+            raise Blocked('worker_stop_unconfirmed')
+        task = self.store.get(task_id, 'task')
+        job = self.store.get(task['job_id'], 'job')
+        if workflow_version(job) != 1:
+            raise Blocked('workflow_not_supported')
+        if job.get('status') not in ('planning', 'running', 'interrupted', 'failed', 'blocked', 'awaiting_acceptance'):
+            raise Blocked('job_terminal_or_unknown')
+        if (canonical(job['project']) not in [canonical(p) for p in self.config['approved_roots']]
+                or self.project_blocked(job['project'])):
+            raise Blocked('project_unavailable')
+        if any(canonical(ctx.project) == canonical(job['project']) for ctx in self.active.values()):
+            raise Blocked('worker_stop_unconfirmed')
+        for other in self.store.all('task'):
+            if other.get('status') == 'running' or (other.get('current_attempt') or {}).get('status') == 'running':
+                parent = self.store.get(other['job_id'], 'job')
+                if canonical(parent['project']) == canonical(job['project']):
+                    raise Blocked('worker_stop_unconfirmed')
+        if not task.get('resume_checkpoint_id'):
+            raise Blocked('checkpoint_missing')
+        record, event = ready_candidate(self.store, task)
+        attempt = task.get('current_attempt') or {}
+        if (attempt.get('id') != record['attempt_id'] or task.get('attempt') != record['attempt_ordinal']
+                or attempt.get('start_event_seq') != record['attempt_start_event_seq']
+                or attempt.get('status') not in ('closed', 'fenced')):
+            raise Blocked('attempt_changed')
+        wp = self.store.get(task['work_package_id'], 'work_package') if task.get('work_package_id') else None
+        if (task.get('work_package_id') != record.get('work_package_id')
+                or (wp and (wp.get('job_id') != job['id'] or wp.get('spec_source_approval_id') != job.get('plan_approval_id')))):
+            raise Blocked('work_package_changed')
+        current_revisions = {'job': job['state_revision'], 'task': task['state_revision'],
+                             'work_package': wp['state_revision'] if wp else None}
+        binding = record['ready_binding']
+        if any((value is None) != (binding[key] is None)
+               or (value is not None and (type(value) is not int or value < binding[key]))
+               for key, value in current_revisions.items()):
+            raise Blocked('state_revision_invalid')
+        try:
+            approval = self.store.get(job.get('plan_approval_id'), 'approval')
+            paths = checkpoint_scope(job, approval)
+            refs = reference_snapshot(self.store, self.handoff, job, task)
+        except (ValueError, KeyError, TypeError):
+            raise Blocked('approval_or_authority_changed') from None
+        collection_ref = record.get('collection_ref')
+        if (not isinstance(collection_ref, dict) or set(collection_ref) != {'id', 'digest'}
+                or collection_ref['id'] != record['id'] or not isinstance(collection_ref['digest'], str)
+                or not HEX.fullmatch(collection_ref['digest'])):
+            raise Blocked('checkpoint_files_invalid')
+        synced = self.handoff.checkpoint_receipt(job['project'], record, event)
+        tasks = self.store.for_job('task', job['id'])
+        return record, job, task, paths, refs, tasks, synced
+
+    def assess_checkpoint_resume(self, task_id, *, writer_stopped=False):
+        """Read-only local assessment. No retry, reservation, approval or restore.
+
+        Advanced administrative revisions may be assessed using semantic hashes;
+        this never rebases or changes the immutable ready binding/pointer.
+        """
+        from team_checkpoint import load_collection, inspect_collection
+        from team_code_test_contract import checkpoint_test_assets
+        from team_recovery import CheckpointRecoveryBlocked, checkpoint_recovery_decision
+        def blocked(code):
+            return {'status': 'blocked', 'resume_allowed': False, 'reasons': [code],
+                    'checkpoint_id': None, 'changed_paths': [], 'preserved_succeeded_task_ids': [],
+                    'revalidate_task_ids': [], 'candidate_task_ids': [], 'assessment_only': True}
+        try:
+            with self._checkpoint_project(task_id):
+                with self.store.lock, self.handoff.lock:
+                    inputs = self._checkpoint_recovery_inputs(task_id, writer_stopped)
+                record, job, task, paths, refs, tasks, synced = inputs
+                try:
+                    collection = load_collection(job['project'], self.store.directory / 'checkpoints', record['id'])
+                    if collection['manifest_digest'] != record['collection_ref']['digest']:
+                        raise ValueError('Manifest changed')
+                    workspace = inspect_collection(job['project'], self.store.directory / 'checkpoints', collection, paths)
+                except (ValueError, OSError, KeyError, TypeError):
+                    raise CheckpointRecoveryBlocked('checkpoint_files_or_scope_invalid') from None
+                assets = {}
+                for item in tasks:
+                    snapshot = item.get('test_asset_snapshot')
+                    if snapshot is not None:
+                        assets[item['id']] = checkpoint_test_assets(job['project'], snapshot, paths)
+                    elif ((job.get('code_test_plan') or {}).get('required') and item.get('role') == 'builder'
+                          and item.get('status') == 'succeeded'):
+                        assets[item['id']] = {'valid': False, 'changed_paths': [], 'reason': 'test_evidence_missing'}
+                with self.store.lock, self.handoff.lock:
+                    if inputs != self._checkpoint_recovery_inputs(task_id, writer_stopped):
+                        raise CheckpointRecoveryBlocked('references_changed_during_assessment')
+                result = checkpoint_recovery_decision(job, task, tasks, record, refs, workspace, assets)
+                extra = []
+                if not synced:
+                    extra.append('handoff_sync_required')
+                if refs['snapshot_revisions']['work_package'] != record['ready_binding']['work_package']:
+                    extra.append('work_package_state_changed')
+                # WP DAG and feature decisions are independent authorities. This
+                # local Task.after assessment must not imply WP dispatch approval.
+                if any(item.get('work_package_id') for item in tasks):
+                    extra.append('work_package_dispatch_review_required')
+                if extra:
+                    result.update(status='blocked', candidate_task_ids=[], reasons=sorted(set(result['reasons']) | set(extra)))
+                return result
+        except CheckpointRecoveryBlocked as error:
+            return blocked(str(error))
+        except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):
+            return blocked('checkpoint_or_authority_invalid')
 
     def sync_handoff(self, job_id):
         with self.store.atomic():

@@ -96,6 +96,33 @@ def verify_snapshot(project, snapshot):
     return current == snapshot
 
 
+def checkpoint_test_assets(project, snapshot, allowed_paths):
+    """Read only already-approved checkpoint paths, without running tests."""
+    from team_checkpoint import HEX, _root, _path, _read, scope_paths
+    allowed = scope_paths(allowed_paths)
+    if (not isinstance(snapshot, dict) or not 1 <= len(snapshot) <= 20
+            or any(name not in allowed or not isinstance(sha, str) or not HEX.fullmatch(sha)
+                   for name, sha in snapshot.items())):
+        return {'valid': False, 'changed_paths': [], 'tracked_paths': [], 'reason': 'test_assets_unverifiable'}
+    for name in snapshot:
+        relative = Path(name)
+        if not (any(part.casefold() in ('test', 'tests', '__tests__', 'spec', 'specs') for part in relative.parts[:-1])
+                or 'test' in relative.name.casefold() or 'spec' in relative.name.casefold()):
+            return {'valid': False, 'changed_paths': [], 'tracked_paths': [], 'reason': 'test_assets_unverifiable'}
+    root = _root(project)
+    changed = []
+    for name, sha in snapshot.items():
+        try:
+            current = hashlib.sha256(_read(_path(root, name))).hexdigest()
+        except (ValueError, OSError):
+            changed.append(name)
+        else:
+            if current != sha:
+                changed.append(name)
+    return {'valid': not changed, 'changed_paths': sorted(changed), 'tracked_paths': sorted(snapshot),
+            'reason': 'test_assets_changed' if changed else None}
+
+
 def builder_issues(job, task, result):
     plan = job.get('code_test_plan') or {}
     if not plan.get('required'):
