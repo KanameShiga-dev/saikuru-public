@@ -18,6 +18,10 @@ IDENTIFIER = re.compile(r'[A-Za-z0-9_-]{1,128}')
 HEX = re.compile(r'[0-9a-f]{64}')
 
 
+class SessionPreparationDeferred(ValueError):
+    """Temporary scheduling condition; never invalidates a saved binding."""
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                      separators=(',', ':'), allow_nan=False).encode()).hexdigest()

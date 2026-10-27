@@ -285,6 +285,107 @@ class SessionPreparationTests(unittest.TestCase):
             self.engine.tick()
         return workers
 
+    def assert_waiting(self):
+        self.assertEqual(self.store.get(self.target['id'])['status'], 'queued')
+        self.assertEqual(self.store.get(self.fixture.job['id'])['status'], 'running')
+        self.assertIsNone(self.store.get(self.target['id']).get('current_attempt'))
+
+    def test_pending_decision_defers_without_inspection_or_state_change(self):
+        from unittest.mock import patch
+        self.request()
+        self.store.put('approval', {'id': 'fictional-wait', 'job_id': self.fixture.job['id'],
+            'task_id': self.source['id'], 'kind': 'question', 'status': 'pending'})
+        before = self.state(); self.engine.paused = False
+        with patch.object(self.engine, 'prepare_checkpoint_session') as prepare:
+            self.assertEqual(self.tick_without_workers(), [])
+        prepare.assert_not_called()
+        self.assert_waiting(); self.assertEqual(before, self.state())
+
+    def test_project_gate_defers_without_heavy_inspection(self):
+        from unittest.mock import patch
+        from team_handoff import canonical
+        self.request(); self.engine.paused = False
+        self.engine._checkpoint_projects.add(canonical(str(self.fixture.project)))
+        with patch.object(self.engine, 'prepare_checkpoint_session') as prepare:
+            self.assertEqual(self.tick_without_workers(), [])
+        prepare.assert_not_called(); self.assert_waiting()
+
+    def test_busy_writer_defers_without_heavy_inspection(self):
+        from unittest.mock import patch
+        self.request(); self.engine.paused = False
+        other = self.engine.new_task(self.fixture.job, 'Fictional active', 'Fictional scope', 'builder')
+        self.store.update(other['id'], status='running')
+        with patch.object(self.engine, 'prepare_checkpoint_session') as prepare:
+            self.assertEqual(self.tick_without_workers(), [])
+        prepare.assert_not_called(); self.assert_waiting()
+
+    def test_unfinished_predecessor_or_full_capacity_skip_inspection(self):
+        from unittest.mock import patch
+        self.request(); self.engine.paused = False
+        self.store.update(self.source['id'], status='blocked')
+        with patch.object(self.engine, 'prepare_checkpoint_session') as prepare:
+            self.assertEqual(self.tick_without_workers(), [])
+        prepare.assert_not_called(); self.assert_waiting()
+        self.store.update(self.source['id'], status='succeeded')
+        self.engine.config['max_parallel_projects'] = 0
+        with patch.object(self.engine, 'prepare_checkpoint_session') as prepare:
+            self.assertEqual(self.tick_without_workers(), [])
+        prepare.assert_not_called(); self.assert_waiting()
+
+    def test_temporary_preparation_exception_keeps_job_and_task_queued(self):
+        from unittest.mock import patch
+        self.request(); self.engine.paused = False
+        with patch.object(self.engine, 'prepare_checkpoint_session', side_effect=policy.SessionPreparationDeferred('worker_busy')):
+            self.assertEqual(self.tick_without_workers(), [])
+        self.assert_waiting()
+
+    def test_revision_race_defers_then_next_tick_can_dispatch(self):
+        from unittest.mock import patch
+        self.request(); self.engine.paused = False
+        original = self.engine.prepare_checkpoint_session
+        def advance(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.store.update(self.target['id'], summary='Fictional administrative update')
+            return result
+        with patch.object(self.engine, 'prepare_checkpoint_session', side_effect=advance):
+            self.assertEqual(self.tick_without_workers(), [])
+        self.assert_waiting()
+        self.assertEqual(len(self.tick_without_workers()), 1)
+
+    def test_question_arriving_after_preflight_is_waiting_not_failure(self):
+        from unittest.mock import patch
+        self.request(); self.engine.paused = False
+        original = self.engine.prepare_checkpoint_session
+        def question(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.store.put('approval', {'id': 'fictional-late-question', 'job_id': self.fixture.job['id'],
+                'task_id': self.source['id'], 'kind': 'question', 'status': 'pending'})
+            return result
+        with patch.object(self.engine, 'prepare_checkpoint_session', side_effect=question):
+            self.assertEqual(self.tick_without_workers(), [])
+        self.assert_waiting()
+
+    def test_changed_file_is_permanent_binding_failure_not_wait(self):
+        self.request(); self.engine.paused = False
+        self.fixture.app.write_text('fictional changed file\n', encoding='utf-8')
+        self.assertEqual(self.tick_without_workers(), [])
+        self.assertEqual(self.store.get(self.target['id'])['status'], 'blocked')
+        self.assertEqual(self.store.get(self.fixture.job['id'])['status'], 'blocked')
+
+    def test_waiting_queue_load_has_zero_heavy_calls_across_repeated_ticks(self):
+        from unittest.mock import patch
+        binding = self.request(); self.engine.paused = False
+        for index in range(8):
+            other = self.engine.new_task(self.fixture.job, 'Fictional waiting', 'Fictional scope', 'builder')
+            self.store.update(other['id'], checkpoint_session_binding=binding)
+        self.store.put('approval', {'id': 'fictional-queue-wait', 'job_id': self.fixture.job['id'],
+            'task_id': self.source['id'], 'kind': 'question', 'status': 'pending'})
+        before = self.state()
+        with patch.object(self.engine, 'prepare_checkpoint_session') as prepare:
+            for _ in range(5): self.assertEqual(self.tick_without_workers(), [])
+        prepare.assert_not_called(); self.assert_waiting()
+        self.assertEqual(before, self.state())
+
     def test_unknown_operation_after_reservation_blocks_context(self):
         ctx = self.running_context()
         self.store.event('operation_started', 'Fictional unknown operation', self.source['id'], self.fixture.job['id'])

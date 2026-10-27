@@ -2730,6 +2730,27 @@ class Engine:
         except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):
             return blocked('checkpoint_or_authority_invalid')
 
+    def _checkpoint_session_inputs(self, source_task_id, writer_stopped):
+        from team_recovery import CheckpointRecoveryBlocked
+        from team_session_policy import SessionPreparationDeferred
+        try:
+            return self._checkpoint_recovery_inputs(source_task_id, writer_stopped)
+        except CheckpointRecoveryBlocked as error:
+            if str(error) == 'worker_stop_unconfirmed' and writer_stopped is True:
+                raise SessionPreparationDeferred('worker_busy') from None
+            raise
+
+    @contextmanager
+    def _checkpoint_session_project(self, source_task_id):
+        from team_session_policy import SessionPreparationDeferred
+        try:
+            with self._checkpoint_project(source_task_id):
+                yield
+        except ValueError as error:
+            if str(error) == 'このプロジェクトはCheckpoint保存中です。':
+                raise SessionPreparationDeferred('project_gate_busy') from None
+            raise
+
     def prepare_checkpoint_session(self, source_task_id, target_task_id, *, writer_stopped=False):
         """Read-only binding for later authorized fresh-attempt orchestration.
 
@@ -2738,15 +2759,18 @@ class Engine:
         compared again under the cooperative project gate. The scheduler must
         still revalidate the binding immediately before its normal dispatch.
         """
-        from team_session_policy import checkpoint_session_binding, continuation_reference_digest, _digest
+        from team_session_policy import checkpoint_session_binding, continuation_reference_digest, _digest, SessionPreparationDeferred
         from team_checkpoint import load_collection, inspect_collection
         with self.store.lock, self.handoff.lock:
-            before = self._checkpoint_recovery_inputs(source_task_id, writer_stopped)
+            before = self._checkpoint_session_inputs(source_task_id, writer_stopped)
             target = self.store.get(target_task_id, 'task')
             if any(a.get('status') == 'pending' for a in self.store.for_job('approval', before[1]['id'])):
-                raise ValueError('checkpoint_session_decision_pending')
+                raise SessionPreparationDeferred('checkpoint_session_decision_pending')
         assessment = self.assess_checkpoint_resume(source_task_id, writer_stopped=writer_stopped)
-        with self._checkpoint_project(source_task_id):
+        if assessment.get('status') == 'blocked' and set(assessment.get('reasons', [])) & {
+                'worker_stop_unconfirmed', 'references_changed_during_assessment', 'checkpoint_or_authority_invalid'}:
+            raise SessionPreparationDeferred('assessment_temporarily_unavailable')
+        with self._checkpoint_session_project(source_task_id):
             record, job = before[:2]
             collection = load_collection(job['project'], self.store.directory / 'checkpoints', record['id'])
             workspace = inspect_collection(job['project'], self.store.directory / 'checkpoints', collection, before[3])
@@ -2754,9 +2778,9 @@ class Engine:
                     or workspace.get('current') is not True):
                 raise ValueError('checkpoint_session_files_changed')
             with self.store.lock, self.handoff.lock:
-                after = self._checkpoint_recovery_inputs(source_task_id, writer_stopped)
+                after = self._checkpoint_session_inputs(source_task_id, writer_stopped)
                 if before != after or target != self.store.get(target_task_id, 'task'):
-                    raise ValueError('checkpoint_session_inputs_changed')
+                    raise SessionPreparationDeferred('checkpoint_session_inputs_advanced')
                 checkpoint, job, source = after[:3]
                 binding = checkpoint_session_binding(job, source, target, checkpoint, assessment)
                 binding.update(reference_digest=continuation_reference_digest(after[4], target_task_id),
@@ -4077,6 +4101,28 @@ class Engine:
                 else:
                     self.store.close_attempt(task['id'], 'closed', agent_outcome)
 
+    def _checkpoint_session_candidates(self):
+        """Cheap eligibility filter only; no Git/filesystem inspection."""
+        with self.store.lock:
+            tasks = self.store.all('task')
+            working = [t for t in tasks if t['status'] in ('running', 'awaiting_approval') or t['id'] in self.active]
+            if len(working) >= self.config['max_parallel_projects']:
+                return []
+            busy = {canonical(self.store.get(t['job_id'])['project']) for t in working} | self._checkpoint_projects
+            candidates = []
+            for task in tasks:
+                if task.get('status') != 'queued' or not task.get('checkpoint_session_binding'):
+                    continue
+                job = self.store.get(task['job_id'], 'job')
+                if (job.get('status') != 'running' or canonical(job['project']) in busy
+                        or self.project_blocked(job['project']) or task.get('recovery_check_required')
+                        or (task.get('retry_at') and now() < task['retry_at'])
+                        or (task.get('after') and self.store.get(task['after'])['status'] not in ('succeeded', 'handed_off'))
+                        or any(a.get('status') == 'pending' for a in self.store.for_job('approval', job['id']))):
+                    continue
+                candidates.append(task)
+            return candidates
+
     def tick(self):
 
         if self.paused or self.shutdown.is_set():
@@ -4084,16 +4130,19 @@ class Engine:
         # File/Git inspection must happen outside Store/Handoff locks. A
         # preparation is only a short-lived candidate, never a dispatch token.
         session_preflight = {}
-        for candidate in self.store.all('task'):
-            if candidate.get('status') != 'queued' or not candidate.get('checkpoint_session_binding'):
-                continue
+        from team_session_policy import SessionPreparationDeferred
+        for candidate in self._checkpoint_session_candidates():
             try:
                 stored = candidate['checkpoint_session_binding']
                 fresh = self.prepare_checkpoint_session(stored['source_task_id'], candidate['id'], writer_stopped=True)
-                if fresh == stored:
-                    session_preflight[candidate['id']] = candidate['state_revision']
+                session_preflight[candidate['id']] = (candidate['state_revision'], fresh == stored)
+            except SessionPreparationDeferred:
+                continue
+            except sqlite3.OperationalError as error:
+                if not any(word in str(error).lower() for word in ('locked', 'busy')):
+                    session_preflight[candidate['id']] = (candidate['state_revision'], False)
             except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
-                pass
+                session_preflight[candidate['id']] = (candidate['state_revision'], False)
 
         with self.store.lock:
 
@@ -4120,6 +4169,11 @@ class Engine:
                     continue
 
                 job = self.store.get(task['job_id'])
+
+                if task.get('checkpoint_session_binding'):
+                    verified = session_preflight.get(task['id'])
+                    if verified is None or verified[0] != task['state_revision']:
+                        continue
 
                 if task.get('role') == 'planner':
                     gate_version = job.get('g2_gate_version')
@@ -4258,7 +4312,11 @@ class Engine:
                         continue
 
                 if task.get('checkpoint_session_binding'):
-                    if session_preflight.get(task['id']) != task['state_revision']:
+                    verified = session_preflight.get(task['id'])
+                    if (verified is None or verified[0] != task['state_revision']
+                            or any(a.get('status') == 'pending' for a in self.store.for_job('approval', job['id']))):
+                        continue  # Waiting/racing metadata is not a binding failure.
+                    if not verified[1]:
                         self.store.update(task['id'], status='blocked', failure_code='checkpoint_session_changed',
                             summary='引継ぎ対象の保存状態・承認・モデル設定を再確認してください。自動再開していません。')
                         self.store.update(job['id'], status='blocked')
