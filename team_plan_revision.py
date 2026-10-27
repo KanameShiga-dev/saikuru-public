@@ -5,6 +5,18 @@ import json
 
 CONTRACT_FIELDS = ('primary_goal', 'deliverables', 'acceptance_criteria', 'non_goals', 'constraints')
 VERSION_FIELDS = ('requirement_revision', 'requirements_approval_id', 'plan_revision', 'plan_approval_id')
+REVISION_STATUSES = ('running', 'blocked', 'failed', 'awaiting_acceptance', 'accepted', 'accepted_with_pending_checks')
+ACCEPTED_STATUSES = ('accepted', 'accepted_with_pending_checks')
+
+
+def proposal_status(context):
+    if context is None:
+        return 'awaiting_approval'
+    if (not isinstance(context, dict) or set(context) != {'origin', 'prior_status'}
+            or context.get('origin') != 'authenticated_user_revision'
+            or context.get('prior_status') not in REVISION_STATUSES):
+        raise ValueError('workflow_revision_context_invalid')
+    return context['prior_status'] if context['prior_status'] in ACCEPTED_STATUSES else 'awaiting_approval'
 
 
 def approval_digest(value):
@@ -34,7 +46,8 @@ def current_plan(store, job):
     return rows[0]
 
 
-def analysis(store, job, payload):
+def analysis(store, job, payload, context=None):
+    proposal_status(context)
     from team_p0_contract import validate_plan
     from team_dlp import require_clean_input
     require_clean_input(json.dumps(payload, ensure_ascii=False), False, '改訂計画')
@@ -66,6 +79,7 @@ def analysis(store, job, payload):
         if grown == affected: break
         affected = grown
     return {'schema_version': 1, 'job_id': job['id'], 'expected_job_revision': job['state_revision'],
+        'proposal_context': copy.deepcopy(context),
         'base_versions': {k: job.get(k) for k in VERSION_FIELDS},
         'base_plan_digest': old_approval['digest'] if old_approval else None,
         'proposal_digest': approval_digest(payload), 'requirements_changed': bool(scope_changes),

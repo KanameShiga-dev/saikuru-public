@@ -116,14 +116,15 @@ class Store:
         if getattr(self._worker, 'task', None) is not None:
             raise ValueError('worker_cannot_publish_workflow_plan')
         with self.atomic():
-            from team_plan_revision import approval_digest, VERSION_FIELDS, CONTRACT_FIELDS
+            from team_plan_revision import approval_digest, VERSION_FIELDS, CONTRACT_FIELDS, proposal_status
             from team_p0_contract import validate_plan
             job = self.get(job_id, 'job')
             approval = self.get(approval_id, 'approval')
             target = approval.get('workflow_revision') or {}
-            if (workflow_version(job) != 1 or job['status'] != 'awaiting_approval'
+            if (workflow_version(job) != 1 or job['status'] != proposal_status(approval.get('workflow_revision_context'))
                     or type(expected_revision) is not int or job['state_revision'] != expected_revision
                     or target.get('expected_job_revision') != expected_revision
+                    or target.get('proposal_context') != approval.get('workflow_revision_context')
                     or target.get('base_versions') != {k: job.get(k) for k in VERSION_FIELDS}
                     or approval.get('job_id') != job_id or approval.get('kind') != 'plan'
                     or approval.get('status') != 'approved'
@@ -135,7 +136,7 @@ class Store:
             previous = getattr(self._worker, 'workflow_plan_commit', None)
             self._worker.workflow_plan_commit = approval_id
             try:
-                return self.update(job_id, goal_contract=contract,
+                return self.update(job_id, goal_contract=contract, status='awaiting_approval',
                     requirement_revision=job['requirement_revision'] + int(changed or job['requirement_revision'] == 0),
                     requirements_approval_id=approval_id if changed or job['requirement_revision'] == 0 else job['requirements_approval_id'],
                     plan_revision=job['plan_revision'] + 1, plan_approval_id=approval_id,

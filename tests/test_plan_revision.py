@@ -280,5 +280,62 @@ class RevisionTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.propose(value)
         self.assertEqual(self.state(), before)
 
+    def test_declined_revision_restores_all_prior_states_without_scope_or_evidence_loss(self):
+        self.approve(); self.stop_queued()
+        for status in ('running', 'blocked', 'failed', 'awaiting_acceptance', 'accepted', 'accepted_with_pending_checks'):
+            self.store.update(self.job_id, status=status, validation_evidence={'fictional': 'retained'})
+            before = self.job()
+            tasks_before = self.store.for_job('task', self.job_id)
+            revised = self.propose(self.payload)
+            self.assertEqual(revised['workflow_revision']['proposal_context']['prior_status'], status)
+            self.assertEqual(self.job()['status'], status if status.startswith('accepted') else 'awaiting_approval')
+            self.engine.decide(revised['id'], False, 'Fictional keep published plan')
+            self.assertEqual(self.job()['status'], status)
+            for key in ('goal', 'goal_contract', 'requirement_revision', 'requirements_approval_id',
+                        'plan_revision', 'plan_approval_id', 'validation_evidence'):
+                self.assertEqual(self.job()[key], before[key])
+            self.assertEqual(self.store.get(revised['id'])['status'], 'denied')
+            for task in tasks_before: self.assertEqual(self.store.get(task['id']), task)
+
+    def test_new_stop_while_proposal_pending_is_not_undone_on_rejection(self):
+        self.approve(); self.stop_queued()
+        for old_status, new_status in (('running', 'blocked'), ('accepted', 'failed')):
+            self.store.update(self.job_id, status=old_status)
+            revised = self.propose(self.payload)
+            self.store.update(self.job_id, status=new_status)
+            self.engine.decide(revised['id'], False, 'Fictional decline but retain new failure')
+            self.assertEqual(self.job()['status'], new_status)
+            event = next(e for e in self.store.events() if e.get('type') == 'workflow_revision_rejected')
+            self.assertEqual(event.get('details', {}).get('reason'), 'proposal_state_changed')
+
+    def test_accepted_revision_only_leaves_accepted_after_explicit_consent(self):
+        self.approve(); self.stop_queued()
+        for status in ('accepted', 'accepted_with_pending_checks'):
+            self.store.update(self.job_id, status=status)
+            previous = self.job()['plan_revision']
+            revised = self.propose(self.payload)
+            self.assertEqual(self.job()['status'], status)
+            self.approve(revised)
+            self.assertEqual(self.job()['status'], 'running')
+            self.assertEqual(self.job()['plan_revision'], previous + 1)
+            self.stop_queued()
+
+    def test_changed_proposal_state_requires_reconfirmation_instead_of_restoring_running(self):
+        self.approve(); self.stop_queued()
+        revised = self.propose(self.payload)
+        self.store.update(self.job_id, validation_evidence={'fictional': 'changed while pending'})
+        self.engine.decide(revised['id'], False, 'Fictional decline')
+        self.assertEqual(self.job()['status'], 'blocked')
+
+    def test_rejection_preserves_pending_completion_and_does_not_accept_it(self):
+        self.approve(); self.stop_queued()
+        self.store.update(self.job_id, status='awaiting_acceptance')
+        completion = self.engine.new_approval(self.planner, 'completion', {'fictional': 'unaccepted evidence'})
+        completion = self.store.get(completion['id'])
+        revised = self.propose(self.payload)
+        self.engine.decide(revised['id'], False, 'Fictional no revision')
+        self.assertEqual(self.job()['status'], 'awaiting_acceptance')
+        self.assertEqual(self.store.get(completion['id']), completion)
+
 
 if __name__ == '__main__': unittest.main()
