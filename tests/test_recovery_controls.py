@@ -230,9 +230,11 @@ class RecoveryControlTests(unittest.TestCase):
         self.assertFalse(result['resume_allowed'])
         self.assertEqual(self.store.get(self.task['id'])['status'], 'interrupted')
         self.checkpoint()
-        status, result = self.post(server, '/api/retry', {'id': self.task['id'], 'checked_changes': True})
+        body = {'id':self.task['id'],'checked_changes':True,
+                'workflow_target':self.engine.workflow_control_target(self.job['id'],'retry_task',self.task['id'])}
+        status, result = self.post(server, '/api/retry', body)
         self.assertEqual(status, 403)
-        status, result = self.post(server, '/api/retry', {'id': self.task['id'], 'checked_changes': True}, maintenance=True)
+        status, result = self.post(server, '/api/retry', body, maintenance=True)
         self.assertEqual(status, 200)
         self.assertEqual(self.store.get(self.task['id'])['status'], 'queued')
 
