@@ -261,7 +261,8 @@ def repair_impact(store, job, plan, seed, extra_paths=()):
     """Reverse dependency/file-reference closure with evidence retained as history."""
     specs = {s['wbs_id']:s for s in plan['payload']['work_packages']}
     rows = [w for w in store.for_job('work_package',job['id']) if w['plan_revision'] == job['plan_revision']]
-    paths = set(extra_paths)
+    changed = set(extra_paths)
+    paths = set(changed)
     for t in package_members(store,job['id'],seed):
         paths.update(r['path'] for r in t.get('workflow_artifact_records') or [])
         paths.update(p for p in (t.get('result') or {}).get('artifacts') or [] if isinstance(p,str))
@@ -272,10 +273,15 @@ def repair_impact(store, job, plan, seed, extra_paths=()):
     for wp in rows:
         if wp['id'] == seed['id']: continue
         touched = {r['path'] for r in specs[wp['wbs_id']].get('input_artifacts', [])}
+        test_refs = set()
         if wp.get('feature_review_approval_id'):
             target = (store.get(wp['feature_review_approval_id'],'approval').get('payload') or {}).get('feature_target') or {}
-            touched.update(target.get('source_snapshot') or {}); touched.update(target.get('test_snapshot') or {})
-        if paths & touched:
+            touched.update(target.get('source_snapshot') or {})
+            test_refs.update(target.get('test_snapshot') or {})
+        # A broad executed-test snapshot is evidence, not ownership. A file
+        # reported by the rejected builder must not invalidate another WP
+        # merely because it was also included in that WP's test run.
+        if paths & touched or changed & test_refs:
             affected.add(wp['wbs_id']); reasons[wp['id']] = ['shared_evidence_files']
     while True:
         grown = affected | {s['wbs_id'] for s in specs.values() if set(s['depends_on']) & affected}

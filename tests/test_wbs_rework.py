@@ -53,8 +53,11 @@ class ReworkTests(unittest.TestCase):
             context.command_result(command,ran.returncode,'Fictional offline unit test completed')
         artifact = 'other.py' if (self.workspace.project/'other.py').exists() and task.get('work_package_id') != self.first['work_package_id'] else 'app.py'
         tests = sorted(p.relative_to(self.workspace.project).as_posix() for p in (self.workspace.project/'tests').glob('test_*.py'))
+        artifacts = [artifact]
+        if getattr(self,'report_owned_test_as_artifact',False):
+            artifacts.append('tests/test_app.py' if artifact == 'app.py' else 'tests/test_other.py')
         result = {'status':status,'summary':summary,'checks':['Fictional inspection'],
-                  'artifacts':[artifact] if task['role'] == 'builder' else [],
+                  'artifacts':artifacts if task['role'] == 'builder' else [],
                   'test_files':tests,'test_change_reason':'Fictional approved test','blocking_reasons':[],
                   'pending_checks':[],'questions':[],'question':'','context_updates':[]}
         self.engine._finish(task,result)
@@ -178,6 +181,34 @@ class ReworkTests(unittest.TestCase):
         self.assertIn(other['id'],result['preserved_ids'])
         self.assertEqual(self.store.get(other['id']),old_wp)
         self.assertEqual(self.store.get(other['feature_review_approval_id']),old_receipt)
+
+    def test_reported_owned_test_artifact_does_not_invalidate_independent_feature(self):
+        self.report_owned_test_as_artifact = True
+        reviews = self.independent_features()
+        other = next(w for w in self.store.for_job('work_package',self.job_id)
+                     if w['plan_revision'] == self.job()['plan_revision'] and w['id'] != self.wp()['id'])
+        old_wp = copy.deepcopy(other); old_receipt = self.store.get(other['feature_review_approval_id'])
+        target = self.store.get(reviews[0]['approval_id'])['payload']['feature_target']
+        self.assertIn('tests/test_app.py',target['source_snapshot'])
+        self.assertIn('tests/test_app.py',old_receipt['payload']['feature_target']['test_snapshot'])
+        self.assertNotIn('tests/test_app.py',old_receipt['payload']['feature_target']['source_snapshot'])
+        result = self.rework_approved_first(reviews[0])
+        self.assertEqual(result['affected_ids'],[self.wp()['id']])
+        self.assertIn(other['id'],result['preserved_ids'])
+        self.assertEqual(self.store.get(other['id']),old_wp)
+        self.assertEqual(self.store.get(other['feature_review_approval_id']),old_receipt)
+
+    def test_reported_test_artifact_invalidates_other_evidence_only_when_actually_changed(self):
+        self.report_owned_test_as_artifact = True
+        reviews = self.independent_features()
+        result = self.rework_approved_first(reviews[0]); other_id = result['preserved_ids'][0]
+        path = self.workspace.project/'tests/test_app.py'
+        path.write_text(path.read_text(encoding='utf-8')+'\n# Fictional actual test change\n',encoding='utf-8')
+        self.finish_next()
+        self.assertEqual(self.store.get(other_id)['review_status'],'invalidated')
+        event = next(e for e in self.store.events() if e['type'] == 'feature_impact_reassessed')
+        self.assertIn('tests/test_app.py',event['details']['changed_paths'])
+        self.assertIn(other_id,event['details']['additional_ids'])
 
     def test_actual_shared_test_change_expands_recheck_scope_after_repair(self):
         reviews = self.independent_features(); result = self.rework_approved_first(reviews[0])
