@@ -902,6 +902,13 @@ class Handler(BaseHTTPRequestHandler):
                 if type(body.get('allow')) is not bool:
                     raise ValueError('承認または拒否を選んでください。')
                 pending = self.app.store.get(body['id'], 'approval')
+                if pending.get('kind') == 'plan':
+                    task = self.app.store.get(pending['task_id'], 'task')
+                    job = self.app.store.get(task['job_id'], 'job')
+                    if job.get('workflow_contract_version') == 1:
+                        required = {'id', 'allow', 'workflow_confirmation'}
+                        if not required <= set(body) or set(body) - (required | {'note'}):
+                            raise WorkflowRequestError('workflow_request_invalid')
                 if pending.get('intended_role') == 'maintainer' and not self.maintenance_authorized():
                     raise PermissionError('保守担当の認証が必要です。')
                 engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'),
