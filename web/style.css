@@ -247,7 +247,10 @@ body:not([data-view="technical"]) .tech-only{display:none !important}
 .feature-decision{margin:10px 0;padding:12px;border:1px solid var(--amber-line);border-radius:8px;background:var(--amber-bg)}
 .feature-decision h4{margin:0 0 6px}
 .feature-rework{margin:8px 0}
-.feature-rework>summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.feature-rework>summary{cursor:pointer;min-height:44px;display:flex;align-items:center;gap:6px;list-style:none}
+/* W05.04：flex の summary では既定の開閉の印が消えるため、印を文字で付ける（色に頼らない）。 */
+.feature-rework>summary::-webkit-details-marker{display:none}.feature-rework>summary::before{content:'▸';font-size:17px}.feature-rework[open]>summary::before{content:'▾'}
+.feature-rework>summary:focus-visible{outline:3px solid var(--focus);outline-offset:2px;border-radius:4px}
 .version-tag{font-size:12px;padding:1px 6px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface)}
 .plan-revision{margin:12px 0}
 .plan-revision code,.feature-decision code{overflow-wrap:anywhere}
