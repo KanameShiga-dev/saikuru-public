@@ -105,6 +105,16 @@ class WorkflowApiIntegrationTests(unittest.TestCase):
         from tests import test_workflow_api as fixtures
         f = fixtures.WorkflowApiTests(); self.addCleanup(f.doCleanups); f.setUp()
         engine, store, job_id = f.engine, f.store, f.f.job_id
+        from unittest.mock import patch
+        original_result = Context.command_result
+        def correlated_result(context, command, exit_code, output, timed_out=False):
+            # The synthetic provider explicitly echoes its operation ID on both
+            # messages. Production does not infer IDs from command text.
+            operation_id = 'synthetic-' + str(len(store.job_events(job_id, 'operation_result')))
+            context.command_started(command, operation_id)
+            return original_result(context, command, exit_code, output, timed_out, operation_id=operation_id)
+        operation_bridge = patch.object(Context, 'command_result', new=correlated_result)
+        operation_bridge.start(); self.addCleanup(operation_bridge.stop)
         # The fixture publishes its fictional plan through the real G3 engine.
         self.assertEqual(f.f.job()['plan_revision'], 1)
         self.assertEqual(f.f.job()['status'], 'running')

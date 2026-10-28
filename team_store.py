@@ -412,7 +412,7 @@ class Store:
             return {'operation_digest': signature, 'result_observed': observed, 'unresolved': unresolved,
                     'execution_permission': 'none', 'effects_reconciled': False}
 
-    def confirm_recovery(self, task_id, task_revision, job_revision, attempt_id):
+    def confirm_recovery(self, task_id, task_revision, job_revision, attempt_id, *, prior_operation_check=None):
         """Internal CAS for authenticated maintenance service; never queues work."""
         with self.atomic():
             task = self.get(task_id, 'task')
@@ -423,13 +423,23 @@ class Store:
                     or job.get('status') not in ('failed', 'blocked', 'interrupted')
                     or task.get('status') not in ('failed', 'blocked', 'interrupted')
                     or not isinstance(attempt_id, str) or not attempt_id or attempt.get('id') != attempt_id
-                    or attempt.get('status') not in ('closed', 'fenced') or self.has_operation_history(job['id'])):
+                    or attempt.get('status') not in ('closed', 'fenced')):
                 raise ValueError('現在の停止状態・試行・操作の確認が必要です。')
+            operations = {'operations': 'none'}
+            if self.has_operation_history(job['id']):
+                if not callable(prior_operation_check):
+                    raise ValueError('操作の作用が未照合です。この経路では再開できません。')
+                proof = prior_operation_check()
+                if (not isinstance(proof, dict) or proof.get('unresolved')
+                        or not proof.get('reviewed_prior_operations')
+                        or len(proof['reviewed_prior_operations']) != len(proof.get('result_observed') or [])):
+                    raise ValueError('操作の作用が未照合です。この経路では再開できません。')
+                operations = {'operations': 'reviewed_prior', 'operation_digest': proof['operation_digest']}
             marker = {'attempt_id': attempt_id, 'job_revision': job_revision,
                       'task_revision': task_revision + 1}
             marker['event_seq'] = self.event('recovery_confirmed', '保守用経路で作業停止の確認を記録しました。',
                 task_id, job['id'], details={'attempt_id': attempt_id, 'task_revision': task_revision,
-                                           'job_revision': job_revision, 'operations': 'none'})
+                                           'job_revision': job_revision, **operations})
             previous = getattr(self._worker, 'recovery_commit', None)
             self._worker.recovery_commit = task_id
             try:

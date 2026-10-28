@@ -152,6 +152,25 @@ class WorkflowRecoveryApiIntegrationTests(unittest.TestCase):
             self.assertEqual(f.state(), before)
         self.assertTrue(f.store.get(f.task_id)['recovery_check_required'])
 
+    def test_restart_retry_cannot_reuse_an_old_tool_approval(self):
+        f = self.f
+        old = f.engine.new_approval(f.store.get(f.task_id), 'tool',
+                                   {'operation': 'Bash', 'details': {'command': 'fictional external action'}})
+        f.store.recover()
+        self.assertEqual(f.store.get(old['id'])['status'], 'expired')
+        self.assertEqual(f.request('/api/workflow/control', f.body('confirm_recovery'), maintenance=True)[0], 200)
+        f.f.checkpoint()
+        self.assertEqual(f.request('/api/workflow/control', f.body('retry_task'), maintenance=True)[0], 200)
+        before = f.state()
+        self.assertEqual(f.request('/api/decide', {'id': old['id'], 'allow': True})[0], 400)
+        self.assertEqual(f.state(), before)
+        task = f.store.get(f.task_id)
+        task = f.store.reserve_attempt(f.task_id, task['state_revision'])
+        fresh = f.engine.new_approval(task, 'tool', old['payload'])
+        self.assertNotEqual(fresh['id'], old['id'])
+        self.assertEqual(fresh['status'], 'pending')
+        self.assertNotEqual(fresh['attempt'], old['attempt'])
+
 
 class OperationCorrelationTests(unittest.TestCase):
     def setUp(self):
@@ -250,6 +269,21 @@ class OperationCorrelationTests(unittest.TestCase):
         view = self.f.store.operation_assessment(self.f.job['id'])
         self.assertEqual(view['result_observed'], [])
         self.assertEqual(view['unresolved'][0]['code'], 'operation_order_invalid')
+
+    def test_denied_worker_command_does_not_leave_an_execution_start(self):
+        from unittest.mock import patch
+        self.ctx.token = 'fictional-operation-worker'
+        self.f.engine.active[self.ctx.task['id']] = self.ctx
+        self.addCleanup(self.f.engine.active.clear)
+        body = {'task_id': self.ctx.task['id'], 'tool': 'Bash',
+                'input': {'command': 'python -B -m unittest'}, 'operation_id': 'fictional-denial'}
+        with patch.object(self.f.engine, '_tool_request_context', return_value={'allow': False}):
+            self.assertFalse(self.f.engine.tool_request(self.ctx.token, body)['allow'])
+        self.assertEqual(self.events(), ([], []))
+        with patch.object(self.f.engine, '_tool_request_context', return_value={'allow': True}):
+            self.assertTrue(self.f.engine.tool_request(self.ctx.token, body)['allow'])
+        self.assertEqual(len(self.events()[0]), 1)
+        self.assertTrue(self.f.store.operation_assessment(self.f.job['id'])['unresolved'])
 
 
 if __name__ == '__main__': unittest.main()

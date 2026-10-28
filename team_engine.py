@@ -5854,6 +5854,38 @@ class Engine:
             self.store.event('document_resumed','指定成果物 '+format_name+' の制作を再開しました。過去の成果と判断履歴は保持します。',task['id'],job_id)
             return {'job_id':job_id,'task_id':task['id'],'checks':checks}
 
+    def _reviewed_operation_basis(self, task, job):
+        """Only prior, closed WP attempts with current reviewed file evidence."""
+        from team_wbs import approved_source, feature_review_receipt
+        from team_p0_contract import artifact_records
+        observed = self.store.operation_assessment(job['id'])
+        if observed['unresolved']:
+            raise ValueError('操作の作用が未照合です。この経路では再開できません。')
+        if not observed['result_observed']:
+            return observed
+        plan = self.store.get(job.get('plan_approval_id'), 'approval')
+        requirements = self.store.get(job.get('requirements_approval_id'), 'approval')
+        # Read-only authority validation of a stopped job, never dispatch it.
+        viewed = dict(job, status='blocked') if job['status'] == 'interrupted' else job
+        specs = {s['wbs_id']: s for s in approved_source(viewed, plan, requirements, for_review=True)}
+        records = [w for w in self.store.for_job('work_package', job['id']) if w['plan_revision'] == job['plan_revision']]
+        by_id = {w['id']: w for w in records}; cache = {}; proofs = []
+        for item in observed['result_observed']:
+            source = self.store.get(item['task_id'], 'task')
+            attempt = source.get('current_attempt') or {}
+            if (source['id'] == task['id'] or source.get('status') != 'succeeded'
+                    or source.get('work_package_id') == task.get('work_package_id')
+                    or attempt.get('id') != item['attempt_id'] or attempt.get('status') != 'closed'
+                    or source.get('work_package_id') not in by_id):
+                raise ValueError('操作の作用が未照合です。この経路では再開できません。')
+            proof = feature_review_receipt(self.store, viewed, plan, requirements,
+                                           by_id[source['work_package_id']], specs, records, cache)
+            for path, sha in proof['files'].items():
+                if artifact_records(job['project'], [path]) != [{'path': path, 'sha256': sha}]:
+                    raise ValueError('確認済みの機能の成果物が変わっています。再確認してください。')
+            proofs.append(dict(item, approval_id=proof['approval_id'], target_digest=proof['target_digest']))
+        return dict(observed, reviewed_prior_operations=proofs)
+
     def _recovery_control_inputs(self, task_id):
         from team_p0_contract import workflow_version, checkpoint_scope
         task = self.store.get(task_id, 'task')
@@ -5873,7 +5905,7 @@ class Engine:
                 if canonical(parent['project']) == canonical(job['project']):
                     raise ValueError('担当の停止を先に確認してください。')
         if self.store.has_operation_history(job['id']):
-            raise ValueError('操作の作用が未照合です。この経路では再開できません。')
+            self._reviewed_operation_basis(task, job)
         # Native workers can write outside the recorded tool protocol. Absence
         # of operation_* events is not evidence that a launched worker had no effect.
         attempt_id = (task.get('current_attempt') or {}).get('id')
@@ -5902,8 +5934,10 @@ class Engine:
                 if workflow_target is not None:
                     task = self.store.get(task_id,'task')
                     self._validate_workflow_control_target(workflow_target,task['job_id'],'confirm_recovery',task_id)
-                self._recovery_control_inputs(task_id)
-                task = self.store.confirm_recovery(task_id, task_revision, job_revision, attempt_id)
+                task, job, _ = self._recovery_control_inputs(task_id)
+                task = self.store.confirm_recovery(task_id, task_revision, job_revision, attempt_id,
+                    prior_operation_check=lambda: self._reviewed_operation_basis(
+                        self.store.get(task_id, 'task'), self.store.get(job['id'], 'job')))
             return {'confirmed': True, 'task_id': task_id, 'task_revision': task['state_revision'],
                     'queued': False, 'resume_allowed': False, 'next_action': 'manual_retry_after_checkpoint_verification'}
 
@@ -5917,10 +5951,14 @@ class Engine:
             raise ValueError('現在の試行・状態版に対する保守確認が必要です。')
         row = self.store.db.execute('SELECT body FROM events WHERE seq=?', (marker['event_seq'],)).fetchone()
         event = json.loads(row[0]) if row else {}
+        operations = {'operations': 'none'}
+        if self.store.has_operation_history(job['id']):
+            proof = self._reviewed_operation_basis(task, job)
+            operations = {'operations': 'reviewed_prior', 'operation_digest': proof['operation_digest']}
         if (event.get('type') != 'recovery_confirmed' or event.get('task_id') != task_id
                 or event.get('job_id') != job['id'] or event.get('details') != {
                     'attempt_id': marker['attempt_id'], 'task_revision': marker['task_revision'] - 1,
-                    'job_revision': marker['job_revision'], 'operations': 'none'}):
+                    'job_revision': marker['job_revision'], **operations}):
             raise ValueError('保守確認の記録が一致しません。')
         if task['state_revision'] != marker['task_revision']:
             ready, _ = self.store.checkpoint_binding(task.get('resume_checkpoint_id'))
@@ -5964,7 +6002,7 @@ class Engine:
                 if task_job.get('status') not in ('planning', 'running', 'failed', 'blocked', 'interrupted'):
                     raise ValueError('終了済みまたは不明な依頼は再試行できません。')
                 if self.store.has_operation_history(task_job['id']):
-                    raise ValueError('操作の作用が未照合です。この経路では再試行できません。')
+                    self._reviewed_operation_basis(task, task_job)
                 if task.get('recovery_check_required') or task.get('recovery_confirmation') or recovery_expected is not None:
                     actual, _ = self._recovery_retry_binding(task_id)
                     if recovery_expected is None or actual != recovery_expected:
@@ -6158,7 +6196,13 @@ class Engine:
                 raise ValueError('無効なワーカー要求です。')
 
         with self.store.attempt_scope(ctx.task):
-            return self._tool_request_context(ctx, body)
+            result = self._tool_request_context(ctx, body)
+            if body.get('tool') == 'Bash' and result.get('allow') is True:
+                # The permission response has not been delivered to the worker
+                # yet. Denials have no execution-start record; an allowed request
+                # without a later result remains unresolved after interruption.
+                ctx.command_started((body.get('input') or {}).get('command', ''), body.get('operation_id'))
+            return result
 
     def _tool_request_context(self, ctx, body):
         tool = body.get('tool', '')
@@ -6231,7 +6275,6 @@ class Engine:
                     return {'allow': False, 'note': '経路比較中はコマンドによる変更を禁止しています。編集ツールを使ってください。'}
 
             # Keep the command for the security review (auto-approval otherwise leaves no trace of it).
-            ctx.command_started(data.get('command', ''), body.get('operation_id'))
             # Scripts of imported skills: only skills active in this project, only files unchanged since import.
             from team_skill_import import script_check
             verdict = script_check(data.get('command', ''), self.handoff.active_skill_names(ctx.project))
