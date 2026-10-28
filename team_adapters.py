@@ -18,6 +18,12 @@ class Cancelled(Exception):
     pass
 
 
+# Protocol bookkeeping has no tool effect. Keep unknown/new item types observed
+# so recovery cannot silently classify a new capability as file-only.
+CODEX_NON_TOOL_ITEMS = frozenset({'userMessage', 'agentMessage', 'plan', 'reasoning',
+    'contextCompaction', 'sleep', 'enteredReviewMode', 'exitedReviewMode'})
+
+
 class ProviderError(Exception):
     def __init__(self, message, code='provider', *, model_call_state='unknown'):
         super().__init__(message)
@@ -270,7 +276,7 @@ class CodexAdapter:
                     ctx.event('未対応の要求を拒否: ' + method)
             elif method == 'item/started':
                 item = params.get('item', {})
-                if item.get('type') not in ('agentMessage', 'reasoning', 'contextCompaction') and hasattr(ctx, 'count_tool'):
+                if item.get('type') not in CODEX_NON_TOOL_ITEMS and hasattr(ctx, 'count_tool'):
                     ctx.count_tool(item.get('type') or 'unknownItem')
                 if item.get('type') == 'commandExecution' and hasattr(ctx, 'command_started'):
                     command = item.get('command')

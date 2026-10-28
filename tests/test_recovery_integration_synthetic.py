@@ -403,4 +403,55 @@ class NativeAssessmentTests(unittest.TestCase):
             self.assertEqual(self.f.f.state(), before)
 
 
+class CodexItemObservationTests(unittest.TestCase):
+    def protocol(self, item_types):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from team_adapters import CodexAdapter
+        observed, sent = [], []
+        class FakeProcess:
+            def __init__(self, *args): self.messages = []
+            def send(self, value):
+                sent.append(value)
+                if 'id' not in value: return
+                method = value['method']
+                result = ({'thread': {'id': 'fictional-thread'}} if method == 'thread/start' else
+                          {'exitCode': 0, 'stdout': 'AGENT_TEAM_NATIVE_OK'} if method == 'command/exec' else {})
+                self.messages.append({'id': value['id'], 'result': result})
+                if method == 'turn/start':
+                    for index, kind in enumerate(item_types):
+                        item = {'id': 'fictional-item-' + str(index), 'type': kind,
+                                'command': 'fictional command', 'exitCode': 0, 'aggregatedOutput': 'SYNTHETIC'}
+                        self.messages.append({'method': 'item/started', 'params': {'item': item}})
+                        self.messages.append({'method': 'item/completed', 'params': {'item': item}})
+                    self.messages += [
+                        {'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'text': '{"status":"done"}'}}},
+                        {'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+            def receive(self, ctx): return self.messages.pop(0)
+            def close(self): pass
+        ctx = SimpleNamespace(task={'profile': {'model': 'fictional-no-provider', 'effort': 'medium'}},
+            command=['fictional-codex-never-launched'], project=str(Path.cwd()), engine=SimpleNamespace(config={}),
+            agent_system_instructions='SYNTHETIC protocol observation only',
+            agent_definition=SimpleNamespace(sandbox='workspace-write', description='SYNTHETIC agent'),
+            check=lambda: None, agent_started=lambda *a: None, event=lambda *a: None,
+            count_tool=observed.append, command_started=lambda *a: None, command_result=lambda *a, **k: None)
+        with patch('team_adapters.Process', FakeProcess):
+            result = CodexAdapter().run(ctx, 'SYNTHETIC request',
+                {'type': 'object', 'properties': {'status': {'type': 'string'}}, 'required': ['status']})
+        self.assertEqual(result, {'status': 'done'})
+        self.assertIn('thread/start', [v.get('method') for v in sent])
+        self.assertNotIn('thread/resume', [v.get('method') for v in sent])
+        return observed
+
+    def test_control_messages_do_not_make_a_file_only_turn_ineligible(self):
+        self.assertEqual(self.protocol(['userMessage', 'plan', 'sleep', 'enteredReviewMode',
+            'exitedReviewMode', 'reasoning', 'contextCompaction', 'fileChange']), ['fileChange'])
+
+    def test_effectful_and_unknown_items_are_still_observed(self):
+        effects = ['commandExecution', 'dynamicToolCall', 'collabAgentToolCall', 'subAgentActivity',
+                   'imageGeneration', 'imageView', 'functionCallOutput', 'hookPrompt',
+                   'mcpToolCall', 'webSearch', 'fictionalFutureItem']
+        self.assertEqual(self.protocol(effects), effects)
+
+
 if __name__ == '__main__': unittest.main()
