@@ -230,3 +230,24 @@ body:not([data-view="technical"]) .tech-only{display:none !important}
 .detail-tab.tab-alert[aria-selected="true"]{background:var(--red);border-color:var(--red);color:var(--on-accent)}
 .detail-tab:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .detail-tab-panel[hidden]{display:none}
+/* W05.02：機能の一覧。状態は必ず文字で示し、色は補助に限る。 */
+.workflow-panel{margin:14px 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.workflow-panel>h4{margin:0 0 6px}
+.wait-owner{font-weight:600;color:var(--text);margin:4px 0}
+.workflow-tally{list-style:none;padding:0;margin:8px 0;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px}
+.wp-list{padding-left:1.4em;margin:8px 0}
+.wp-item{margin:10px 0;padding:8px 10px;border-left:4px solid var(--line-strong);background:var(--surface-2);border-radius:4px}
+.wp-item p{margin:3px 0}
+.wp-head{display:flex;flex-wrap:wrap;align-items:center;gap:4px;color:var(--text)}
+.wp-state{border:1px solid var(--line-strong);background:var(--surface);color:var(--text);font-weight:600}
+.wp-item[data-state="review"]{border-left-color:var(--amber-line)}
+.wp-item[data-state="rework"],.wp-item[data-state="blocked"]{border-left-color:var(--red)}
+.wp-item[data-state="running"]{border-left-color:var(--blue)}
+.wp-item[data-state="approved"]{border-left-color:var(--green)}
+.feature-decision{margin:10px 0;padding:12px;border:1px solid var(--amber-line);border-radius:8px;background:var(--amber-bg)}
+.feature-decision h4{margin:0 0 6px}
+.feature-rework{margin:8px 0}
+.feature-rework>summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.version-tag{font-size:12px;padding:1px 6px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface)}
+.plan-revision{margin:12px 0}
+.plan-revision code,.feature-decision code{overflow-wrap:anywhere}

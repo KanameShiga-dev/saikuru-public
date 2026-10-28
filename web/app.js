@@ -107,8 +107,25 @@ async function apiCall(path, data, retried=false) {
   if(!retried&&response.status===403&&['画面を再読み込みしてください。','ブラウザからの認証済み操作が必要です。'].includes(result.error)){
     await recoverSession();return api(path,data,true);
   }
-  if(!response.ok)throw new Error(result.error||'通信に失敗しました。'); return result;
+  if(!response.ok)throw new Error((result.code&&WORKFLOW_ERROR_LABELS[result.code])||result.error||'通信に失敗しました。'); return result;
 }
+// W05.01 の固定の理由コードを、利用者向けの文に置き換える。未知のコードはサーバーの文言のまま出す（推測しない）。
+const WORKFLOW_ERROR_LABELS={
+  workflow_request_invalid:'送信の形式が一致しません。画面を再読み込みしてから操作してください。',
+  workflow_feature_target_changed:'確認する内容が変わりました。再読み込みして、新しい内容で確認してください。',
+  workflow_feature_confirmation_required:'確認の内容が一致しないか、期限が切れました。再読み込みしてください。',
+  workflow_feature_observation_changed:'確認の途中で状態が変わりました。再読み込みしてください。',
+  work_package_revision_changed:'機能の状態が更新されました。再読み込みしてください。',
+  work_package_review_already_requested:'この機能の確認はすでに用意されています。再読み込みしてください。',
+  workflow_writer_not_stopped:'作業中の担当があります。作業が終わってから操作してください。',
+  workflow_pending_decision:'先に、ほかの確認・質問に答えてください。',
+  workflow_conflict_review_required:'記録に食い違いがあります。先に食い違いの確認に答えてください。',
+  workflow_feature_job_not_running:'この依頼は進行中ではないため、機能の確認はできません。',
+  work_package_defect_note_required:'差し戻す理由を入力してください。',
+  workflow_sensitive_input_blocked:'入力に送信できない情報が含まれている可能性があります。表現を変えて入力してください。',
+  workflow_input_or_maintenance_check_required:'入力内容を確認してください。解決しない場合は保守担当の確認が必要です。',
+  workflow_revision_confirmation_not_current:'計画の確認内容が古くなりました。再読み込みして、表示された計画で確認してください。'
+};
 async function action(fn) { if(busy)return; busy=true; try{await fn();await refresh();}catch(e){notice(e.message);}finally{busy=false;} }
 function button(text, fn, cls) { const b=el('button',text,cls);b.type='button';b.addEventListener('click',()=>action(fn));return b; }
 function pending(id) { return state.approvals.filter(a=>a.task_id===id&&a.status==='pending'); }
@@ -349,6 +366,191 @@ const PROGRESS_ACTIONS={
   record_completion_evidence:['確認結果を記録する',openCompletion],
   cancel_job:['この依頼を中止する…',openCancel]
 };
+// W05.02：新方式の依頼の機能一覧。サーバーの投影（job.workflow）の値だけを使い、状態・誰の番か・権限を画面で推測しない。
+// 機能の表示は W01.06 の 2.3 の順に判定する。内部の呼び名（WP・WBS番号・版の hash）は技術詳細でだけ出す。
+const WAIT_OWNER_LABELS={
+  user:'あなたの確認を待っています。',saikuru:'采来が進めています。あなたの操作は不要です。',
+  maintainer:'保守担当の確認を待っています。作業の成果は保存されています。あなたの操作は不要です。',
+  authorized_person:'権限のある担当者の確認を待っています。',dependency:'先に必要な機能の確認を待っています。',
+  none:'待っている操作はありません。'
+};
+const WORKFLOW_STOP_LABELS={
+  workflow_recovery_confirmation_required:'再起動などで作業が止まりました。保守担当が作業の停止を確認するまで、再開しません。',
+  workflow_maintenance_required:'作業の環境の確認が必要です。保守担当が対応します。',
+  workflow_safety_blocked:'安全のため作業を止めました。権限のある担当者の確認が必要です。',
+  workflow_blocked:'依頼が止まっています。',workflow_failed:'作業が失敗して止まっています。',workflow_interrupted:'作業が中断しています。',
+  workflow_state_unknown:'依頼の状態を確認できません。保守担当が確認します。',
+  workflow_state_verification_required:'記録を照合できないため、完成とは扱いません。保守担当が確認します。',
+  workflow_authentication:'AIの認証の確認が必要です。',workflow_provider_limit:'AIの利用上限に達しました。',
+  workflow_timeout:'作業の時間の上限で止まりました。',workflow_sandbox_setup:'作業の実行環境の準備で止まりました。',
+  workflow_safety:'安全上の確認が必要です。',workflow_cancelled:'作業を中断しました。',workflow_execution:'作業の結果の確認が必要です。'
+};
+// 画面は定期的に描き直すため、入力中の文とチェックは描き直しをまたいで保持する（送信・成功で消す）。
+const featureDrafts=new Map();
+function draftField(node,key){node.value=featureDrafts.get(key)??'';node.addEventListener('input',()=>featureDrafts.set(key,node.value));node.dataset.focusKey=key;return node;}
+function workflowPackages(job){return (job.workflow?.progress?.packages)||[];}
+function featureApproval(wp){
+  return (state.approvals||[]).find(a=>a.kind==='feature_review'&&a.status==='pending'
+    &&a.payload?.feature_target?.work_package_id===wp.id&&a.actionable===true)||null;
+}
+function wpState(wp,job){
+  const progress=workflowPackages(job),item=progress.find(p=>p.id===wp.id)||{};
+  const waiting=(wp.dependencies||[]).filter(d=>!progress.find(p=>p.id===d.id)?.feature_approved);
+  const ex=wp.execution_state,rv=wp.review_status;
+  if(ex==='cancelled')return {key:'cancelled',label:'中止',owner:'なし'};
+  if(ex==='blocked')return {key:'blocked',label:rv==='changes_requested'?'差し戻し後に停止中':'停止中',owner:'理由による',note:'止まった理由は、上の依頼の状態を確認してください。'};
+  if(ex==='running')return rv==='changes_requested'?{key:'rework',label:'差し戻しの修正中（あなたの指摘を反映しています）',owner:'采来'}:{key:'running',label:'作業中',owner:'采来'};
+  if(['planned','ready'].includes(ex)){
+    if(waiting.length)return {key:'dependency',label:`依存待ち：『${waiting.map(d=>d.title).join('』『')}』の確認後に始まります`,owner:'先に必要な機能',waiting};
+    return rv==='changes_requested'?{key:'rework',label:'差し戻し：修正の開始待ち',owner:'采来'}:{key:'queued',label:'開始待ち',owner:'采来'};
+  }
+  if(ex==='succeeded'){
+    if(rv==='pending'&&featureApproval(wp))return {key:'review',label:'あなたの確認待ち',owner:'あなた'};
+    if(rv==='approved'&&item.feature_approved)return {key:'approved',label:'確認済み',owner:'なし'};
+    if(rv==='approved')return {key:'preparing',label:'確認の記録を照合できません（確認済みとは扱いません）',owner:'采来'};
+    const label=rv==='invalidated'?'確認の準備中（前回の確認後に関連する内容が変わったため、確認を出し直します）'
+      :rv==='changes_requested'?'差し戻し済み（修正後に確認を出し直します）':'確認の準備中';
+    return {key:'preparing',label,owner:'采来'};
+  }
+  return {key:'unknown',label:'状態を確認中',owner:'保守担当'};
+}
+function shortVersion(sha){return /^[0-9a-f]{12,}$/.test(String(sha||''))?String(sha).slice(0,12):'不明';}
+function versionLine(path,sha){
+  const line=el('li');line.append(el('code',path||'（場所不明）'),document.createTextNode('　'),el('span','版 '+shortVersion(sha),'version-tag'));
+  const full=el('small','　'+(sha||''),'tech-only');line.append(full);return line;
+}
+// 機能の確認（本人）。表示した版の digest をそのまま確認に使い、画面で版を作り直さない。依頼全体の受領とは別。
+function featureDecisionForm(approval,job){
+  const target=approval.payload?.feature_target||{},digest=approval.payload?.feature_target_digest;
+  const wp=(job.workflow?.work_packages||[]).find(w=>w.id===target.work_package_id)||{};
+  const form=el('section',undefined,'feature-decision');form.dataset.userDecision='1';
+  form.append(el('h4',`機能の確認：${wp.title||'（名前不明）'}`));
+  form.append(el('p','この確認は、この機能の動作・見た目・完了の条件の確認です。依頼全体の正式受領ではありません。','notice'));
+  const criteria=target.criteria||{};
+  if(criteria.done_when?.length)form.append(progressList('この機能の完了の条件',criteria.done_when,'○','todo'));
+  if(criteria.goal_links?.length)form.append(progressList('対応する目標・受入条件',criteria.goal_links,'・',''));
+  const artifacts=Array.isArray(target.artifacts)?target.artifacts:[];
+  const files=el('div',undefined,'progress-group');files.append(el('h4',`確認する成果物の版（${artifacts.length}件）`));
+  const list=el('ul');for(const row of artifacts)list.append(versionLine(row.path,row.sha256));files.append(list);form.append(files);
+  const tests=Object.keys(target.test_snapshot||{});
+  if(tests.length){const t=el('div',undefined,'progress-group tech-only');t.append(el('h4',`試験ファイルの版（${tests.length}件）`));const tl=el('ul');for(const p of tests)tl.append(versionLine(p,target.test_snapshot[p]));t.append(tl);form.append(t);}
+  form.append(el('p','起動・操作の確認は、ご自身で行ってください。画面に表示した版と違う内容になった場合、この確認は使えなくなります。期限：'+date(approval.expires_at),'hint'));
+  const note=draftField(el('textarea'),'feature-note:'+approval.id);note.rows=3;note.maxLength=4000;
+  note.placeholder='差し戻す場合は、気づいた点を書いてください（承認する場合は任意）';note.setAttribute('aria-label',`${wp.title||'機能'}の確認の補足`);
+  const check=el('input');check.type='checkbox';check.checked=featureDrafts.get('feature-check:'+approval.id)===true;
+  check.addEventListener('change',()=>featureDrafts.set('feature-check:'+approval.id,check.checked));check.dataset.focusKey='feature-check:'+approval.id;const checkLabel=el('label','表示された版の内容を確認しました','check');checkLabel.prepend(check);
+  form.append(note,checkLabel);
+  const actions=el('div',undefined,'actions');
+  const send=allow=>api('/api/workflow/feature-review/decide',{approval_id:approval.id,allow,note:note.value,action:'decide_feature_review',
+    confirmation:{action:'feature_review_confirmation',target_digest:digest,decision:allow?'approved':'rejected'}});
+  const reject=button(`差し戻す（${wp.title||'この機能'}）`,async()=>{
+    if(!note.value.trim()){notice('差し戻す理由を入力してください。');note.focus();return;}
+    await send(false);featureDrafts.delete('feature-note:'+approval.id);notice('差し戻しました。修正と、影響する機能の再確認を采来が進めます。');
+  },'danger');
+  const approve=button(`この版を確認済みにする（${wp.title||'この機能'}）`,async()=>{
+    if(!check.checked){notice('「表示された版の内容を確認しました」にチェックを入れてください。');check.focus();return;}
+    await send(true);featureDrafts.delete('feature-note:'+approval.id);featureDrafts.delete('feature-check:'+approval.id);notice('この機能を確認済みにしました。依頼全体の受領は、すべての機能の確認の後に別に行います。');
+  },'primary');
+  if(!digest){actions.append(el('p','確認する版を特定できません。再読み込みしてください。','form-error'));}
+  else actions.append(reject,approve);
+  form.append(actions);return form;
+}
+// 確認済みの機能を差し戻す。依頼全体ではなく、この機能だけ。影響する機能の範囲は采来が判定し、無関係な確認は残る。
+function featureReworkForm(wp,job){
+  const box=el('details',undefined,'feature-rework');box.append(el('summary',`この機能を差し戻す…（${wp.title}）`));
+  box.open=openJobRows.has('rework|'+wp.id);box.addEventListener('toggle',()=>{if(box.open)openJobRows.add('rework|'+wp.id);else openJobRows.delete('rework|'+wp.id);});
+  box.append(el('p','確認済みの機能に問題が見つかった場合に使います。この機能の修正と、影響する機能の再確認だけが行われます。関係のない機能の確認は残ります。','hint'));
+  const note=draftField(el('textarea'),'feature-rework:'+wp.id);note.rows=3;note.maxLength=4000;note.placeholder='見つかった問題（必須）';note.setAttribute('aria-label',`${wp.title}を差し戻す理由`);
+  box.append(note,button('差し戻す',async()=>{
+    if(!note.value.trim()){notice('差し戻す理由を入力してください。');note.focus();return;}
+    await api('/api/workflow/feature-rework',{job_id:job.id,work_package_id:wp.id,work_package_revision:wp.state_revision,note:note.value,
+      action:'rework_job',confirmation:{action:'request_feature_rework',target_digest:wp.feature_target_digest}});
+    featureDrafts.delete('feature-rework:'+wp.id);notice('差し戻しました。修正と、影響する機能の再確認を采来が進めます。');
+  },'danger'));
+  return box;
+}
+function workflowPanel(job){
+  const wf=job.workflow||{},progress=wf.progress||{},packages=wf.work_packages||[];
+  const panel=el('section',undefined,'workflow-panel');panel.append(el('h4',`機能の一覧（${packages.length}件）`));
+  panel.append(el('p',WAIT_OWNER_LABELS[wf.wait_owner]||'誰の番かを確認できません。','wait-owner'));
+  const stops=(wf.stop_codes||[]).map(c=>WORKFLOW_STOP_LABELS[c]).filter(Boolean);
+  if(stops.length)panel.append(progressList('止まっている理由',stops,'!','unmet'));
+  if(wf.uncertain_operation)panel.append(el('p','結果が分からない操作があります。安全のため、保守担当が確認するまで同じ操作を繰り返しません。','notice'));
+  const counts=progress.counts||{},uat=progress.uat||{},n=counts.packages||packages.length;
+  const tally=el('ul',undefined,'workflow-tally');
+  tally.append(el('li',`技術の確認が終わった機能：${counts.technical_complete||0} / ${n}`),
+    el('li',`あなたが確認済みの機能：${counts.feature_approved||0} / ${n}`),
+    el('li',`受入条件の確認：${uat.confirmed||0} / ${uat.required||0}`),
+    el('li',`依頼全体の正式受領：${progress.formal_receipt?'済み':'まだ'}`));
+  panel.append(tally,el('p','作業が終わった数は、受入の確認が済んだ数ではありません。','hint'));
+  if(progress.state==='inconclusive')panel.append(el('p','記録を照合できないため、進み具合を判断できません。完成とは扱いません。','notice'));
+  if(wf.feature_confirmation_count>0)panel.append(el('p',`あなたの確認を待っている機能：${wf.feature_confirmation_count}件（1件ずつ確認します）`,'hint'));
+  const list=el('ol',undefined,'wp-list');
+  for(const wp of packages){
+    const st=wpState(wp,job),item=el('li',undefined,'wp-item');item.dataset.state=st.key;
+    const head=el('p',undefined,'wp-head');head.append(el('strong',wp.title),document.createTextNode('　'),el('span',st.label,'badge wp-state'));
+    head.append(el('small','　'+(wp.wbs_id||''),'tech-only'));item.append(head);
+    item.append(el('p',`次に操作する人：${st.owner}`,'hint'));
+    if(wp.done_when?.length)item.append(el('p','完了の条件：'+wp.done_when.join('／'),'hint'));
+    if(st.key==='approved'&&wp.feature_target_digest)item.append(el('p','確認した版 '+shortVersion(wp.feature_target_digest),'hint tech-only'));
+    const actions=el('div',undefined,'actions');
+    if((wp.available_actions||[]).includes('request_feature_review')){
+      const b=button(`確認を始める（${wp.title}）`,async()=>{
+        await api('/api/workflow/feature-review/prepare',{job_id:job.id,work_package_id:wp.id,work_package_revision:wp.state_revision,action:'request_feature_review'});
+        notice('確認する内容を用意しました。まだ確認済みにはなっていません。内容を見て判断してください。');
+      },'secondary');b.dataset.focusKey='wp-prepare:'+wp.id;actions.append(b);
+      item.append(el('p','技術の確認が終わりました。「確認を始める」を押すと、確認する成果物の版を用意します（まだ承認にはなりません）。','hint'));
+    }
+    const approval=st.key==='review'?featureApproval(wp):null;
+    if(approval)item.append(featureDecisionForm(approval,job));
+    if(actions.children.length)item.append(actions);
+    if((wp.available_actions||[]).includes('rework_job'))item.append(featureReworkForm(wp,job));
+    list.append(item);
+  }
+  if(!packages.length)panel.append(el('p','機能の一覧はまだありません（計画の承認後に表示されます）。','hint'));
+  else panel.append(list);
+  return panel;
+}
+// 新方式の計画の確認（承認前）。機能の分け方・完了の条件・使う既存の成果物・作業場所・変更の要点を表示する。
+// 承認では、表示した分析の digest をそのまま送る（workflow_confirmation）。非開発者に内部の設計判断を求めない。
+function planRevisionView(a){
+  const box=el('div',undefined,'plan-revision'),plan=a.payload||{},rev=a.workflow_revision||{};
+  const titles=Object.fromEntries((plan.work_packages||[]).map(w=>[w.wbs_id,w.title]));
+  const name=id=>titles[id]||id;
+  box.append(el('h4',`機能の分け方（${(plan.work_packages||[]).length}件）`));
+  const list=el('ol',undefined,'wp-list');
+  for(const w of plan.work_packages||[]){
+    const item=el('li',undefined,'wp-item'),head=el('p',undefined,'wp-head');
+    head.append(el('strong',w.title),el('small','　'+w.wbs_id,'tech-only'));item.append(head);
+    if(w.done_when?.length)item.append(el('p','完了の条件：'+w.done_when.join('／'),'hint'));
+    if(w.goal_links?.length)item.append(el('p','対応する目標・受入条件：'+w.goal_links.join('／'),'hint'));
+    item.append(el('p',w.depends_on?.length?'先に必要な機能：'+w.depends_on.map(name).join('、'):'先に必要な機能：なし','hint'));
+    const inputs=w.input_artifacts||[];
+    if(inputs.length){const g=el('ul');for(const r of inputs)g.append(versionLine(r.path,r.sha256));item.append(el('p','使う既存の成果物：','hint'),g);}
+    list.append(item);
+  }
+  box.append(list);
+  const scope=plan.checkpoint_paths||[];
+  if(scope.length){const s=el('details');s.append(el('summary',`変更してよいファイル（${scope.length}件）`));const sl=el('ul');for(const p of scope)sl.append(el('li',p));s.append(sl);box.append(s);}
+  if(rev.requirements_changed)box.append(el('p','要求の内容が変わります：'+Object.keys(rev.scope_changes||{}).map(k=>({primary_goal:'主な目標',deliverables:'成果物',acceptance_criteria:'受入条件',non_goals:'対象外',constraints:'制約'})[k]||k).join('、'),'notice'));
+  if(rev.base_versions?.plan_revision>0){
+    const affected=(rev.affected_work_packages||[]).map(name),again=(rev.reconfirmation_required||[]).map(name);
+    box.append(progressList('変更の影響を受ける機能',affected,'!','unmet'));
+    box.append(progressList('新しい計画で確認し直す機能（影響がなくても、以前の確認は引き継ぎません）',again,'○','todo'));
+  }
+  const ws=rev.workspace_boundary||{};
+  const where=el('div',undefined,'progress-group');where.append(el('h4','作業する場所'));
+  if(ws.status==='ready'){
+    where.append(el('p',`作業用のコピーで作業します。元のプロジェクトは直接変更しません。編集中のファイル：${(ws.dirty_changes||[]).length}件`,'hint'));
+    where.append(el('p',`作業用のコピー：${ws.execution_root}（${ws.execution_branch}）／統合先：${ws.integration_root}（${ws.integration_branch}）`,'hint tech-only'));
+    where.append(el('p','統合先の未保存の変更は確認していません。作業用のコピーの作成手順の記録は確認できません。','hint'));
+  }else{
+    where.append(el('p','作業する場所を確認できません。この計画を承認しても作業は始まりません。','form-error'));
+    where.append(el('small',String(ws.reason||''),'tech-only'));
+  }
+  box.append(where);
+  return box;
+}
 // P0 L3：登録済みの成果物（テキスト）を、読み取り専用で表示する。内容は信頼できない入力として textContent だけで表示し、実行・描画しない。
 // 起動・操作の確認は引き続き「未検証」。表示した内容は、開いた時点のもの（再描画をまたいで保持し、閉じて開き直すと最新になる）。
 const openedArtifacts=new Map();
@@ -445,6 +647,7 @@ function progressCard(job){
   body.append(progressList('まだ確認できていない受入条件',unmet,'○',unmet.length?'unmet':''));
   const status=COMPLETION_LABELS[progress.completion_status]||'状態を確認中（完成とは扱いません）';
   body.append(el('p',`完成の状況：${status}`,'completion-status'));
+  if(job.workflow_contract_version===1)body.append(job.workflow?workflowPanel(job):el('p','機能の一覧を読み込めません。再読み込みしてください（完成とは扱いません）。','notice'));
   body.append(deliverableGroup(job,Array.isArray(progress.deliverable_access)?progress.deliverable_access:[]));
   const actions=el('div',undefined,'actions');
   for(const name of Array.isArray(progress.available_actions)?progress.available_actions:[]){
@@ -1236,6 +1439,12 @@ function renderDetail(task,version) {
     const summary=a.business_summary&&!(a.kind==='tool'&&a.business_summary===GENERIC_APPROVAL_SUMMARY)?el('p',a.business_summary,'business-summary'):null;
     // 利用者の判断欄の目印。折りたたみの枠に包まれた後でも、復旧中の表示が判断欄を隠さないために使う。
     if(summary)summary.dataset.userDecision='1';
+    if(a.kind==='feature_review'){
+      // 機能の確認は専用の操作だけで行う（汎用の承認では受け付けない）。操作できるかはサーバーの actionable に従う。
+      if(a.actionable===true)body.append(featureDecisionForm(a,job));
+      else{const held=el('section',undefined,'approval-box');held.append(el('h3','機能の確認'),el('p','いまは確認できません（作業中・期限切れ・依頼の状態の変化など）。再読み込みしても変わらない場合は、依頼の状態を確認してください。','hint'));body.append(held);}
+      continue;
+    }
     if(a.payload.questions?.length){if(summary)body.append(summary);const form=questionForm(a);form.dataset.userDecision='1';body.append(form);continue;}
     const box=el('section',undefined,'approval-box');box.dataset.userDecision='1';box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
     if(summary)box.append(summary);
@@ -1246,6 +1455,7 @@ function renderDetail(task,version) {
       box.append(el('p','対象依頼：'+job.title,'hint'));
     }
     if(a.kind==='tool')box.append(toolApprovalView(a));else box.append(el('div',reportText(a.payload),'text-block'));
+    if(a.kind==='plan'&&a.workflow_revision)box.append(planRevisionView(a));
     if(a.kind==='completion'){
       box.append(previewPanel(job));
       const evidenceForm=completionEvidenceForm(a);if(evidenceForm)box.append(evidenceForm);
@@ -1274,7 +1484,9 @@ function renderDetail(task,version) {
         },'primary');actions.append(accept);
       }
     }else{
-      actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value}),'primary'));
+      // 新方式の計画は、表示した分析の digest を確認として送る。表示していない計画では承認しない。
+      const confirmation=a.kind==='plan'&&a.workflow_revision_digest?{workflow_confirmation:a.workflow_revision_digest}:{};
+      actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value,...confirmation}),'primary'));
     }
     box.append(actions);body.append(box);
   }
