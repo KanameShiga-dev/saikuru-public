@@ -32,7 +32,19 @@ function jobStatusLabel(job){const phase=p0Phase(job);if(phase)return phase.labe
   if(job?.p0_contract_version===1&&job.status==='blocked'&&!(state?.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a)))return '停止中（次の動作をご確認ください）';
   return job?.g2_gate_version===1&&job.g2_status==='pending'?'AIによる計画作成の開始の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
 function el(tag, text, cls) { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; }
-function notice(text) { $('notice').textContent=text; }
+function notice(text) { $('notice').textContent=text; dialogNotice(text); }
+// W05.05.UI（F2）：modal のダイアログの間は #notice が裏に隠れ、外側は inert になる。開いているダイアログの中にも同じ文を出す。
+function dialogNotice(text){
+  const dialog=[...document.querySelectorAll('dialog[open]')].filter(d=>d.id).at(-1);
+  if(!dialog)return;
+  let box=dialog.querySelector(':scope > .dialog-notice');
+  if(!box){
+    box=el('p',undefined,'decision-help dialog-notice');box.setAttribute('role','status');box.setAttribute('aria-live','polite');box.hidden=true;
+    const title=dialog.querySelector(':scope > .dialog-title');if(title)title.after(box);else dialog.prepend(box);
+    dialog.addEventListener('close',()=>{box.textContent='';box.hidden=true;});
+  }
+  box.textContent=text||'';box.hidden=!text;
+}
 // P0 L1：標準画面（既定）と技術詳細の切り替え。選択はこのブラウザーにだけ保存し、読めなくても標準で動く。
 (()=>{const toggle=$('view-toggle');if(!toggle)return;let technical=false;
   try{technical=localStorage.getItem('saikuru-view')==='technical';}catch(e){}
@@ -107,7 +119,7 @@ async function apiCall(path, data, retried=false) {
   if(!retried&&response.status===403&&['画面を再読み込みしてください。','ブラウザからの認証済み操作が必要です。'].includes(result.error)){
     await recoverSession();return api(path,data,true);
   }
-  if(!response.ok)throw new Error((result.code&&WORKFLOW_ERROR_LABELS[result.code])||result.error||'通信に失敗しました。'); return result;
+  if(!response.ok)throw new Error(workflowErrorText(result)||result.error||'通信に失敗しました。'); return result;
 }
 // W05.01 の固定の理由コードを、利用者向けの文に置き換える。未知のコードはサーバーの文言のまま出す（推測しない）。
 const WORKFLOW_ERROR_LABELS={
@@ -133,8 +145,23 @@ const WORKFLOW_ERROR_LABELS={
   workflow_control_job_not_active:'この依頼は終了しているため、この操作はできません。',
   workflow_local_io_check_required:'作業のフォルダを確認できませんでした。自動では再送しません。保守担当の確認が必要です。',
   workflow_user_action_required:'担当の作業中はこの操作を受け付けません。少し待ってから表示を確かめてください。',
-  workflow_version_required:'この依頼の形式では、この操作を使えません。画面を再読み込みしてください。'
+  workflow_version_required:'この依頼の形式では、この操作を使えません。画面を再読み込みしてください。',
+  workflow_feature_target_required:'新方式の依頼では、依頼全体ではなく機能ごとに差し戻します。機能の一覧の「この機能を差し戻す」を使ってください。',
+  dependency_feature_review_required:'この機能の状態が変わったため、送りませんでした。新しい表示で、確認が必要な機能を確かめてください。',
+  work_package_state_changed:'機能の状態が変わったため、送りませんでした。新しい表示を確かめてください。',
+  work_package_not_current:'この機能は計画の変更で古くなったため、送りませんでした。新しい機能の一覧を確かめてください。'
 };
+// W05.05.UI：個別の文がない固定のコードは、種類ごとの文で「送っていない・変わっていない」ことを伝える（推測で詳しく書かない）。
+const WORKFLOW_ERROR_FAMILIES=[
+  [/^dependency_/,'先に必要な機能、またはその確認の内容が変わったため、送りませんでした。新しい表示を確かめてください。'],
+  [/^work_package_/,'機能の状態または条件が一致しないため、送りませんでした。新しい表示を確かめてください。'],
+  [/^workflow_/,'依頼の状態または確認の内容が一致しないため、送りませんでした。新しい表示を確かめてください。']];
+function workflowErrorText(result){
+  // 旧来の経路（/api/decide など）は、固定のコードを error に入れて返すことがある。英字のコードをそのまま見せない。
+  const raw=typeof result?.code==='string'?result.code:(typeof result?.error==='string'&&/^(?:workflow|work_package|dependency)_[a-z_]+$/.test(result.error)?result.error:'');
+  const code=raw;if(!code)return '';
+  return WORKFLOW_ERROR_LABELS[code]||(WORKFLOW_ERROR_FAMILIES.find(([re])=>re.test(code))||[])[1]||'';
+}
 // W05.03：新方式の依頼の中止・再試行。操作を始めたときに現在の対象（版）を読み、利用者の明示の確認の後に1回だけ送る。
 // 対象が古くなっていれば送り直さない（新しい表示で確認し直す）。対象は権限ではなく、保守の確認は保守担当だけが行う。
 // 旧方式の依頼は従来の経路と文言のまま。
@@ -512,28 +539,30 @@ function featureDecisionForm(approval,job){
     confirmation:{action:'feature_review_confirmation',target_digest:digest,decision:allow?'approved':'rejected'}});
   const reject=button(`差し戻す（${wp.title||'この機能'}）`,async()=>{
     if(!note.value.trim()){notice('差し戻す理由を入力してください。');note.focus();return;}
-    await send(false);featureDrafts.delete('feature-note:'+approval.id);notice('差し戻しました。修正と、影響する機能の再確認を采来が進めます。');
+    await send(false);featureDrafts.delete('feature-note:'+approval.id);nextFocusKey='wp:'+wp.id;notice('差し戻しました。修正と、影響する機能の再確認を采来が進めます。');
   },'danger');
   const approve=button(`この版を確認済みにする（${wp.title||'この機能'}）`,async()=>{
     if(!check.checked){notice('「表示された版の内容を確認しました」にチェックを入れてください。');check.focus();return;}
-    await send(true);featureDrafts.delete('feature-note:'+approval.id);featureDrafts.delete('feature-check:'+approval.id);notice('この機能を確認済みにしました。依頼全体の受領は、すべての機能の確認の後に別に行います。');
+    await send(true);featureDrafts.delete('feature-note:'+approval.id);featureDrafts.delete('feature-check:'+approval.id);nextFocusKey='wp:'+wp.id;notice('この機能を確認済みにしました。依頼全体の受領は、すべての機能の確認の後に別に行います。');
   },'primary');
+  reject.dataset.focusKey='feature-reject:'+approval.id;approve.dataset.focusKey='feature-approve:'+approval.id;
   if(!digest){actions.append(el('p','確認する版を特定できません。再読み込みしてください。','form-error'));}
   else actions.append(reject,approve);
   form.append(actions);return form;
 }
 // 確認済みの機能を差し戻す。依頼全体ではなく、この機能だけ。影響する機能の範囲は采来が判定し、無関係な確認は残る。
 function featureReworkForm(wp,job){
-  const box=el('details',undefined,'feature-rework');box.append(el('summary',`この機能を差し戻す…（${wp.title}）`));
+  const box=el('details',undefined,'feature-rework'),summary=el('summary',`この機能を差し戻す…（${wp.title}）`);
+  summary.dataset.focusKey='feature-rework-open:'+wp.id;box.append(summary);
   box.open=openJobRows.has('rework|'+wp.id);box.addEventListener('toggle',()=>{if(box.open)openJobRows.add('rework|'+wp.id);else openJobRows.delete('rework|'+wp.id);});
   box.append(el('p','確認済みの機能に問題が見つかった場合に使います。この機能の修正と、影響する機能の再確認だけが行われます。関係のない機能の確認は残ります。','hint'));
   const note=draftField(el('textarea'),'feature-rework:'+wp.id);note.rows=3;note.maxLength=4000;note.placeholder='見つかった問題（必須）';note.setAttribute('aria-label',`${wp.title}を差し戻す理由`);
-  box.append(note,button('差し戻す',async()=>{
+  const send=button('差し戻す',async()=>{
     if(!note.value.trim()){notice('差し戻す理由を入力してください。');note.focus();return;}
     await api('/api/workflow/feature-rework',{job_id:job.id,work_package_id:wp.id,work_package_revision:wp.state_revision,note:note.value,
       action:'rework_job',confirmation:{action:'request_feature_rework',target_digest:wp.feature_target_digest}});
-    featureDrafts.delete('feature-rework:'+wp.id);notice('差し戻しました。修正と、影響する機能の再確認を采来が進めます。');
-  },'danger'));
+    featureDrafts.delete('feature-rework:'+wp.id);nextFocusKey='wp:'+wp.id;notice('差し戻しました。修正と、影響する機能の再確認を采来が進めます。');
+  },'danger');send.dataset.focusKey='feature-rework-send:'+wp.id;box.append(note,send);
   return box;
 }
 function workflowPanel(job){
@@ -554,7 +583,7 @@ function workflowPanel(job){
   if(wf.feature_confirmation_count>0)panel.append(el('p',`あなたの確認を待っている機能：${wf.feature_confirmation_count}件（1件ずつ確認します）`,'hint'));
   const list=el('ol',undefined,'wp-list');
   for(const wp of packages){
-    const st=wpState(wp,job),item=el('li',undefined,'wp-item');item.dataset.state=st.key;
+    const st=wpState(wp,job),item=el('li',undefined,'wp-item');item.dataset.state=st.key;item.dataset.focusKey='wp:'+wp.id;item.tabIndex=-1;
     const head=el('p',undefined,'wp-head');head.append(el('strong',wp.title),document.createTextNode('　'),el('span',st.label,'badge wp-state'));
     head.append(el('small','　'+(wp.wbs_id||''),'tech-only'));item.append(head);
     item.append(el('p',`次に操作する人：${st.owner}`,'hint'));
@@ -1559,7 +1588,12 @@ function renderDetail(task,version) {
     }else{
       // 新方式の計画は、表示した分析の digest を確認として送る。表示していない計画では承認しない。
       const confirmation=a.kind==='plan'&&a.workflow_revision_digest?{workflow_confirmation:a.workflow_revision_digest}:{};
-      actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',()=>api('/api/decide',{id:a.id,allow:true,note:input.value,...confirmation}),'primary'));
+      actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',async()=>{
+        await api('/api/decide',{id:a.id,allow:true,note:input.value,...confirmation});
+        // W05.05.UI（F4）：承認の結果を文で伝える。開始・完了を約束しない。
+        if(a.kind==='plan')notice('計画を承認しました。承認した計画で作業を進めます。機能ごとの確認は、各機能の作業の後に行います。');
+        else if(a.kind==='ai_start')notice('AIによる計画作成の開始を承認しました（1回だけ）。計画ができたら、改めて確認をお願いします。');
+      },'primary'));
     }
     box.append(actions);body.append(box);
   }
@@ -1631,8 +1665,11 @@ function renderDetail(task,version) {
 // 定期的な描き直しで、フォーカスのあるボタンが差し替わっても、同じ印（data-focus-key）のボタンへフォーカスを戻す。
 function currentFocusKey(){return document.activeElement?.dataset?.focusKey||null;}
 let focusPending=false;   // 詳細を閉じた直後は、描き直しでフォーカスを失っても、戻り先（進み具合の見出し）へ戻す
+// 操作の結果で押したボタンが消える場合（機能の確認・差し戻し）は、結果の行へフォーカスを移す（W05.05.UI、F3）。
+let nextFocusKey=null;
 function restoreFocus(key){
   if(document.activeElement&&document.activeElement!==document.body)return;
+  if(!key&&nextFocusKey){key=nextFocusKey;nextFocusKey=null;}
   let target=key&&[...document.querySelectorAll('[data-focus-key]')].find(e=>e.dataset.focusKey===key&&e.offsetParent!==null);
   if(!target&&focusPending){const progress=$('job-progress');target=progress&&!progress.hidden?$('job-progress-title'):$('board');}
   if(target){target.focus({preventScroll:true});focusPending=false;}
