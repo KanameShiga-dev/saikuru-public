@@ -304,6 +304,9 @@ class Context:
         from team_skill_import import SKILLS
         self.skill_dirs = [str(SKILLS / name) for name in sorted(engine.handoff.active_skill_names(self.project))
                            if name != '_inbox' and (SKILLS / name).is_dir()]
+        # Capture before any provider process starts. A second Context for an
+        # already launched attempt must never replace its original baseline.
+        self.native_scope_baseline = engine.capture_native_scope_baseline(task)
 
 
 
@@ -379,6 +382,8 @@ class Context:
             'work_package_id':self.task.get('work_package_id'),
             'attempt_id':(self.task.get('current_attempt') or {}).get('id'),
             'checkpoint_id':(self.task.get('checkpoint_session_binding') or {}).get('checkpoint_id') or self.task.get('resume_checkpoint_id')}
+        if getattr(self, 'native_scope_baseline', None) is not None:
+            self.agent_run['scope_baseline'] = self.native_scope_baseline
 
         with self.engine.store.lock:
 
@@ -5941,10 +5946,48 @@ class Engine:
             proofs.append(dict(item, approval_id=proof['approval_id'], target_digest=proof['target_digest']))
         return dict(observed, reviewed_prior_operations=proofs)
 
+    def capture_native_scope_baseline(self, task):
+        """Pre-provider observation only, with no recovery permission."""
+        from team_p0_contract import checkpoint_scope
+        from team_wbs import scope_file_observation
+        from team_harness import workspace_identity
+        from team_store import StaleAttempt
+        with self.store.lock:
+            job = self.store.get(task['job_id'], 'job')
+            if (job.get('workflow_contract_version') != 1 or task.get('role') != 'builder'
+                    or not task.get('work_package_id')):
+                return None
+            self.store.assert_attempt(task)
+            current = self.store.get(task['id'], 'task')
+            attempt = current['current_attempt']
+            # Reconstructing a Context cannot certify that existing edits
+            # predate this attempt. Missing baselines remain unknown.
+            prior_runs = [current.get('agent_run') or {}, *current.get('agent_run_history', []),
+                          *self.store.for_job('agent_run', job['id'])]
+            if any(run.get('attempt_id') == attempt['id'] for run in prior_runs):
+                return None
+            plan = self.store.get(job.get('plan_approval_id'), 'approval')
+            checkpoint_scope(job, plan)
+        workspace = self.workspace_view(job['id'])
+        if workspace.get('status') != 'ready':
+            raise ProviderError('開始時の作業場所を確認できません。', 'workflow_dispatch', model_call_state='not_started')
+        files = scope_file_observation(job, plan)
+        with self.store.lock:
+            self.store.assert_attempt(task)
+            if (self.store.get(job['id'], 'job') != job
+                    or self.store.get(task['id'], 'task') != current
+                    or self.store.get(plan['id'], 'approval') != plan):
+                raise StaleAttempt('開始時の対象版が変化しました。')
+        return {'contract_version': 1, 'basis': 'attempt_start', 'job_id': job['id'],
+            'task_id': task['id'], 'attempt_id': attempt['id'], 'plan_approval_id': plan['id'],
+            'plan_digest': plan['digest'], 'workspace_identity': workspace_identity(workspace['current']),
+            'files': files}
+
     def native_recovery_assessment(self, task_id, *, actor=None):
         """Maintenance-only evidence preview; never confirmation or permission."""
         from team_wbs import scope_file_observation
         from team_p0_contract import checkpoint_scope
+        from team_harness import workspace_identity
         if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
             raise ValueError('workflow_maintenance_action_required')
         with self.store.lock:
@@ -5970,7 +6013,7 @@ class Engine:
             for other in run_records:
                 if other.get('task_id') == task_id or other.get('attempt_id') == attempt.get('id'):
                     keys = ('id','attempt_id','provider','model','effort','measurement_ids',
-                            'tool_observation_version','tool_calls','started_at')
+                            'tool_observation_version','tool_calls','started_at','scope_baseline')
                     if any(other.get(k) != run.get(k) for k in keys):
                         reasons.append('native_run_records_inconsistent')
             if (type(run.get('tool_observation_version')) is not int or run['tool_observation_version'] != 1
@@ -6019,12 +6062,24 @@ class Engine:
                 counts = approvals[item['kind']]; counts[status] = counts.get(status, 0) + 1
             if approvals['tool']: reasons.append('native_tool_approval_present')
             workspace = self.workspace_view(job['id'])
-            scope = {}; outside = None; changed_count = None
+            scope = {}; outside = None; head_changed_count = None; changed_count = None
             if workspace.get('status') == 'ready':
                 plan = self.store.get(job.get('plan_approval_id'), 'approval')
                 checkpoint_scope(job, plan)
                 scope = scope_file_observation(job, plan)
-                outside = False; changed_count = len(workspace['current']['dirty_changes'])
+                outside = False; head_changed_count = len(workspace['current']['dirty_changes'])
+                baseline = run.get('scope_baseline')
+                expected = {'contract_version': 1, 'basis': 'attempt_start', 'job_id': job['id'],
+                    'task_id': task_id, 'attempt_id': attempt.get('id'), 'plan_approval_id': plan['id'],
+                    'plan_digest': plan['digest'], 'workspace_identity': workspace_identity(workspace['current'])}
+                if (not isinstance(baseline, dict) or type(baseline.get('contract_version')) is not int
+                        or any(baseline.get(k) != v for k, v in expected.items())
+                        or not isinstance(baseline.get('files'), dict) or set(baseline['files']) != set(scope)
+                        or any(value is not None and (not isinstance(value, str) or len(value) != 64
+                            or any(c not in '0123456789abcdef' for c in value)) for value in baseline['files'].values())):
+                    reasons.append('native_scope_baseline_unresolved')
+                else:
+                    changed_count = sum(value != baseline['files'][path] for path, value in scope.items())
             else:
                 outside = True if workspace.get('reason') == 'workspace_dirty_outside_approved_scope' else None
                 reasons.append('native_workspace_unresolved')
@@ -6032,7 +6087,8 @@ class Engine:
                 return value if type(value) in (int, float) and 0 <= value < 1e12 else None
             summary = {'tool_calls_observed': calls, 'outbound_guard': {'count': outbound, 'types': guard_types},
                 'approvals': approvals, 'scope_changed_files': changed_count, 'outside_scope_changes': outside,
-                'scope_change_basis': 'git_head',
+                'scope_change_basis': 'attempt_start' if changed_count is not None else 'unknown',
+                'git_head_changed_files': head_changed_count,
                 'started_at': timestamp(run.get('started_at')), 'closed_at': timestamp(attempt.get('closed_at')),
                 'attempt_status': attempt.get('status') if attempt.get('status') in ('closed','fenced') else 'unknown',
                 'stop_reason_code': stop_reason,

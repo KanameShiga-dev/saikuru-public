@@ -307,7 +307,8 @@ class NativeAssessmentTests(unittest.TestCase):
             'model': task['profile']['model'], 'effort': task['profile'].get('effort'),
             'attempt_id': task['current_attempt']['id'], 'started_at': task['current_attempt']['started_at'],
             'measurement_ids': {'job_id': self.job_id, 'task_id': self.task_id, 'attempt_id': task['current_attempt']['id']},
-            'tool_observation_version': 1, 'tool_calls': {'fileChange': 1}}
+            'tool_observation_version': 1, 'tool_calls': {'fileChange': 1},
+            'scope_baseline': self.engine.capture_native_scope_baseline(task)}
         self.store.update(self.task_id, agent_run=self.run)
         path = self.f.f.workspace.project / 'app.py'
         path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC native file edit\n')
@@ -332,7 +333,9 @@ class NativeAssessmentTests(unittest.TestCase):
         self.assertEqual(result['execution_permission'], 'none'); self.assertFalse(result['reconciliation_recorded'])
         self.assertEqual(result['summary']['tool_calls_observed'], {'fileChange': 1})
         self.assertFalse(result['summary']['outside_scope_changes'])
-        self.assertGreaterEqual(result['summary']['scope_changed_files'], 1)
+        self.assertEqual(result['summary']['scope_changed_files'], 1)
+        self.assertEqual(result['summary']['scope_change_basis'], 'attempt_start')
+        self.assertGreaterEqual(result['summary']['git_head_changed_files'], 2)
         self.assertEqual(result['summary']['external_effects'], 'unconfirmed')
         self.assertEqual(result['summary']['stop_reason_code'], 'restart')
         self.assertEqual(self.f.f.state(), before)
@@ -401,6 +404,71 @@ class NativeAssessmentTests(unittest.TestCase):
             self.assertEqual(code, 200); self.assertFalse(result['eligible_for_reconciliation'])
             self.assertIn('native_run_identity_unresolved', result['reasons'])
             self.assertEqual(self.f.f.state(), before)
+
+    def test_missing_baseline_is_unknown_and_does_not_use_head_as_attempt_evidence(self):
+        run = dict(self.run); run.pop('scope_baseline')
+        self.store.update(self.task_id, agent_run=run)
+        result = self.assess()[1]
+        self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertIn('native_scope_baseline_unresolved', result['reasons'])
+        self.assertIsNone(result['summary']['scope_changed_files'])
+        self.assertEqual(result['summary']['scope_change_basis'], 'unknown')
+
+    def test_baseline_identity_and_file_set_must_match_current_approval(self):
+        original = self.run['scope_baseline']
+        for changes in ({'attempt_id': 'fictional-other-attempt'}, {'plan_digest': '0' * 64},
+                        {'contract_version': True}, {'files': {}}, {'files': dict(original['files'], **{'app.py': 'unknown'})}):
+            self.store.update(self.task_id, agent_run=dict(self.run, scope_baseline=dict(original, **changes)))
+            result = self.assess()[1]
+            self.assertFalse(result['eligible_for_reconciliation'])
+            self.assertIn('native_scope_baseline_unresolved', result['reasons'])
+
+
+class NativeBaselineCaptureTests(unittest.TestCase):
+    def setUp(self):
+        from tests import test_workflow_api as fixtures
+        self.f = fixtures.WorkflowApiTests(); self.addCleanup(self.f.doCleanups); self.f.setUp()
+        self.engine, self.store = self.f.engine, self.f.store
+        self.task = self.engine._reserve_workflow_attempt(self.f.f.first,
+            self.engine.workflow_dispatch_view(self.f.f.job_id))
+
+    def test_actual_context_captures_before_agent_start_and_never_recaptures_launched_attempt(self):
+        from team_engine import Context
+        from team_common_agents import load_agent
+        self.engine.commands = {'codex': ['fictional-never-launched'], 'claude': ['fictional-never-launched']}
+        self.engine.usage_snapshot = lambda: {}
+        ctx = Context(self.engine, self.task)
+        baseline = ctx.native_scope_baseline
+        self.assertEqual(baseline['attempt_id'], self.task['current_attempt']['id'])
+        path = self.f.f.workspace.project / 'app.py'
+        path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC after capture\n')
+        ctx.prepare_agent(load_agent('builder', self.task['profile']['adapter']))
+        self.assertEqual(self.store.get(self.task['id'])['agent_run']['scope_baseline'], baseline)
+        self.assertIsNone(self.engine.capture_native_scope_baseline(self.task))
+        self.assertEqual(self.store.get(self.task['id'])['agent_run']['scope_baseline'], baseline)
+
+    def test_capture_observes_files_outside_store_lock_and_rejects_changed_authority(self):
+        from unittest.mock import patch
+        from team_store import StaleAttempt
+        from team_wbs import scope_file_observation
+        def observe(job, plan):
+            acquired = []
+            def independent_reader():
+                ok = self.store.lock.acquire(blocking=False); acquired.append(ok)
+                if ok: self.store.lock.release()
+            thread = threading.Thread(target=independent_reader); thread.start(); thread.join(2)
+            self.assertEqual(acquired, [True])
+            self.store.update(job['id'], synthetic_changed_authority=True)
+            return scope_file_observation(job, plan)
+        with patch('team_wbs.scope_file_observation', side_effect=observe):
+            with self.assertRaises(StaleAttempt):
+                self.engine.capture_native_scope_baseline(self.task)
+
+    def test_stale_attempt_cannot_capture_a_new_baseline(self):
+        from team_store import StaleAttempt
+        self.store.recover()
+        with self.assertRaises(StaleAttempt):
+            self.engine.capture_native_scope_baseline(self.task)
 
 
 class CodexItemObservationTests(unittest.TestCase):
