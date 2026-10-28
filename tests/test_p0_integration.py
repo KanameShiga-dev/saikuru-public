@@ -136,6 +136,9 @@ class WorkflowApiIntegrationTests(unittest.TestCase):
                 self.assertEqual(code, 200, result); self.assertFalse(result['queued'])
                 draft = engine.collect_checkpoint(builder['id'], writer_stopped=True)
                 self.assertTrue(engine.finalize_checkpoint(draft['id'], writer_stopped=True)['handoff_synced'])
+                self.assertTrue(engine._checkpoint_work_package_dispatch_valid(builder['id']))
+                assessment = engine.assess_checkpoint_resume(builder['id'], writer_stopped=True)
+                self.assertEqual(assessment['status'], 'candidate', assessment)
                 retry = {'action': 'retry_task', 'job_id': job_id, 'task_id': builder['id'],
                          'target': engine.workflow_control_target(job_id, 'retry_task', builder['id']),
                          'checked_changes': True, 'note': 'SYNTHETIC crash inspected', 'handoff_allowed': False}
@@ -180,6 +183,71 @@ class WorkflowApiIntegrationTests(unittest.TestCase):
         self.assertEqual(f.request('/api/jobs/formal-acceptance', body)[0], 400)
         self.assertEqual(len(store.job_events(job_id, 'formal_acceptance_decided')), 1)
         self.assertEqual(len(decided), 2)
+
+
+class ReviewedOperationRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        from tests import test_workflow_api as fixtures
+        from unittest.mock import patch
+        self.f = fixtures.WorkflowApiTests(); self.addCleanup(self.f.doCleanups); self.f.setUp()
+        original = Context.command_result
+        def correlated(context, command, code, output, timed_out=False):
+            operation_id = 'synthetic-prior-' + str(len(self.f.store.job_events(self.f.f.job_id, 'operation_result')))
+            context.command_started(command, operation_id)
+            return original(context, command, code, output, timed_out, operation_id=operation_id)
+        bridge = patch.object(Context, 'command_result', new=correlated)
+        bridge.start(); self.addCleanup(bridge.stop)
+        review = self.f.f.ready_feature(); self.f.f.approve(review)
+        view = self.f.engine.workflow_dispatch_view(self.f.f.job_id)
+        self.target = self.f.engine._reserve_workflow_attempt(self.f.store.get(view['candidate_task_id']), view)
+
+    def stop(self):
+        self.f.store.recover()
+        return self.f.store.get(self.target['id']), self.f.f.job()
+
+    def test_prior_review_is_valid_only_while_current_feature_receipt_is_approved(self):
+        task, job = self.stop()
+        basis = self.f.engine._reviewed_operation_basis(task, job)
+        self.assertTrue(basis['reviewed_prior_operations'])
+        self.f.store.update(self.f.f.wp()['id'], review_status='invalidated')
+        with self.assertRaises(ValueError): self.f.engine._reviewed_operation_basis(task, job)
+
+    def test_prior_artifact_change_invalidates_basis_without_mutating_state(self):
+        task, job = self.stop()
+        path = self.f.f.workspace.project / 'app.py'
+        path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC changed after review\n')
+        before = self.f.f.state()
+        with self.assertRaises(ValueError): self.f.engine._reviewed_operation_basis(task, job)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_target_attempt_operation_is_not_covered_by_another_feature_review(self):
+        context = Context.__new__(Context); context.engine = self.f.engine; context.task = self.target
+        context.command_result('python -B -m unittest', 0, 'SYNTHETIC target action')
+        task, job = self.stop()
+        with self.assertRaises(ValueError): self.f.engine._reviewed_operation_basis(task, job)
+
+    def test_store_recovery_without_engine_revalidation_still_refuses_prior_operations(self):
+        task, job = self.stop()
+        before = self.f.f.state()
+        with self.assertRaises(ValueError):
+            self.f.store.confirm_recovery(task['id'], task['state_revision'], job['state_revision'],
+                                          task['current_attempt']['id'])
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_proposed_retry_checks_the_real_wp_approval_without_queuing(self):
+        task, job = self.stop()
+        self.f.engine.confirm_recovery(task['id'], task['state_revision'], job['state_revision'],
+                                       task['current_attempt']['id'], writer_stopped=True, checked_changes=True)
+        self.assertTrue(self.f.engine._checkpoint_work_package_dispatch_valid(task['id']))
+        self.assertEqual(self.f.store.get(task['id'])['status'], 'interrupted')
+        self.f.store.update(task['id'], spec_source_approval_id='fictional-foreign-plan')
+        before = self.f.f.state()
+        try:
+            valid = self.f.engine._checkpoint_work_package_dispatch_valid(task['id'])
+        except (ValueError, KeyError, TypeError):
+            valid = False
+        self.assertFalse(valid)
+        self.assertEqual(self.f.f.state(), before)
 
 
 if __name__ == '__main__':

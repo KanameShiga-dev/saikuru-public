@@ -285,5 +285,14 @@ class OperationCorrelationTests(unittest.TestCase):
         self.assertEqual(len(self.events()[0]), 1)
         self.assertTrue(self.f.store.operation_assessment(self.f.job['id'])['unresolved'])
 
+    def test_launched_native_worker_without_effect_reconciliation_still_blocks(self):
+        self.f.store.update(self.ctx.task['id'], agent_run={
+            'id': 'fictional-native-run', 'attempt_id': self.ctx.task['current_attempt']['id']})
+        self.f.store.recover()
+        before = self.f.store.get(self.ctx.task['id'])
+        with self.assertRaisesRegex(ValueError, '担当プロセスの作用が未照合'):
+            self.f.engine._recovery_control_inputs(self.ctx.task['id'])
+        self.assertEqual(self.f.store.get(self.ctx.task['id']), before)
+
 
 if __name__ == '__main__': unittest.main()

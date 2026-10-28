@@ -3335,6 +3335,25 @@ class Engine:
             self.store.update(task['id'], context_save_request=request)
             return request
 
+    def _checkpoint_reference_snapshot(self, job, task):
+        from team_checkpoint import reference_snapshot
+        refs = reference_snapshot(self.store, self.handoff, job, task)
+        if not refs['operation_refs']:
+            return refs
+        try:
+            basis = self._reviewed_operation_basis(task, job)
+        except (ValueError, KeyError, TypeError, OSError):
+            return refs  # Keep every unresolved ref; draft/finalize remain blocked.
+        by_seq = {}
+        for item in basis.get('reviewed_prior_operations') or []:
+            proof = {k: item[k] for k in ('approval_id', 'target_digest', 'operation_id', 'attempt_id', 'task_id')}
+            for seq in item['event_seqs']:
+                by_seq[seq] = proof
+        for item in refs['operation_refs']:
+            if item['seq'] in by_seq:
+                item['reviewed_prior'] = by_seq[item['seq']]
+        return refs
+
     def _checkpoint_inputs(self, task_id, writer_stopped):
         from team_checkpoint import reference_snapshot, CheckpointUnavailable
         from team_p0_contract import checkpoint_scope
@@ -3358,7 +3377,7 @@ class Engine:
                     raise CheckpointUnavailable('停止未確認の担当がいるためCheckpointを確定できません。')
         approval = self.store.get(job.get('plan_approval_id'), 'approval')
         paths = checkpoint_scope(job, approval)
-        refs = reference_snapshot(self.store, self.handoff, job, task)
+        refs = self._checkpoint_reference_snapshot(job, task)
         if any(item['path'] not in paths for item in refs['artifact_refs']):
             raise ValueError('成果物がCheckpointの承認範囲に含まれていません。')
         return job, task, paths, refs
@@ -3538,7 +3557,7 @@ class Engine:
         try:
             approval = self.store.get(job.get('plan_approval_id'), 'approval')
             paths = checkpoint_scope(job, approval)
-            refs = reference_snapshot(self.store, self.handoff, job, task)
+            refs = self._checkpoint_reference_snapshot(job, task)
         except (ValueError, KeyError, TypeError):
             raise Blocked('approval_or_authority_changed') from None
         collection_ref = record.get('collection_ref')
@@ -3549,6 +3568,38 @@ class Engine:
         synced = self.handoff.checkpoint_receipt(job['project'], record, event)
         tasks = self.store.for_job('task', job['id'])
         return record, job, task, paths, refs, tasks, synced
+
+    def _checkpoint_work_package_dispatch_valid(self, task_id):
+        """Validate the actual WP DAG for a proposed retry, without queuing it."""
+        from team_wbs import dispatch_state, validate_input_artifacts
+        from team_p0_contract import artifact_records
+        store = self.store
+        task = store.get(task_id, 'task'); job_id = task['job_id']
+        if task.get('recovery_check_required') or (task.get('current_attempt') or {}).get('status') == 'running':
+            return False
+        class RetryView:
+            # Only the two transitions that the separate, authenticated retry
+            # would perform. All approvals, WP generations and evidence stay real.
+            def __getattr__(self, name): return getattr(store, name)
+            def projected(self, value):
+                if value.get('id') == job_id: return dict(value, status='running')
+                if value.get('id') == task_id: return dict(value, status='queued')
+                return value
+            def get(self, *args, **kwargs): return self.projected(store.get(*args, **kwargs))
+            def for_job(self, *args, **kwargs): return [self.projected(v) for v in store.for_job(*args, **kwargs)]
+            def all(self, *args, **kwargs): return [self.projected(v) for v in store.all(*args, **kwargs)]
+        observed = dispatch_state(RetryView(), job_id, active=set(self.active))
+        if observed['status'] != 'ready' or observed.get('candidate_task_id') != task_id:
+            return False
+        # dispatch_state above validates membership/source against the retry
+        # view. The normal execution guard still requires a real running job.
+        if self.workspace_view(job_id).get('status') != 'ready':
+            return False
+        validate_input_artifacts(observed['descriptor']['input_refs'], store.get(job_id, 'job'))
+        for path, sha in observed['descriptor']['dependency_files'].items():
+            if artifact_records(store.get(job_id)['project'], [path]) != [{'path': path, 'sha256': sha}]:
+                return False
+        return True
 
     def assess_checkpoint_resume(self, task_id, *, writer_stopped=False):
         """Read-only local assessment. No retry, reservation, approval or restore.
@@ -3594,7 +3645,8 @@ class Engine:
                     extra.append('work_package_state_changed')
                 # WP DAG and feature decisions are independent authorities. This
                 # local Task.after assessment must not imply WP dispatch approval.
-                if any(item.get('work_package_id') for item in tasks):
+                if (any(item.get('work_package_id') for item in tasks)
+                        and not self._checkpoint_work_package_dispatch_valid(task_id)):
                     extra.append('work_package_dispatch_review_required')
                 if extra:
                     result.update(status='blocked', candidate_task_ids=[], reasons=sorted(set(result['reasons']) | set(extra)))
@@ -3714,7 +3766,7 @@ class Engine:
                     or (source.get('current_attempt') or {}).get('status') not in ('closed', 'fenced')
                     or (source.get('current_attempt') or {}).get('id') != binding['source_attempt_id']):
                 raise ValueError('checkpoint_session_source_changed')
-            refs = reference_snapshot(self.store, self.handoff, job, source)
+            refs = self._checkpoint_reference_snapshot(job, source)
             if continuation_reference_digest(refs, task['id']) != binding['reference_digest']:
                 raise ValueError('checkpoint_session_authority_changed')
             roots = self.config['approved_roots']
@@ -3736,7 +3788,7 @@ class Engine:
             current_job = self.store.get(job['id'], 'job')
             current_source = self.store.get(source['id'], 'task')
             if (current != task or current_job != job or current_source != source
-                    or reference_snapshot(self.store, self.handoff, job, source) != refs):
+                    or self._checkpoint_reference_snapshot(job, source) != refs):
                 raise ValueError('checkpoint_session_inputs_changed')
         ctx.agent_run['checkpoint_session'] = metadata
         return json.dumps({'checkpoint_reference': metadata, 'current_domain_context': manifest}, ensure_ascii=False)
@@ -6007,6 +6059,8 @@ class Engine:
                     actual, _ = self._recovery_retry_binding(task_id)
                     if recovery_expected is None or actual != recovery_expected:
                         raise ValueError('再試行の確認後に状態が変化しました。')
+                    if task.get('work_package_id') and not self._checkpoint_work_package_dispatch_valid(task_id):
+                        raise ValueError('work_package_dispatch_review_required')
                 if task.get('role') != 'planner':
                     approval = self.store.get(task_job.get('plan_approval_id'), 'approval')
                     if approval.get('job_id') != task_job['id'] or approval.get('status') != 'approved' or approval.get('kind') != 'plan':

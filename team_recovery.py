@@ -331,7 +331,8 @@ def checkpoint_recovery_decision(job, task, tasks, record, refs, workspace, asse
                         ('artifact_refs', 'artifact_references_changed'), ('operation_refs', 'operation_reconciliation_required')):
         if record.get(field) != refs.get(field):
             reasons.add(code); affected |= all_ids
-    if record.get('operation_refs') or record.get('resume_preconditions') != ['checkpoint_not_ready']:
+    from team_checkpoint import operations_reconciled
+    if not operations_reconciled(record) or record.get('resume_preconditions') != ['checkpoint_not_ready']:
         reasons.add('operation_reconciliation_required'); affected |= all_ids
     if workspace['head_changed']:
         reasons.add('git_head_changed'); affected |= all_ids

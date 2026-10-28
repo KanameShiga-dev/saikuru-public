@@ -42,9 +42,32 @@ def checkpoint_digest(record):
     return digest({key: value for key, value in record.items() if key not in mutable})
 
 
+def operations_reconciled(refs):
+    """A closed prior WP receipt must accompany every immutable operation ref.
+
+    Engine rederives these receipts and file hashes at every checkpoint gate.
+    This shape check alone never grants an API caller permission to resume.
+    """
+    for item in refs.get('operation_refs') or []:
+        if (not isinstance(item, dict) or set(item) != {'origin', 'table', 'seq', 'state_digest', 'reviewed_prior'}
+                or item['origin'] != 'store' or item['table'] != 'events'
+                or type(item['seq']) is not int or item['seq'] < 1
+                or not isinstance(item['state_digest'], str) or not HEX.fullmatch(item['state_digest'])):
+            return False
+        proof = item['reviewed_prior']
+        if (not isinstance(proof, dict) or set(proof) != {'approval_id', 'target_digest', 'operation_id', 'attempt_id', 'task_id'}
+                or any(not isinstance(proof[key], str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', proof[key])
+                       for key in ('approval_id', 'attempt_id', 'task_id'))
+                or any(not isinstance(proof[key], str) or not HEX.fullmatch(proof[key])
+                       for key in ('target_digest', 'operation_id'))
+                or proof['task_id'] == refs.get('task_id')):
+            return False
+    return True
+
+
 def draft_preconditions(refs, collection):
     result = ['checkpoint_not_ready']
-    if refs['operation_refs']:
+    if not operations_reconciled(refs):
         result.append('operation_reconciliation_required')
     if refs['handoff_observation']['unresolved_conflicts']:
         result.append('handoff_conflicts')
