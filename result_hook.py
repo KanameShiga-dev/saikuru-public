@@ -75,6 +75,7 @@ def main():
         if isinstance(safe_command, str) and safe_command.startswith('[EGRESS_BLOCKED:'):
             safe_command = '[sensitive command withheld]'
         payload = json.dumps({'task_id': os.environ['AGENT_TEAM_TASK'], 'tool': 'Bash',
+                              'operation_id': data.get('tool_use_id'),
                               'command': safe_command,
                               'exit_code': exit_code, 'output': output[-20000:], 'timed_out': timed_out}).encode()
         request = urllib.request.Request(os.environ['AGENT_TEAM_ENDPOINT'] + '/worker/tool-result', data=payload,

@@ -46,7 +46,8 @@ class ClaudeHookTest(unittest.TestCase):
         env = dict(os.environ, AGENT_TEAM_TASK='t1', AGENT_TEAM_RUN_TOKEN='tok',
                    AGENT_TEAM_ENDPOINT='http://127.0.0.1:%d' % server.server_port)
         hook = Path(__file__).with_name('result_hook.py')
-        data = {'tool_name': 'Bash', 'tool_input': {'command': 'python -m unittest'},
+        data = {'tool_name': 'Bash', 'tool_use_id': 'fictional-hook-operation',
+                'tool_input': {'command': 'python -m unittest'},
                 'tool_response': {'stdout': 'Ran 4 tests\nOK', 'stderr': '', 'interrupted': False}}
         done = subprocess.run([sys.executable, str(hook)], input=json.dumps(data), text=True, env=env,
                               capture_output=True, timeout=30)
@@ -55,6 +56,7 @@ class ClaudeHookTest(unittest.TestCase):
         path, auth, body = seen[0]
         self.assertEqual((path, auth), ('/worker/tool-result', 'Bearer tok'))
         self.assertEqual((body['task_id'], body['tool'], body['command']), ('t1', 'Bash', 'python -m unittest'))
+        self.assertEqual(body['operation_id'], 'fictional-hook-operation')
         self.assertIn('Ran 4 tests', body['output'])
         # Other tools and an unreachable 采来 are ignored silently.
         data['tool_name'] = 'Read'

@@ -610,12 +610,33 @@ class Context:
                     total[key] = total.get(key, 0) + value
         self.engine.store.update(self.task['id'], agent_run=self.agent_run)
 
+    def _operation_details(self, operation_id=None):
+        """Opaque correlation only; absent provider IDs never imply a pair."""
+        attempt_id = (self.task.get('current_attempt') or {}).get('id')
+        correlated = (isinstance(operation_id, str) and 0 < len(operation_id) <= 256
+                      and not any(ord(c) < 32 for c in operation_id))
+        opaque = hashlib.sha256(json.dumps([self.task['id'], attempt_id, operation_id],
+                                          separators=(',', ':')).encode()).hexdigest() if correlated else uid()
+        return {'attempt_id': attempt_id, 'work_package_id': self.task.get('work_package_id'),
+                'operation_id': opaque, 'correlated': correlated}
+
     @_attempt_callback
-    def command_result(self, command, exit_code, output, timed_out=False):
+    def command_started(self, command, operation_id=None):
+        from team_web_guard import operation_summary
+        self.engine.store.event('operation_bash', operation_summary(command),
+                                self.task['id'], self.task['job_id'],
+                                dict(self._operation_details(operation_id),
+                                     command_digest=hashlib.sha256(str(command).encode()).hexdigest()))
+
+    @_attempt_callback
+    def command_result(self, command, exit_code, output, timed_out=False, *, operation_id=None):
         """Record a command's result as 采来 received it from the provider (exit code + masked output tail)."""
         from team_security_audit import result_message
+        details = dict(self._operation_details(operation_id),
+                       command_digest=hashlib.sha256(str(command).encode()).hexdigest(),
+                       exit_code=exit_code if type(exit_code) is int else None, timed_out=timed_out is True)
         self.engine.store.event('operation_result', result_message(command, exit_code, output, timed_out),
-                                self.task['id'], self.task['job_id'])
+                                self.task['id'], self.task['job_id'], details)
         from team_validation_gate import record_result
         from team_code_test_contract import commands
         from team_validation_evidence import snapshot
@@ -6122,7 +6143,8 @@ class Engine:
             return {'ok': False}
         exit_code = body.get('exit_code')
         ctx.command_result(str(body.get('command', ''))[:8000], exit_code if type(exit_code) is int else None,
-                           str(body.get('output', '')), body.get('timed_out') is True)
+                           str(body.get('output', '')), body.get('timed_out') is True,
+                           operation_id=body.get('operation_id'))
         return {'ok': True}
 
     def tool_request(self, token, body):
@@ -6209,8 +6231,7 @@ class Engine:
                     return {'allow': False, 'note': '経路比較中はコマンドによる変更を禁止しています。編集ツールを使ってください。'}
 
             # Keep the command for the security review (auto-approval otherwise leaves no trace of it).
-            from team_web_guard import operation_summary
-            self.store.event('operation_bash', operation_summary(data.get('command', '')), ctx.task['id'], ctx.task['job_id'])
+            ctx.command_started(data.get('command', ''), body.get('operation_id'))
             # Scripts of imported skills: only skills active in this project, only files unchanged since import.
             from team_skill_import import script_check
             verdict = script_check(data.get('command', ''), self.handoff.active_skill_names(ctx.project))

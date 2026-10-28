@@ -153,4 +153,103 @@ class WorkflowRecoveryApiIntegrationTests(unittest.TestCase):
         self.assertTrue(f.store.get(f.task_id)['recovery_check_required'])
 
 
+class OperationCorrelationTests(unittest.TestCase):
+    def setUp(self):
+        from tests import test_checkpoint_collection as fixtures
+        from team_engine import Context
+        self.f = fixtures.EngineDraftTests(); self.addCleanup(self.f.doCleanups); self.f.setUp()
+        task = self.f.store.update(self.f.task['id'], status='queued')
+        task = self.f.store.reserve_attempt(task['id'], task['state_revision'])
+        self.ctx = Context.__new__(Context); self.ctx.engine = self.f.engine; self.ctx.task = task
+
+    def events(self):
+        return (self.f.store.job_events(self.f.job['id'], 'operation_bash'),
+                self.f.store.job_events(self.f.job['id'], 'operation_result'))
+
+    def test_explicit_provider_id_pairs_start_and_result_without_persisting_raw_id(self):
+        raw = 'fictional-provider-operation'
+        self.ctx.command_started('python -B -m unittest', raw)
+        self.ctx.command_result('python -B -m unittest', 0, 'SYNTHETIC OK', operation_id=raw)
+        starts, results = self.events()
+        a, b = starts[-1]['details'], results[-1]['details']
+        self.assertEqual(a['operation_id'], b['operation_id'])
+        self.assertEqual(a['attempt_id'], self.ctx.task['current_attempt']['id'])
+        self.assertTrue(a['correlated']); self.assertTrue(b['correlated'])
+        self.assertNotIn(raw, str(starts + results))
+        self.assertEqual(b['exit_code'], 0); self.assertFalse(b['timed_out'])
+
+    def test_missing_or_invalid_provider_ids_are_not_inferred_from_same_command(self):
+        for value in (None, '', 'x' * 257, 'fictional\ninvalid'):
+            self.ctx.command_started('python -B -m unittest', value)
+            self.ctx.command_result('python -B -m unittest', 0, 'SYNTHETIC OK', operation_id=value)
+        starts, results = self.events()
+        self.assertTrue(all(not e['details']['correlated'] for e in starts + results))
+        self.assertTrue(set(e['details']['operation_id'] for e in starts).isdisjoint(
+            e['details']['operation_id'] for e in results))
+
+    def test_fenced_attempt_cannot_record_a_late_correlated_result(self):
+        from team_store import StaleAttempt
+        self.ctx.command_started('python -B -m unittest', 'fictional-one')
+        self.f.store.close_attempt(self.ctx.task['id'], 'fenced', 'synthetic interrupted')
+        before = self.events()
+        with self.assertRaises(StaleAttempt):
+            self.ctx.command_result('python -B -m unittest', 0, 'SYNTHETIC late', operation_id='fictional-one')
+        self.assertEqual(self.events(), before)
+
+    def test_pair_assessment_is_read_only_and_grants_no_resume_permission(self):
+        self.ctx.command_started('python -B -m unittest', 'fictional-assessed')
+        self.ctx.command_result('python -B -m unittest', 0, 'SYNTHETIC OK', operation_id='fictional-assessed')
+        before = self.events()
+        view = self.f.store.operation_assessment(self.f.job['id'])
+        self.assertEqual(len(view['result_observed']), 1); self.assertEqual(view['unresolved'], [])
+        self.assertEqual(view['execution_permission'], 'none'); self.assertFalse(view['effects_reconciled'])
+        self.assertEqual(self.events(), before)
+
+    def test_unmatched_start_and_legacy_result_remain_unresolved(self):
+        self.ctx.command_started('python -B -m unittest', 'fictional-unfinished')
+        self.f.store.event('operation_result', 'SYNTHETIC legacy result', self.ctx.task['id'], self.f.job['id'])
+        view = self.f.store.operation_assessment(self.f.job['id'])
+        self.assertEqual(view['result_observed'], [])
+        self.assertEqual({x['code'] for x in view['unresolved']},
+                         {'operation_identity_unresolved', 'operation_pair_incomplete_or_duplicate'})
+
+    def test_duplicate_result_is_not_reconciled_and_invalidates_digest(self):
+        self.ctx.command_started('python -B -m unittest', 'fictional-duplicate')
+        self.ctx.command_result('python -B -m unittest', 0, 'SYNTHETIC OK', operation_id='fictional-duplicate')
+        first = self.f.store.operation_assessment(self.f.job['id'])
+        self.ctx.command_result('python -B -m unittest', 0, 'SYNTHETIC duplicate', operation_id='fictional-duplicate')
+        second = self.f.store.operation_assessment(self.f.job['id'])
+        self.assertNotEqual(first['operation_digest'], second['operation_digest'])
+        self.assertEqual(second['result_observed'], []); self.assertTrue(second['unresolved'])
+
+    def test_foreign_attempt_and_unknown_operation_type_fail_closed(self):
+        details = dict(self.ctx._operation_details('fictional-forged'), attempt_id='fictional-foreign')
+        self.f.store.event('operation_result', 'SYNTHETIC foreign attempt', self.ctx.task['id'], self.f.job['id'], details)
+        self.f.store.event('operation_unknown', 'SYNTHETIC unknown effect', self.ctx.task['id'], self.f.job['id'])
+        view = self.f.store.operation_assessment(self.f.job['id'])
+        self.assertEqual(view['result_observed'], []); self.assertEqual(len(view['unresolved']), 2)
+
+    def test_same_id_does_not_pair_different_commands(self):
+        self.ctx.command_started('python -B -m unittest', 'fictional-mismatch')
+        self.ctx.command_result('python different.py', 0, 'SYNTHETIC different result', operation_id='fictional-mismatch')
+        view = self.f.store.operation_assessment(self.f.job['id'])
+        self.assertEqual(view['result_observed'], [])
+        self.assertEqual(view['unresolved'][0]['code'], 'operation_command_changed')
+
+    def test_timeout_and_unknown_exit_code_are_uncertain_even_with_matching_ids(self):
+        for identifier, code, timeout in [('fictional-timeout', 0, True), ('fictional-unknown', None, False)]:
+            self.ctx.command_started('python -B -m unittest', identifier)
+            self.ctx.command_result('python -B -m unittest', code, 'SYNTHETIC uncertain', timeout, operation_id=identifier)
+        view = self.f.store.operation_assessment(self.f.job['id'])
+        self.assertEqual(view['result_observed'], []); self.assertEqual(len(view['unresolved']), 2)
+        self.assertTrue(all(x['code'] == 'operation_result_uncertain' for x in view['unresolved']))
+
+    def test_result_before_start_is_not_a_valid_pair(self):
+        self.ctx.command_result('python -B -m unittest', 0, 'SYNTHETIC early', operation_id='fictional-reordered')
+        self.ctx.command_started('python -B -m unittest', 'fictional-reordered')
+        view = self.f.store.operation_assessment(self.f.job['id'])
+        self.assertEqual(view['result_observed'], [])
+        self.assertEqual(view['unresolved'][0]['code'], 'operation_order_invalid')
+
+
 if __name__ == '__main__': unittest.main()

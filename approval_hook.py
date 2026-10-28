@@ -17,6 +17,7 @@ def main():
                 'permissionDecisionReason': 'Allow the CLI structured result formatter only.'}}))
             return
         payload = json.dumps({'task_id': os.environ['AGENT_TEAM_TASK'],
+                              'operation_id': data.get('tool_use_id'),
                               'tool': data.get('tool_name', ''), 'input': data.get('tool_input', {}),
                               'cwd': data.get('cwd', '')}).encode()
         request = urllib.request.Request(os.environ['AGENT_TEAM_ENDPOINT'] + '/worker/tool', data=payload,

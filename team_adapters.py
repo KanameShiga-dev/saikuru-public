@@ -270,6 +270,10 @@ class CodexAdapter:
                     ctx.event('未対応の要求を拒否: ' + method)
             elif method == 'item/started':
                 item = params.get('item', {})
+                if item.get('type') == 'commandExecution' and hasattr(ctx, 'command_started'):
+                    command = item.get('command')
+                    ctx.command_started(' '.join(map(str, command)) if isinstance(command, list)
+                                        else str(command or ''), item.get('id'))
                 if item.get('type') == 'fileChange':
                     key = (params.get('threadId'), params.get('turnId'), item.get('id'))
                     if all(key) and len(file_changes) < 100:
@@ -284,7 +288,7 @@ class CodexAdapter:
                     command = item.get('command')
                     ctx.command_result(' '.join(map(str, command)) if isinstance(command, list) else str(command or ''),
                                        item.get('exitCode') if isinstance(item.get('exitCode'), int) else None,
-                                       str(item.get('aggregatedOutput') or ''))
+                                       str(item.get('aggregatedOutput') or ''), operation_id=item.get('id'))
             elif method == 'thread/tokenUsage/updated':
                 ctx.record_usage((params.get('tokenUsage') or {}).get('total', {}))
             return method, params

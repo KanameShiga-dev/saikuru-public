@@ -1,5 +1,6 @@
 """Durable task state. All state transitions are serialized in this process."""
 import copy
+import hashlib
 import json
 import sqlite3
 import threading
@@ -350,6 +351,66 @@ class Store:
         with self.lock:
             return bool(self.db.execute("SELECT 1 FROM events WHERE json_extract(body,'$.job_id')=? "
                 "AND json_extract(body,'$.type') GLOB 'operation_*' LIMIT 1", (job_id,)).fetchone())
+
+    def operation_assessment(self, job_id):
+        """Read-only protocol pairing; observed results are never resume permission."""
+        with self.lock:
+            self.get(job_id, 'job')
+            rows = [(seq, json.loads(body)) for seq, body in self.db.execute(
+                "SELECT seq,body FROM events WHERE json_extract(body,'$.job_id')=? ORDER BY seq", (job_id,))]
+            attempts = {}
+            for seq, event in rows:
+                if event.get('type') == 'attempt_started':
+                    key = (event.get('task_id'), (event.get('details') or {}).get('attempt_id'))
+                    attempts.setdefault(key, []).append(seq)
+            groups, unresolved = {}, []
+            operations = [(seq, e) for seq, e in rows if str(e.get('type', '')).startswith('operation_')]
+            for seq, event in operations:
+                details = event.get('details') or {}
+                task_id, attempt_id = event.get('task_id'), details.get('attempt_id')
+                operation_id = details.get('operation_id')
+                valid = (event.get('type') in ('operation_bash', 'operation_result')
+                         and details.get('correlated') is True and isinstance(attempt_id, str)
+                         and isinstance(operation_id, str) and len(operation_id) == 64
+                         and all(c in '0123456789abcdef' for c in operation_id)
+                         and len(attempts.get((task_id, attempt_id), [])) == 1
+                         and attempts[(task_id, attempt_id)][0] < seq)
+                if valid:
+                    try:
+                        task = self.get(task_id, 'task')
+                        valid = task.get('job_id') == job_id and details.get('work_package_id') == task.get('work_package_id')
+                    except (ValueError, KeyError, TypeError):
+                        valid = False
+                if not valid:
+                    unresolved.append({'event_seq': seq, 'code': 'operation_identity_unresolved'})
+                    continue
+                groups.setdefault((task_id, attempt_id, operation_id), []).append((seq, event))
+            observed = []
+            for (task_id, attempt_id, operation_id), items in groups.items():
+                starts = [(seq, e) for seq, e in items if e['type'] == 'operation_bash']
+                results = [(seq, e) for seq, e in items if e['type'] == 'operation_result']
+                code = None
+                if len(starts) != 1 or len(results) != 1:
+                    code = 'operation_pair_incomplete_or_duplicate'
+                elif starts[0][0] >= results[0][0]:
+                    code = 'operation_order_invalid'
+                elif (not isinstance(starts[0][1]['details'].get('command_digest'), str)
+                      or len(starts[0][1]['details']['command_digest']) != 64
+                      or starts[0][1]['details']['command_digest'] != results[0][1]['details'].get('command_digest')):
+                    code = 'operation_command_changed'
+                elif (type(results[0][1]['details'].get('exit_code')) is not int
+                      or results[0][1]['details'].get('timed_out') is not False):
+                    code = 'operation_result_uncertain'
+                item = {'task_id': task_id, 'attempt_id': attempt_id, 'operation_id': operation_id,
+                        'event_seqs': [seq for seq, _ in items]}
+                if code:
+                    unresolved.append(dict(item, code=code))
+                else:
+                    observed.append(dict(item, status='result_observed'))
+            signature = hashlib.sha256(json.dumps(operations, sort_keys=True, ensure_ascii=False,
+                                                  separators=(',', ':')).encode()).hexdigest()
+            return {'operation_digest': signature, 'result_observed': observed, 'unresolved': unresolved,
+                    'execution_permission': 'none', 'effects_reconciled': False}
 
     def confirm_recovery(self, task_id, task_revision, job_revision, attempt_id):
         """Internal CAS for authenticated maintenance service; never queues work."""
