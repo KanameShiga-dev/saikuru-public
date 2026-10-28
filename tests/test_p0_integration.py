@@ -249,6 +249,18 @@ class ReviewedOperationRecoveryTests(unittest.TestCase):
         self.assertFalse(valid)
         self.assertEqual(self.f.f.state(), before)
 
+    def test_interrupted_wp_cannot_reuse_the_completed_successor_session_binding(self):
+        task, job = self.stop()
+        self.f.engine.confirm_recovery(task['id'], task['state_revision'], job['state_revision'],
+                                       task['current_attempt']['id'], writer_stopped=True, checked_changes=True)
+        draft = self.f.engine.collect_checkpoint(task['id'], writer_stopped=True)
+        self.assertTrue(self.f.engine.finalize_checkpoint(draft['id'], writer_stopped=True)['handoff_synced'])
+        before = self.f.f.state()
+        with self.assertRaises(ValueError):
+            self.f.engine.prepare_checkpoint_session(task['id'], task['id'], writer_stopped=True)
+        self.assertEqual(self.f.f.state(), before)
+        self.assertFalse(self.f.store.get(task['id']).get('checkpoint_session_binding'))
+
 
 if __name__ == '__main__':
     unittest.main()
