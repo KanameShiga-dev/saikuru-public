@@ -304,9 +304,9 @@ class Context:
         from team_skill_import import SKILLS
         self.skill_dirs = [str(SKILLS / name) for name in sorted(engine.handoff.active_skill_names(self.project))
                            if name != '_inbox' and (SKILLS / name).is_dir()]
-        # Capture before any provider process starts. A second Context for an
-        # already launched attempt must never replace its original baseline.
-        self.native_scope_baseline = engine.capture_native_scope_baseline(task)
+        # The server committed this before entering worker scope. Reconstructing
+        # a Context reads that original record instead of certifying new files.
+        self.native_scope_baseline = engine.native_scope_baseline_for_context(task)
 
 
 
@@ -4680,13 +4680,20 @@ class Engine:
 
     def _run(self, task):
         try:
+            preflight_error = None
+            try:
+                self.prepare_native_scope_baseline(task)
+            except StaleAttempt:
+                raise
+            except Exception as exc:
+                preflight_error = exc
             with self.store.attempt_scope(task):
-                return self._run_attempt(task)
+                return self._run_attempt(task, preflight_error=preflight_error)
         except StaleAttempt:
             # A fenced worker must not turn a newer task into a failure.
             return
 
-    def _run_attempt(self, task):
+    def _run_attempt(self, task, *, preflight_error=None):
 
         ctx = None
 
@@ -4697,7 +4704,8 @@ class Engine:
         failure_code = None
 
         try:
-
+            if preflight_error is not None:
+                raise preflight_error
             self._execution_workspace(task)
             self._assert_workflow_dispatch(task)
             ctx = Context(self, task)
@@ -5946,6 +5954,39 @@ class Engine:
             proofs.append(dict(item, approval_id=proof['approval_id'], target_digest=proof['target_digest']))
         return dict(observed, reviewed_prior_operations=proofs)
 
+    def native_scope_baseline_for_context(self, task):
+        job = self.store.get(task['job_id'], 'job')
+        if job.get('workflow_contract_version') != 1 or task.get('role') != 'builder' or not task.get('work_package_id'):
+            return None
+        self.store.assert_attempt(task)
+        record = self.store.native_scope_baseline(task['id'], task['current_attempt']['id'])
+        plan = self.store.get(job.get('plan_approval_id'), 'approval')
+        if (record is None or record['snapshot'].get('plan_approval_id') != plan['id']
+                or record['snapshot'].get('plan_digest') != plan['digest']):
+            raise ProviderError('開始時の基準が未確定です。', 'native_baseline', model_call_state='not_started')
+        return record['snapshot']
+
+    def prepare_native_scope_baseline(self, task):
+        if getattr(self.store._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_prepare_native_baseline')
+        job = self.store.get(task['job_id'], 'job')
+        if job.get('workflow_contract_version') != 1 or task.get('role') != 'builder' or not task.get('work_package_id'):
+            return None
+        self.store.assert_attempt(task)
+        existing = self.store.native_scope_baseline(task['id'], task['current_attempt']['id'])
+        if existing is not None:
+            return self.native_scope_baseline_for_context(task)
+        current = self.store.get(task['id'], 'task')
+        try:
+            snapshot = self.capture_native_scope_baseline(task)
+            if snapshot is None:
+                raise ProviderError('起動後の基準は作り直せません。', 'native_baseline', model_call_state='not_started')
+            self.store.commit_native_scope_baseline(task['id'], current['state_revision'], job['state_revision'], snapshot)
+        except StaleAttempt:
+            self.store.assert_attempt(task)
+            raise ProviderError('開始時の対象版が変わりました。', 'native_baseline', model_call_state='not_started') from None
+        return snapshot
+
     def capture_native_scope_baseline(self, task):
         """Pre-provider observation only, with no recovery permission."""
         from team_p0_contract import checkpoint_scope
@@ -6088,13 +6129,19 @@ class Engine:
             counts = approvals[item['kind']]; counts[status] = counts.get(status, 0) + 1
         if approvals['tool']: reasons.append('native_tool_approval_present')
         workspace = self.workspace_view(job['id'])
-        scope = {}; outside = None; head_changed_count = None; changed_count = None
+        scope = {}; outside = None; head_changed_count = None; changed_count = None; baseline_record = None
         if workspace.get('status') == 'ready':
             plan = self.store.get(job.get('plan_approval_id'), 'approval')
             checkpoint_scope(job, plan)
             scope = scope_file_observation(job, plan)
             outside = False; head_changed_count = len(workspace['current']['dirty_changes'])
             baseline = run.get('scope_baseline')
+            try:
+                baseline_record = self.store.native_scope_baseline(task_id, attempt.get('id'))
+            except (ValueError, KeyError, TypeError):
+                reasons.append('native_scope_baseline_record_unresolved')
+            if baseline_record is None or baseline_record['snapshot'] != baseline:
+                reasons.append('native_scope_baseline_record_unresolved')
             expected = {'contract_version': 1, 'basis': 'attempt_start', 'job_id': job['id'],
                 'task_id': task_id, 'attempt_id': attempt.get('id'), 'plan_approval_id': plan['id'],
                 'plan_digest': plan['digest'], 'workspace_identity': workspace_identity(workspace['current'])}
@@ -6123,7 +6170,7 @@ class Engine:
         target = {'contract_version': 1, 'action': 'reconcile_recovery', 'job_id': job['id'], 'task_id': task_id,
             'attempt_id': attempt.get('id'), 'job_revision': job['state_revision'], 'task_revision': task['state_revision']}
         target['state_digest'] = hashlib.sha256(json.dumps({'job': job, 'task': task, 'summary': summary,
-            'workspace': workspace, 'scope': scope, 'operation_digest': operation_digest,
+            'workspace': workspace, 'scope': scope, 'baseline_record': baseline_record, 'operation_digest': operation_digest,
             'events': rows, 'approvals': approval_records, 'run_records': run_records},
             sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
         return {'contract_version': 1, 'eligible_for_reconciliation': not reasons, 'reasons': sorted(set(reasons)),

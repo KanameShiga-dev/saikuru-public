@@ -308,7 +308,7 @@ class NativeAssessmentTests(unittest.TestCase):
             'attempt_id': task['current_attempt']['id'], 'started_at': task['current_attempt']['started_at'],
             'measurement_ids': {'job_id': self.job_id, 'task_id': self.task_id, 'attempt_id': task['current_attempt']['id']},
             'tool_observation_version': 1, 'tool_calls': {'fileChange': 1},
-            'scope_baseline': self.engine.capture_native_scope_baseline(task)}
+            'scope_baseline': self.engine.prepare_native_scope_baseline(task)}
         self.store.update(self.task_id, agent_run=self.run)
         path = self.f.f.workspace.project / 'app.py'
         path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC native file edit\n')
@@ -498,6 +498,29 @@ class NativeAssessmentTests(unittest.TestCase):
         self.assertIn('native_assessment_changed', result['reasons'])
         self.assertIsNone(result['target'])
 
+    def test_mutable_run_copy_cannot_replace_the_immutable_baseline(self):
+        baseline = self.run['scope_baseline']
+        forged = dict(baseline, files=dict(baseline['files'], **{'app.py': '0' * 64}))
+        self.store.update(self.task_id, agent_run=dict(self.run, scope_baseline=forged))
+        result = self.assess()[1]
+        self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertIn('native_scope_baseline_record_unresolved', result['reasons'])
+
+    def test_absent_or_duplicated_commit_event_invalidates_the_baseline(self):
+        attempt_id = self.run['attempt_id']
+        record = self.store.native_scope_baseline(self.task_id, attempt_id)
+        details = {'attempt_id': attempt_id, 'baseline_id': record['id'], 'snapshot_digest': record['snapshot_digest']}
+        self.store.event('native_scope_baseline_committed', 'SYNTHETIC duplicate', self.task_id, self.job_id, details)
+        result = self.assess()[1]
+        self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertIn('native_scope_baseline_record_unresolved', result['reasons'])
+        # Fault injection into this fixture's SQLite only; never coordination or App DB.
+        self.store.db.execute("DELETE FROM events WHERE json_extract(body,'$.type')='native_scope_baseline_committed'")
+        self.store.db.commit()
+        result = self.assess()[1]
+        self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertIn('native_scope_baseline_record_unresolved', result['reasons'])
+
 
 class NativeBaselineCaptureTests(unittest.TestCase):
     def setUp(self):
@@ -512,6 +535,7 @@ class NativeBaselineCaptureTests(unittest.TestCase):
         from team_common_agents import load_agent
         self.engine.commands = {'codex': ['fictional-never-launched'], 'claude': ['fictional-never-launched']}
         self.engine.usage_snapshot = lambda: {}
+        self.engine.prepare_native_scope_baseline(self.task)
         ctx = Context(self.engine, self.task)
         baseline = ctx.native_scope_baseline
         self.assertEqual(baseline['attempt_id'], self.task['current_attempt']['id'])
@@ -520,6 +544,7 @@ class NativeBaselineCaptureTests(unittest.TestCase):
         ctx.prepare_agent(load_agent('builder', self.task['profile']['adapter']))
         self.assertEqual(self.store.get(self.task['id'])['agent_run']['scope_baseline'], baseline)
         self.assertIsNone(self.engine.capture_native_scope_baseline(self.task))
+        self.assertEqual(self.engine.prepare_native_scope_baseline(self.task), baseline)
         self.assertEqual(self.store.get(self.task['id'])['agent_run']['scope_baseline'], baseline)
 
     def test_capture_observes_files_outside_store_lock_and_rejects_changed_authority(self):
@@ -544,6 +569,41 @@ class NativeBaselineCaptureTests(unittest.TestCase):
         self.store.recover()
         with self.assertRaises(StaleAttempt):
             self.engine.capture_native_scope_baseline(self.task)
+
+    def test_worker_cannot_prepare_missing_baseline_or_construct_a_native_context(self):
+        from team_engine import Context
+        from team_adapters import ProviderError
+        self.engine.commands = {'codex': ['fictional-never-launched'], 'claude': ['fictional-never-launched']}
+        with self.store.attempt_scope(self.task):
+            with self.assertRaisesRegex(ValueError, 'worker_cannot'):
+                self.engine.prepare_native_scope_baseline(self.task)
+            with self.assertRaises(ProviderError): Context(self.engine, self.task)
+        self.assertEqual(self.store.for_job('native_scope_baseline', self.task['job_id']), [])
+
+    def test_run_prepares_original_baseline_before_entering_worker_scope(self):
+        from unittest.mock import patch
+        def probe(task, *, preflight_error=None):
+            self.assertIsNone(preflight_error)
+            self.assertIsNotNone(getattr(self.store._worker, 'task', None))
+            record = self.store.native_scope_baseline(task['id'], task['current_attempt']['id'])
+            self.assertIsNotNone(record)
+            self.assertEqual(self.engine.native_scope_baseline_for_context(task), record['snapshot'])
+        with patch.object(self.engine, '_run_attempt', side_effect=probe) as run:
+            self.engine._run(self.task)
+        run.assert_called_once()
+        self.assertEqual(len(self.store.job_events(self.task['job_id'], 'native_scope_baseline_committed')), 1)
+
+    def test_preflight_failure_closes_attempt_without_context_or_provider(self):
+        from unittest.mock import patch
+        from team_adapters import ProviderError
+        with (patch.object(self.engine, 'capture_native_scope_baseline', side_effect=ProviderError(
+                'SYNTHETIC file observation failure', 'native_baseline', model_call_state='not_started')),
+              patch('team_engine.Context') as context):
+            self.engine._run(self.task)
+        context.assert_not_called()
+        current = self.store.get(self.task['id'])
+        self.assertEqual(current['status'], 'failed')
+        self.assertEqual(current['current_attempt']['status'], 'closed')
 
 
 class NativeBaselineStorageTests(unittest.TestCase):
@@ -607,6 +667,54 @@ class NativeBaselineStorageTests(unittest.TestCase):
         self.assertIsNone(getattr(self.store._worker, 'native_baseline_commit', None))
         with self.assertRaises(ValueError):
             self.store.put('native_scope_baseline', {'id': 'fictional-after-failure', 'snapshot': snapshot})
+
+    def clone_task(self, ident, **changes):
+        task = dict(self.task, id=ident, **changes); task.pop('state_revision')
+        return self.store.put('task', task)
+
+    def test_true_is_rejected_when_task_revision_is_exactly_one(self):
+        task = self.clone_task('fictional-revision-one')
+        self.assertEqual(task['state_revision'], 1)
+        snapshot = dict(self.engine.capture_native_scope_baseline(self.task), task_id=task['id'])
+        job = self.store.get(task['job_id'])
+        with self.assertRaises(ValueError):
+            self.store.commit_native_scope_baseline(task['id'], True, job['state_revision'], snapshot)
+        self.store.commit_native_scope_baseline(task['id'], 1, job['state_revision'], snapshot)
+
+    def test_reviewer_and_task_without_work_package_cannot_commit(self):
+        for ident, changes in (('fictional-reviewer', {'role': 'reviewer'}),
+                               ('fictional-no-wp', {'work_package_id': None})):
+            task = self.clone_task(ident, **changes)
+            snapshot = dict(self.engine.capture_native_scope_baseline(self.task), task_id=ident)
+            before = self.f.f.state()
+            with self.assertRaises(ValueError):
+                self.store.commit_native_scope_baseline(ident, task['state_revision'],
+                    self.store.get(task['job_id'])['state_revision'], snapshot)
+            self.assertEqual(self.f.f.state(), before)
+
+    def test_not_ready_workspace_binding_is_refused_even_when_identity_matches(self):
+        from team_harness import workspace_identity
+        snapshot = self.engine.capture_native_scope_baseline(self.task)
+        plan = self.store.get(snapshot['plan_approval_id'])
+        boundary = dict(plan['workflow_revision']['workspace_boundary'], status='blocked')
+        self.store.update(plan['id'], workflow_revision=dict(plan['workflow_revision'], workspace_boundary=boundary))
+        snapshot['workspace_identity'] = workspace_identity(boundary)
+        with self.assertRaisesRegex(ValueError, 'workspace_binding'): self.commit(snapshot)
+
+    def test_noncanonical_hash_values_are_refused(self):
+        snapshot = self.engine.capture_native_scope_baseline(self.task)
+        for value in ('short', 'A' * 64, True):
+            with self.assertRaisesRegex(ValueError, 'observation_invalid'):
+                self.commit(dict(snapshot, files=dict(snapshot['files'], **{'app.py': value})))
+
+    def test_closed_attempt_cannot_commit_with_fresh_revisions_and_matching_identity(self):
+        snapshot = self.engine.capture_native_scope_baseline(self.task)
+        self.store.close_attempt(self.task['id'], 'closed', 'completed')
+        with self.assertRaises(ValueError): self.commit(snapshot)
+
+    def test_reserved_baseline_prefix_cannot_be_occupied_by_another_kind(self):
+        with self.assertRaisesRegex(ValueError, 'id_reserved'):
+            self.store.put('fictional_unrelated_kind', {'id': 'native-baseline-fictional-preempt'})
 
 
 class CodexItemObservationTests(unittest.TestCase):

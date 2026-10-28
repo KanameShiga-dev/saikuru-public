@@ -157,6 +157,8 @@ class Store:
         if row and row[0] != kind:
             raise ValueError('保存IDは別の種類で使用されています。')
         previous = json.loads(row[1]) if row else None
+        if obj['id'].startswith('native-baseline-') and kind != 'native_scope_baseline':
+            raise ValueError('native_baseline_id_reserved')
         if kind == 'native_scope_baseline':
             if previous or getattr(self._worker, 'native_baseline_commit', None) != obj['id']:
                 raise ValueError('native_baseline_requires_immutable_server_commit')
@@ -504,6 +506,32 @@ class Store:
                 return saved
             finally:
                 self._worker.native_baseline_commit = previous
+
+    def native_scope_baseline(self, task_id, attempt_id):
+        """Read the immutable record plus its unique matching commit event."""
+        with self.lock:
+            task = self.get(task_id, 'task')
+            key = hashlib.sha256(json.dumps([task['job_id'], task_id, attempt_id]).encode()).hexdigest()
+            ident = 'native-baseline-' + key
+            row = self.db.execute('SELECT kind,body FROM objects WHERE id=?', (ident,)).fetchone()
+            if row is None: return None
+            record = json.loads(row[1]); snapshot = record.get('snapshot')
+            if (row[0] != 'native_scope_baseline' or record.get('id') != ident
+                    or record.get('job_id') != task['job_id'] or record.get('task_id') != task_id
+                    or record.get('attempt_id') != attempt_id or not isinstance(snapshot, dict)
+                    or snapshot.get('job_id') != task['job_id'] or snapshot.get('task_id') != task_id
+                    or snapshot.get('attempt_id') != attempt_id
+                    or record.get('snapshot_digest') != hashlib.sha256(json.dumps(snapshot, sort_keys=True,
+                        ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()):
+                raise ValueError('native_baseline_record_invalid')
+            rows = self.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.type')=? "
+                "AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.task_id')=? "
+                "AND json_extract(body,'$.details.baseline_id')=? ORDER BY seq LIMIT 2",
+                ('native_scope_baseline_committed', task['job_id'], task_id, ident)).fetchall()
+            expected = {'attempt_id': attempt_id, 'baseline_id': ident, 'snapshot_digest': record['snapshot_digest']}
+            if len(rows) != 1 or json.loads(rows[0][1]).get('details') != expected:
+                raise ValueError('native_baseline_event_invalid')
+            return dict(record, event_seq=rows[0][0])
 
     def update(self, object_id, _transition_reason=None, **values):
         with self.lock:
