@@ -110,4 +110,47 @@ class RecoveryIntegrationTests(unittest.TestCase):
         handoff.rename(handoff.with_suffix('.checked'))
 
 
+class WorkflowRecoveryApiIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        from tests import test_workflow_controls as fixtures
+        self.f = fixtures.WorkflowControlTests(); self.addCleanup(self.f.doCleanups); self.f.setUp()
+
+    def test_recover_stale_target_confirm_checkpoint_then_separate_retry(self):
+        f = self.f
+        stale = f.body('retry_task')
+        old_attempt = f.store.get(f.task_id)['current_attempt']['id']
+        f.store.recover()  # Real fictional Store restart recovery, no App process.
+        before = f.state()
+        self.assertEqual(f.request('/api/workflow/control', stale, maintenance=True)[0], 400)
+        self.assertEqual(f.state(), before)
+        body = f.body('confirm_recovery')
+        self.assertEqual(f.request('/api/workflow/control', body)[0], 403)
+        code, result = f.request('/api/workflow/control', body, maintenance=True)
+        self.assertEqual(code, 200, result); self.assertFalse(result['queued'])
+        self.assertFalse(result['resume_allowed'])
+        checkpoint = f.f.checkpoint()
+        self.assertTrue(checkpoint)
+        self.assertEqual(f.request('/api/workflow/control', stale, maintenance=True)[0], 400)
+        retry = f.body('retry_task')
+        code, result = f.request('/api/workflow/control', retry, maintenance=True)
+        self.assertEqual(code, 200, result); self.assertTrue(result['queued'])
+        self.assertFalse(result['started']); self.assertFalse(result['formal_receipt'])
+        self.assertEqual(f.request('/api/workflow/control', retry, maintenance=True)[0], 400)
+        task = f.store.get(f.task_id)
+        reserved = f.store.reserve_attempt(f.task_id, task['state_revision'])
+        self.assertNotEqual(reserved['current_attempt']['id'], old_attempt)
+        self.assertEqual(reserved['current_attempt']['status'], 'running')
+        f.store.close_attempt(f.task_id, 'closed', 'synthetic_recovery_probe_only')
+
+    def test_unknown_operation_cannot_pass_recovery_even_with_current_target(self):
+        f = self.f
+        f.store.event('operation_result', 'SYNTHETIC unresolved external effect', f.task_id, f.job_id)
+        before = f.state()
+        for action in ('confirm_recovery', 'retry_task'):
+            code, _ = f.request('/api/workflow/control', f.body(action), maintenance=True)
+            self.assertEqual(code, 400)
+            self.assertEqual(f.state(), before)
+        self.assertTrue(f.store.get(f.task_id)['recovery_check_required'])
+
+
 if __name__ == '__main__': unittest.main()

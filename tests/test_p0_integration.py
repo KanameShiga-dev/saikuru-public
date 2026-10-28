@@ -98,5 +98,79 @@ class P0IntegrationTests(unittest.TestCase):
         self.assertEqual(engine.accept_completion(current_id, '正式受領')['status'], 'accepted')
         self.assertEqual(store.get(job['id'])['goal_contract']['completion_status'], 'accepted')
 
+class WorkflowApiIntegrationTests(unittest.TestCase):
+    """Synthetic worker results and synthetic user actions, never real receipt."""
+
+    def test_serial_features_to_global_review_and_explicit_synthetic_receipt(self):
+        from tests import test_workflow_api as fixtures
+        f = fixtures.WorkflowApiTests(); self.addCleanup(f.doCleanups); f.setUp()
+        engine, store, job_id = f.engine, f.store, f.f.job_id
+        # The fixture publishes its fictional plan through the real G3 engine.
+        self.assertEqual(f.f.job()['plan_revision'], 1)
+        self.assertEqual(f.f.job()['status'], 'running')
+        decided = []
+        for index in range(2):
+            builder = next(t for t in f.f.tasks() if t.get('plan_task_index') == index)
+            if index == 1:
+                reserved = engine._reserve_workflow_attempt(builder, engine.workflow_dispatch_view(job_id))
+                engine.store.recover()  # Fictional crash, actual persistence/fencing path.
+                target = engine.workflow_control_target(job_id, 'confirm_recovery', builder['id'])
+                confirm = {'action': 'confirm_recovery', 'job_id': job_id, 'task_id': builder['id'],
+                           'target': target, 'writer_stopped': True, 'checked_changes': True}
+                self.assertEqual(f.request('/api/workflow/control', confirm)[0], 403)
+                code, result = f.request('/api/workflow/control', confirm, maintenance=True)
+                if code != 200:
+                    # Preserve the real refusal reason in the sanitized local
+                    # test report, rather than weakening the operation fence.
+                    engine._recovery_control_inputs(builder['id'])
+                self.assertEqual(code, 200, result); self.assertFalse(result['queued'])
+                draft = engine.collect_checkpoint(builder['id'], writer_stopped=True)
+                self.assertTrue(engine.finalize_checkpoint(draft['id'], writer_stopped=True)['handoff_synced'])
+                retry = {'action': 'retry_task', 'job_id': job_id, 'task_id': builder['id'],
+                         'target': engine.workflow_control_target(job_id, 'retry_task', builder['id']),
+                         'checked_changes': True, 'note': 'SYNTHETIC crash inspected', 'handoff_allowed': False}
+                code, result = f.request('/api/workflow/control', retry, maintenance=True)
+                self.assertEqual(code, 200, result); self.assertFalse(result['started'])
+                self.assertNotEqual(store.get(builder['id'])['current_attempt']['status'], 'running')
+            for _ in range(3):
+                f.f.finish_next(summary='SYNTHETIC Provider result; no native model')
+            wp = store.get(builder['work_package_id'], 'work_package')
+            body = {'job_id': job_id, 'work_package_id': wp['id'],
+                    'work_package_revision': wp['state_revision'], 'action': 'request_feature_review'}
+            code, review = f.request('/api/workflow/feature-review/prepare', body)
+            self.assertEqual(code, 200, review)
+            self.assertNotEqual(engine.workflow_dispatch_view(job_id)['status'], 'ready')
+            code, result = f.request('/api/workflow/feature-review/decide', f.decision_body(review))
+            self.assertEqual(code, 200, result); self.assertFalse(result['formal_receipt'])
+            decided.append(review['approval_id'])
+            self.assertEqual(f.f.job()['status'], 'running')
+        global_reviews = [t for t in f.f.tasks() if t.get('workflow_job_task')]
+        self.assertTrue(global_reviews)
+        for _ in global_reviews:
+            f.f.finish_next(summary='SYNTHETIC independent integration review')
+        self.assertEqual(f.f.job()['status'], 'awaiting_acceptance')
+        completion = next(a for a in store.for_job('approval', job_id)
+                          if a['kind'] == 'completion' and a['status'] == 'pending')
+        body = {'approval_id': completion['id'], 'confirmation': '正式受領', 'note': 'SYNTHETIC ONLY'}
+        self.assertEqual(f.request('/api/jobs/formal-acceptance', body)[0], 400)
+        # Clear only the actual generated checks, via the real HTTP evidence route.
+        for _ in range(12):
+            pending = completion['payload'].get('pending_items') or []
+            if not pending: break
+            code, result = f.request('/api/completion/evidence', {'approval_id': completion['id'],
+                'item_index': 0, 'check_index': 0, 'evidence': 'SYNTHETIC local inspection only', 'confirmed': True})
+            self.assertEqual(code, 200, result)
+            completion = store.get(result['approval_id'], 'approval')
+        self.assertFalse(completion['payload'].get('pending_items'))
+        self.assertEqual(f.request('/api/jobs/review-confirmation',
+                                  {'approval_id': completion['id'], 'confirmed': True})[0], 200)
+        body['approval_id'] = completion['id']
+        code, result = f.request('/api/jobs/formal-acceptance', body)
+        self.assertEqual(code, 200, result); self.assertEqual(result['status'], 'accepted')
+        self.assertEqual(f.request('/api/jobs/formal-acceptance', body)[0], 400)
+        self.assertEqual(len(store.job_events(job_id, 'formal_acceptance_decided')), 1)
+        self.assertEqual(len(decided), 2)
+
+
 if __name__ == '__main__':
     unittest.main()
