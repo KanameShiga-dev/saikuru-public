@@ -3072,6 +3072,58 @@ class Engine:
             if maintainer: result['maintenance_guidance'] = guidance
             return result
 
+    def workflow_control_target(self, job_id, action, task_id=None):
+        """A metadata-only UI target, never a credential or a resume permission."""
+        from team_p0_contract import workflow_version
+        from team_wbs import digest
+        if action not in ('cancel_job','retry_task','confirm_recovery'):
+            raise ValueError('workflow_control_action_invalid')
+        if (action == 'cancel_job') != (task_id is None):
+            raise ValueError('workflow_control_task_invalid')
+        with self.store.lock:
+            job = self.store.get(job_id,'job')
+            if workflow_version(job) != 1: raise ValueError('workflow_version_required')
+            task = self.store.get(task_id,'task') if task_id is not None else None
+            if task and task['job_id'] != job_id: raise ValueError('workflow_control_task_invalid')
+            records = self._workflow_projection_records(job)
+            basis = digest({'job':job,**records,'checkpoints':self.store.for_job('checkpoint',job_id)})
+            return {'contract_version':1,'action':action,'job_id':job_id,'job_revision':job['state_revision'],
+                    'task_id':task_id,'task_revision':task['state_revision'] if task else None,
+                    'attempt_id':(task.get('current_attempt') or {}).get('id') if task else None,
+                    'state_digest':basis}
+
+    def workflow_controls_view(self, job_id):
+        """Read control targets without issuing an approval or touching project files."""
+        from team_checkpoint import FORBIDDEN
+        with self.store.lock:
+            cancel = self.workflow_control_target(job_id,'cancel_job')
+            return {'contract_version':1,'job_id':job_id,'cancel_target':cancel,
+                'tasks':[{'task_id':t['id'],'retry_target':self.workflow_control_target(job_id,'retry_task',t['id']),
+                          'recovery_target':self.workflow_control_target(job_id,'confirm_recovery',t['id'])}
+                         for t in self.store.for_job('task',job_id)],
+                'execution_permission':'none','file_validation':'not_performed','decides_nothing':True,
+                'artifact_path_guidance':{'code':'workflow_reserved_artifact_path',
+                    'reserved_components':sorted(FORBIDDEN),
+                    'fictional_data_component':'fixtures','changes_policy':False}}
+
+    def _validate_workflow_control_target(self, target, job_id, action, task_id=None):
+        if getattr(self.store._worker,'task',None) is not None:
+            raise ValueError('workflow_user_action_required')
+        expected = self.workflow_control_target(job_id,action,task_id)
+        # JSON comparison also rejects booleans/floats substituted for integer revisions.
+        if (not isinstance(target,dict) or json.dumps(target,sort_keys=True,ensure_ascii=False)
+                != json.dumps(expected,sort_keys=True,ensure_ascii=False)):
+            raise ValueError('workflow_control_target_changed')
+        if task_id is not None:
+            task = self.store.get(task_id,'task'); job = self.store.get(job_id,'job')
+            if task.get('work_package_id'):
+                wp = self.store.get(task['work_package_id'],'work_package')
+                if (task.get('plan_revision') != job['plan_revision']
+                        or task.get('requirement_revision') != job['requirement_revision']
+                        or wp.get('plan_revision') != job['plan_revision']
+                        or task.get('workflow_generation',0) != wp.get('workflow_generation',0)):
+                    raise ValueError('workflow_control_task_not_current')
+
     def _plan_task_fields(self, expected_job, title, instruction, role, after, repair, agent_name, task_index):
         """Initial-save membership only; never reassign a persisted Task."""
         job = self.store.get(expected_job['id'], 'job')
@@ -5227,11 +5279,18 @@ class Engine:
 
 
 
-    def cancel_job(self, job_id):
+    def cancel_job(self, job_id, *, workflow_target=None):
 
         with self.store.atomic():
 
-            self.store.get(job_id, 'job')
+            job = self.store.get(job_id, 'job')
+            if 'workflow_contract_version' in job:
+                from team_p0_contract import workflow_version
+                workflow_version(job)
+            if workflow_target is not None:
+                self._validate_workflow_control_target(workflow_target,job_id,'cancel_job')
+                if job['status'] not in ('planning','running','awaiting_approval','awaiting_acceptance','blocked','failed','interrupted'):
+                    raise ValueError('workflow_control_job_not_active')
 
             for running in self.store.for_job('task', job_id):
                 self.store.close_attempt(running['id'], 'fenced', 'cancel')
@@ -5785,12 +5844,16 @@ class Engine:
                 raise ValueError('現在の承認済み要求が必要です。')
         return task, job, bootstrap
 
-    def confirm_recovery(self, task_id, task_revision, job_revision, attempt_id, *, writer_stopped=False, checked_changes=False):
+    def confirm_recovery(self, task_id, task_revision, job_revision, attempt_id, *, writer_stopped=False, checked_changes=False,
+                         workflow_target=None):
         """Authenticated maintenance service only; caller proof is not UI receipt."""
         if writer_stopped is not True or checked_changes is not True:
             raise ValueError('担当の停止と現在の変更を確認してください。')
         with self._checkpoint_project(task_id):
             with self.store.atomic():
+                if workflow_target is not None:
+                    task = self.store.get(task_id,'task')
+                    self._validate_workflow_control_target(workflow_target,task['job_id'],'confirm_recovery',task_id)
                 self._recovery_control_inputs(task_id)
                 task = self.store.confirm_recovery(task_id, task_revision, job_revision, attempt_id)
             return {'confirmed': True, 'task_id': task_id, 'task_revision': task['state_revision'],
@@ -5819,27 +5882,36 @@ class Engine:
                 raise ValueError('保守確認後に状態が変化しました。再確認してください。')
         return (task['state_revision'], job['state_revision'], marker['event_seq']), bootstrap
 
-    def retry(self, task_id, note, handoff_allowed=False):
+    def retry(self, task_id, note, handoff_allowed=False, *, workflow_target=None):
         from team_p0_contract import workflow_version
+        if workflow_target is not None:
+            if not isinstance(note,str) or len(note) > 4000 or type(handoff_allowed) is not bool:
+                raise ValueError('workflow_request_invalid')
+            from team_dlp import require_clean_input
+            require_clean_input(note,False,'再試行の補足')
         expected = None
         with self.store.lock:
             task = self.store.get(task_id, 'task')
             job = self.store.get(task['job_id'], 'job')
+            if workflow_target is not None:
+                self._validate_workflow_control_target(workflow_target,job['id'],'retry_task',task_id)
             if workflow_version(job) == 1 and (task.get('recovery_check_required') or task.get('recovery_confirmation')):
                 expected, bootstrap = self._recovery_retry_binding(task_id)
         if expected is not None and not bootstrap:
             assessment = self.assess_checkpoint_resume(task_id, writer_stopped=True)
             if assessment['status'] != 'candidate' or task_id not in assessment['candidate_task_ids']:
                 raise ValueError('Checkpointと現在の承認・検証・変更を確認してください。')
-        return self._retry_confirmed(task_id, note, handoff_allowed, expected)
+        return self._retry_confirmed(task_id, note, handoff_allowed, expected, workflow_target)
 
-    def _retry_confirmed(self, task_id, note, handoff_allowed=False, recovery_expected=None):
+    def _retry_confirmed(self, task_id, note, handoff_allowed=False, recovery_expected=None, workflow_target=None):
 
 
         with self.store.atomic():
 
             task = self.store.get(task_id, 'task')
             task_job = self.store.get(task['job_id'], 'job')
+            if workflow_target is not None:
+                self._validate_workflow_control_target(workflow_target,task_job['id'],'retry_task',task_id)
             if task_job.get('workflow_contract_version') == 1:
                 if task_job.get('status') not in ('planning', 'running', 'failed', 'blocked', 'interrupted'):
                     raise ValueError('終了済みまたは不明な依頼は再試行できません。')

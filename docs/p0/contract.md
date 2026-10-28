@@ -155,3 +155,78 @@ the UI must not silently refresh a session binding or repeat unknown operations.
 Formal acceptance continues through the existing review acknowledgement, current
 UAT evidence and explicit receipt endpoints. No feature decision, test result,
 checkpoint or maintenance action can act for the actual recipient.
+
+## Versioned stop/recovery controls (W05.03.API, contract 1)
+
+Use authenticated `GET /api/workflow/controls?id=<job_id>` when the user opens a
+control, not as a progress poll. It returns `contract_version: 1`, `cancel_target`
+and per-task `retry_target`/`recovery_target`. A target contains exactly
+`contract_version`, `action`, `job_id`, `job_revision`, `task_id`, `task_revision`,
+`attempt_id`, and `state_digest`. Job cancellation uses null task/attempt fields.
+The digest binds the current job, canonical tasks/WPs/approvals/typed decisions and
+checkpoint records. Targets are read-only snapshots, **not credentials, maintenance
+authentication, file verification, or executable permissions**. The response sets
+`execution_permission: "none"`, `file_validation: "not_performed"`,
+`decides_nothing: true`. No native Context, project-file or Git probe runs here.
+
+Send a separate explicit POST to `/api/workflow/control` with an exact body:
+
+| Action | Required fields beyond `action`, `job_id`, `target` | Authentication / effect |
+|---|---|---|
+| `cancel_job` | `confirmed: true` | Existing authenticated browser. Fences attempts and cancels pending work/approvals. Existing edits stay. Not formal receipt. |
+| `confirm_recovery` | `task_id`, `writer_stopped: true`, `checked_changes: true` | Browser plus existing maintenance capability. Existing revision/attempt/operation checks. Returns confirmed, queued false, resume_allowed false. |
+| `retry_task` | `task_id`, `checked_changes: true`, string `note` (at most 4000), boolean `handoff_allowed` | Browser plus maintenance capability for recovery/operation-history cases. Existing current-checkpoint/authority/file/unknown-effect checks. Queues only; this request does not construct a worker or grant a new execution/model permission. |
+
+The usual Cookie, same-origin/Host/fetch and `X-Agent-Team-UI: 1` guards apply.
+Client actor/role/automatic-resume fields are rejected. The server compares the
+entire target with a freshly constructed target, including strict JSON types, and
+checks again inside the final transaction. For retries that inspect a checkpoint
+outside the database lock, the final transaction rechecks the target after that
+inspection. Stale task/Job/approval/checkpoint state, wrong task/job/action, extra
+target fields, booleans/floats replacing revision integers, unsupported contracts,
+duplicate requests and terminal/unknown Job states are refusals, not success.
+Superseded WP task versions/generations cannot use this path to requeue old work.
+
+Successful cancellation returns `cancelled: true`, `edits_restored: false`,
+`formal_receipt: false`. Successful retry returns the current boolean `queued`,
+`task_status`, `decision_required`, `next_action` (`review_pending_decision` or
+`observe_dispatch`), `started: false`, `formal_receipt: false`. A stopped planner
+requires a fresh G2 decision; queue membership is not permission to run. `started`
+describes this operation only, not a later scheduler observation. A new poll must
+observe actual execution. Unknown effects,
+active writers, safety blocks, expired plans, stale session bindings and WP
+checkpoint dispatch review remain stops. A fresh target cannot clear any of them.
+The scheduler may require separate current authority; queueing is not evidence that
+a Provider ran or that any work completed.
+
+After recovery confirmation, checkpoint preparation, an answered question or any
+other bound state change, read a new target and ask for the next explicit operation.
+Do not reuse a stale target, silently retry an operation, rebuild a native binding,
+or infer that a saved/ready checkpoint means a started session. Cancellation does
+not undo edits; cancellation of already received jobs is refused in this contract.
+
+For workflow jobs, existing `/api/cancel` now requires exactly `id`,
+`workflow_target` (the cancel target), and `confirmed: true`. Existing `/api/retry`
+additionally requires `workflow_target` (the retry target); its optional action
+marker and other fields retain their meanings. These routes cannot skip the
+target checks. Jobs without a workflow marker keep their old interfaces. The
+existing `/api/maintenance/recovery/confirm` exact revision/attempt body remains
+supported with the same separate capability; confirmation alone still never queues.
+
+Control validation errors use the existing safe fixed-code workflow envelope.
+`workflow_control_target_changed` requires a fresh display/target and explicit
+decision, not an automatic resubmission. Other relevant codes include
+`workflow_control_action_invalid`, `workflow_control_task_invalid`,
+`workflow_control_task_not_current`, `workflow_control_confirmation_required`, and
+`workflow_control_job_not_active`. The API never returns raw native diagnostics.
+Local filesystem/OS failures use `workflow_local_io_check_required` without paths
+or the underlying exception text; they require inspection, not automatic replay.
+
+The read response's fixed `artifact_path_guidance` reports
+`workflow_reserved_artifact_path`, the checkpoint module's reserved path components,
+and `fictional_data_component: "fixtures"`, `changes_policy: false`. In particular,
+even a fictional project's `data/`, `logs/` and `attachments/` cannot be registered
+as artifacts/checkpoints. Use fictional `fixtures/` data inside the approved scope;
+do not rename/copy real operational records or relax protection. Other path, file
+type, size, DLP, approval and workspace checks still apply. This guidance grants
+no write or transmission permission.

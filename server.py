@@ -39,6 +39,8 @@ class WorkflowRequestError(ValueError):
 def workflow_call(operation):
     try:
         return operation()
+    except OSError:
+        raise WorkflowRequestError('workflow_local_io_check_required') from None
     except (ValueError, KeyError, TypeError) as error:
         message = str(error)
         if re.fullmatch(r'(?:workflow|work_package|dependency)_[a-z_]+',message): code = message
@@ -428,12 +430,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.common()
             path = urlparse(self.path).path
-            if path in ('/api/workflow/job','/api/maintenance/workflow'):
+            if path in ('/api/workflow/job','/api/maintenance/workflow','/api/workflow/controls'):
                 if not self.authorized(): raise PermissionError('画面を再読み込みしてください。')
                 maintenance = path == '/api/maintenance/workflow'
                 if maintenance and not self.maintenance_authorized(): raise PermissionError('保守担当の認証が必要です。')
                 query = parse_qs(urlparse(self.path).query,keep_blank_values=True)
                 if set(query) != {'id'} or len(query['id']) != 1: raise WorkflowRequestError('workflow_request_invalid')
+                if path == '/api/workflow/controls':
+                    return self.send(200,workflow_call(lambda:self.app.engine.workflow_controls_view(query['id'][0])))
                 return self.send(200,workflow_call(lambda:self.app.engine.workflow_view(query['id'][0],maintainer=maintenance)))
             if path == '/health':
                 return self.send(200, {'status': 'ok', 'app': 'agent-team', 'version': '0.1.0'})
@@ -684,7 +688,47 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized() or self.headers.get('X-Agent-Team-UI') != '1':
                 raise PermissionError('ブラウザからの認証済み操作が必要です。')
             engine = self.app.engine
-            if path == '/api/workflow/feature-review/prepare':
+            if path == '/api/workflow/control':
+                action = body.get('action')
+                fields = {'cancel_job':('action','job_id','target','confirmed'),
+                    'retry_task':('action','job_id','task_id','target','checked_changes','note','handoff_allowed'),
+                    'confirm_recovery':('action','job_id','task_id','target','writer_stopped','checked_changes')}
+                if not isinstance(action,str) or action not in fields: raise WorkflowRequestError('workflow_control_action_invalid')
+                workflow_body(body,fields[action],action)
+                target = body['target']
+                if not isinstance(target,dict): raise WorkflowRequestError('workflow_control_target_changed')
+                if action == 'cancel_job':
+                    if body['confirmed'] is not True: raise WorkflowRequestError('workflow_control_confirmation_required')
+                    workflow_call(lambda:engine._validate_workflow_control_target(target,body['job_id'],action))
+                    result = workflow_call(lambda:engine.cancel_job(body['job_id'],workflow_target=target))
+                    result = {'cancelled':True,'edits_restored':False,'formal_receipt':False}
+                else:
+                    task = workflow_call(lambda:self.app.store.get(body['task_id'],'task'))
+                    if task['job_id'] != body['job_id']: raise WorkflowRequestError('workflow_control_task_invalid')
+                    job = self.app.store.get(task['job_id'],'job')
+                    maintenance = (action == 'confirm_recovery' or task.get('recovery_check_required')
+                        or task.get('recovery_confirmation') or self.app.store.has_operation_history(job['id']))
+                    if maintenance and not self.maintenance_authorized(): raise PermissionError('保守担当の認証が必要です。')
+                    workflow_call(lambda:engine._validate_workflow_control_target(target,body['job_id'],action,task['id']))
+                    if action == 'confirm_recovery':
+                        result = workflow_call(lambda:engine.confirm_recovery(task['id'],target['task_revision'],
+                            target['job_revision'],target['attempt_id'],writer_stopped=body['writer_stopped'],
+                            checked_changes=body['checked_changes'],workflow_target=target))
+                    else:
+                        if body['checked_changes'] is not True or type(body['handoff_allowed']) is not bool:
+                            raise WorkflowRequestError('workflow_control_confirmation_required')
+                        if not isinstance(body['note'],str) or len(body['note']) > 4000:
+                            raise WorkflowRequestError('workflow_request_invalid')
+                        from team_dlp import require_clean_input
+                        workflow_call(lambda:require_clean_input(body['note'],False,'再試行の補足'))
+                        workflow_call(lambda:engine.retry(task['id'],body['note'],body['handoff_allowed'],workflow_target=target))
+                        with self.app.store.lock:
+                            latest = self.app.store.get(task['id'],'task')
+                            pending = any(a['status'] == 'pending' for a in self.app.store.for_job('approval',job['id']))
+                            result = {'queued':latest['status'] == 'queued','task_status':latest['status'],
+                                'decision_required':pending,'next_action':'review_pending_decision' if pending else 'observe_dispatch',
+                                'started':False,'formal_receipt':False}
+            elif path == '/api/workflow/feature-review/prepare':
                 workflow_body(body,('job_id','work_package_id','work_package_revision','action'),'request_feature_review')
                 result = workflow_call(lambda:engine.request_feature_review(body['job_id'],body['work_package_id'],
                     expected_wp_revision=body['work_package_revision']))
@@ -885,7 +929,13 @@ class Handler(BaseHTTPRequestHandler):
                 engine.accept_without_fix(body['id'])
                 result = {'ok': True}
             elif path == '/api/cancel':
-                engine.cancel_job(body['id'])
+                job = self.app.store.get(body['id'],'job')
+                if job.get('workflow_contract_version') == 1:
+                    if (set(body) != {'id','workflow_target','confirmed'} or body['confirmed'] is not True
+                            or not isinstance(body['workflow_target'],dict)):
+                        raise WorkflowRequestError('workflow_control_confirmation_required')
+                    workflow_call(lambda:engine.cancel_job(body['id'],workflow_target=body['workflow_target']))
+                else: engine.cancel_job(body['id'])
                 result = {'ok': True}
             elif path == '/api/maintenance/recovery/confirm':
                 if not self.maintenance_authorized():
@@ -901,7 +951,7 @@ class Handler(BaseHTTPRequestHandler):
                 retry_job = self.app.store.get(retry_task['job_id'], 'job')
                 if retry_job.get('workflow_contract_version') == 1:
                     if (('action' in body and body['action'] != 'retry_task')
-                            or set(body)-{'id','action','checked_changes','note','handoff_allowed'}):
+                            or set(body)-{'id','action','checked_changes','note','handoff_allowed','workflow_target'}):
                         raise WorkflowRequestError('workflow_request_invalid')
                 recovery_control = retry_job.get('workflow_contract_version') == 1 and (
                     retry_task.get('recovery_check_required') or retry_task.get('recovery_confirmation')
@@ -910,7 +960,11 @@ class Handler(BaseHTTPRequestHandler):
                         and (retry_job.get('p0_interruption') or {}).get('recovery_status') == 'maintenance_required'))
                         and not self.maintenance_authorized()):
                     raise PermissionError('保守担当の認証が必要です。')
-                engine.retry(body['id'], body.get('note', ''), body.get('handoff_allowed') is True)
+                if retry_job.get('workflow_contract_version') == 1:
+                    if not isinstance(body.get('workflow_target'),dict): raise WorkflowRequestError('workflow_control_target_changed')
+                    workflow_call(lambda:engine.retry(body['id'],body.get('note',''),body.get('handoff_allowed') is True,
+                        workflow_target=body['workflow_target']))
+                else: engine.retry(body['id'], body.get('note', ''), body.get('handoff_allowed') is True)
                 result = {'ok': True}
             elif path == '/api/document/resume':
                 if body.get('confirmed') is not True:
