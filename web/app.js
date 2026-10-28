@@ -124,14 +124,78 @@ const WORKFLOW_ERROR_LABELS={
   work_package_defect_note_required:'差し戻す理由を入力してください。',
   workflow_sensitive_input_blocked:'入力に送信できない情報が含まれている可能性があります。表現を変えて入力してください。',
   workflow_input_or_maintenance_check_required:'入力内容を確認してください。解決しない場合は保守担当の確認が必要です。',
-  workflow_revision_confirmation_not_current:'計画の確認内容が古くなりました。再読み込みして、表示された計画で確認してください。'
+  workflow_revision_confirmation_not_current:'計画の確認内容が古くなりました。再読み込みして、表示された計画で確認してください。',
+  workflow_control_target_changed:'確認の間に依頼の状態が変わったため、送りませんでした。新しい表示を確かめて、必要ならもう一度操作してください。',
+  workflow_control_action_invalid:'この操作は使えません。画面を再読み込みしてください。',
+  workflow_control_task_invalid:'対象の作業がこの依頼と一致しません。画面を再読み込みしてください。',
+  workflow_control_task_not_current:'この作業は計画の変更で古くなったため、再試行できません。新しい作業の状態を確認してください。',
+  workflow_control_confirmation_required:'確認が済んでいないため、送りませんでした。',
+  workflow_control_job_not_active:'この依頼は終了しているため、この操作はできません。',
+  workflow_local_io_check_required:'作業のフォルダを確認できませんでした。自動では再送しません。保守担当の確認が必要です。',
+  workflow_user_action_required:'担当の作業中はこの操作を受け付けません。少し待ってから表示を確かめてください。',
+  workflow_version_required:'この依頼の形式では、この操作を使えません。画面を再読み込みしてください。'
 };
+// W05.03：新方式の依頼の中止・再試行。操作を始めたときに現在の対象（版）を読み、利用者の明示の確認の後に1回だけ送る。
+// 対象が古くなっていれば送り直さない（新しい表示で確認し直す）。対象は権限ではなく、保守の確認は保守担当だけが行う。
+// 旧方式の依頼は従来の経路と文言のまま。
+const CONTROL_ONCE_NOTE='\n\n（いま表示している状態に対して1回だけ送ります。その間に状態が変わっていた場合は、送らずにお知らせします。）';
+function isWorkflowJob(job){return job?.workflow_contract_version===1;}
+function needsMaintenance(task,job){
+  const stop=job?.p0_interruption||{};
+  return !!(task.recovery_check_required||task.recovery_confirmation
+    ||(stop.recovery_status==='maintenance_required'&&(!stop.interrupted_task_id||stop.interrupted_task_id===task.id))
+    ||(isWorkflowJob(job)&&job.workflow?.wait_owner==='maintainer'));
+}
+async function workflowTarget(job,kind,taskId){
+  const view=await api('/api/workflow/controls?id='+encodeURIComponent(job.id));
+  if(view.contract_version!==1)throw new Error('操作の形式が一致しません。画面を再読み込みしてください。');
+  if(kind==='cancel_job')return view.cancel_target;
+  const entry=(view.tasks||[]).find(t=>t.task_id===taskId);
+  if(!entry)throw new Error('対象の作業が見つかりません。画面を再読み込みしてください。');
+  return entry.retry_target;
+}
+function retryAcceptedText(result){
+  if(result.decision_required)return '再試行を受け付けました。始める前にあなたの確認が必要です。確認の欄で内容を見て判断してください。';
+  if(result.queued)return '再試行を受け付けました。順番が来ると担当が動き始めます（まだ始まっていません）。';
+  return '再試行を受け付けました（状態：'+(statuses[result.task_status]||result.task_status)+'）。';
+}
+// question が null の場合は、呼出し元の確認（チェック欄など）を明示の確認とみなす。戻り値：送ったかどうか。
+async function requestRetry(task,job,{note='',handoff,question,legacyNotice}){
+  if(!isWorkflowJob(job)){
+    if(question&&!confirm(question))return false;
+    const body={id:task.id,checked_changes:true,note};if(handoff!==undefined)body.handoff_allowed=handoff;
+    await api('/api/retry',body);if(legacyNotice)notice(legacyNotice);return true;
+  }
+  if(needsMaintenance(task,job)){notice('この作業は、先に保守担当の確認が必要です。あなたの操作は不要です。確認が終わると再試行の操作が表示されます。');return false;}
+  const target=await workflowTarget(job,'retry_task',task.id);
+  if(question&&!confirm(question+CONTROL_ONCE_NOTE))return false;
+  const result=await api('/api/workflow/control',{action:'retry_task',job_id:job.id,task_id:task.id,target,
+    checked_changes:true,note:note||'',handoff_allowed:handoff===true});
+  notice(retryAcceptedText(result));return true;
+}
+async function requestCancel(job){
+  const question='実行中・待機中の作業を中止します。既存の変更は自動では戻しません。';
+  if(!isWorkflowJob(job)){if(confirm(question))await api('/api/cancel',{id:job.id});return;}
+  const target=await workflowTarget(job,'cancel_job');
+  if(!confirm(question+'中止は成果の受領ではありません。'+CONTROL_ONCE_NOTE))return;
+  await api('/api/workflow/control',{action:'cancel_job',job_id:job.id,target,confirmed:true});
+  notice('依頼を中止しました。作業済みの変更は戻していません。');
+}
+function maintenanceWaitBox(){
+  const box=el('section',undefined,'decision-help');box.id='maintenance-wait';box.setAttribute('role','status');
+  box.append(el('h3','保守担当の確認を待っています'),
+    el('p','作業が途中で止まりました。保守担当が、担当の停止と現在の変更を確認するまで再開しません。作業の成果は保存されています。'),
+    el('p','あなたの操作は不要です。確認が終わると、ここに再試行の操作が表示されます。依頼をやめる場合は、下の「この依頼全体を中止」を使えます。','hint'));
+  return box;
+}
 async function action(fn) { if(busy)return; busy=true; try{await fn();await refresh();}catch(e){notice(e.message);}finally{busy=false;} }
 function button(text, fn, cls) { const b=el('button',text,cls);b.type='button';b.addEventListener('click',()=>action(fn));return b; }
 function pending(id) { return state.approvals.filter(a=>a.task_id===id&&a.status==='pending'); }
 function pendingUser(id){return pending(id).filter(userDecision);}
 // 承認待ちがあるが、利用者に判断を求めるものではない（保守・技術・改善）。利用者の判断欄には出さない。
 function maintenanceHeld(task){return pending(task.id).length>0&&pendingUser(task.id).length===0;}
+// W05.03：新方式の依頼で保守の確認待ちの作業は、利用者の判断待ちに数えない（保守の判断と利用者の確認を分ける）。
+function workflowMaintenanceWait(task){const job=state.jobs.find(j=>j.id===task.job_id);return isWorkflowJob(job)&&['failed','blocked','interrupted'].includes(task.status)&&!pendingUser(task.id).length&&needsMaintenance(task,job);}
 function endedJob(task){return ['cancelled','accepted','accepted_with_pending_checks'].includes(state.jobs.find(j=>j.id===task.job_id)?.status);}
 function stopReason(task){
   const summary=task.summary||'',claude=task.profile?.adapter==='claude'||/^Claude Code:/i.test(summary);
@@ -163,7 +227,7 @@ function stopCause(task,job){
   if(task.status==='interrupted')return '原因：担当の実行が中断されました。';
   return '原因：依頼が停止しています（'+jobStatusLabel(job)+'）。';
 }
-function group(task) { if(endedJob(task))return 3; const phase=p0Phase(state.jobs.find(j=>j.id===task.job_id));if(phase&&!pendingUser(task.id).length)return phase.key==='retrying'?1:0; if(maintenanceHeld(task))return 0; if(isStalledReview(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
+function group(task) { if(endedJob(task))return 3; const phase=p0Phase(state.jobs.find(j=>j.id===task.job_id));if(phase&&!pendingUser(task.id).length)return phase.key==='retrying'?1:0; if(maintenanceHeld(task)||workflowMaintenanceWait(task))return 0; if(isStalledReview(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
 const completedFolds=new Map();
 function completedTime(task){
   const job=state.jobs.find(j=>j.id===task.job_id);
@@ -726,7 +790,7 @@ function render() {
     }
     for(const task of tasks){
       const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card role-'+task.role+(index===2?' attention':''));card.dataset.focusKey='card:'+task.id;
-      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatusLabel(job)):p0Phase(job)&&!pendingUser(task.id).length?p0Phase(job).label:maintenanceHeld(task)?'保守対応待ち':pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
+      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatusLabel(job)):p0Phase(job)&&!pendingUser(task.id).length?p0Phase(job).label:maintenanceHeld(task)||workflowMaintenanceWait(task)?'保守対応待ち':pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
       const head=el('div',undefined,'card-head');head.append(badge);if(job?.title)head.append(el('span',job.title,'job-title'));card.append(head,el('strong',task.title));
       const warnings=(job?.warning_issues||[]).filter(i=>i.task_id===task.id&&i.status==='open');
       if(warnings.length){const note=el('div',undefined,'progress-warning');note.append(el('strong',`⚠ 警告 ${warnings.length}件・作業は継続`));for(const issue of warnings)note.append(el('p',issue.summary));card.append(note);}
@@ -864,7 +928,9 @@ function foldDetailSections(body,task){
     const isFailure=node.id==='failure-card';if(isFailure)fold.classList.add('failure-fold');
     // 停止理由の欄も同じく開いて色を付ける（自動修正の上限・blocked を含む、止まったすべての場合）。
     const isCause=stopped&&node.id==='decision-guide';if(isCause)fold.classList.add('failure-fold','stop-fold');
-    fold.open=changed?Boolean(isFocus||(stopped&&(isFailure||isCause))):Boolean(previous.open[key]);
+    // W05.03：保守の確認待ちの案内は、利用者が操作を探さなくて済むよう開いて出す。
+    const isMaintenanceWait=stopped&&node.id==='maintenance-wait';
+    fold.open=changed?Boolean(isFocus||(stopped&&(isFailure||isCause||isMaintenanceWait))):Boolean(previous.open[key]);
     if(isFocus)focusFold=fold;
     fold.addEventListener('toggle',()=>{const saved=detailFolds.get(task.id);if(saved&&fold.isConnected)saved.open[key]=fold.open;});
   }
@@ -1087,6 +1153,7 @@ function failureDiagnosis(task,job){
   return {cause:'担当が決められた回数で工程を終えられませんでした',why:'内容：'+(task.summary||'（記録なし）').slice(0,240),kinds:['retry','model','transfer','cancel']};
 }
 function failureCard(task,job){
+  if(isWorkflowJob(job)&&needsMaintenance(task,job))return maintenanceWaitBox();
   if(task.failure_code==='codex_sandbox'||task.failure_code==='claude_auth'){
     const box=el('section',undefined,'failure-card');box.id='failure-card';
     box.append(el('h3','実行環境の障害で一時停止しています'),
@@ -1095,8 +1162,9 @@ function failureCard(task,job){
       el('p','実行環境の復旧が必要です。仕様の補足や後続工程への移管では解消しません。'));
     box.append(button('成果を保持して閉じる',()=>{$('detail-dialog').close();}),
       button('環境復旧後、この工程から再開',async()=>{
-        if(!confirm('実行環境が復旧した後に使用してください。完了済み工程と成果を保持し、この工程だけを再試行します。再開しますか？'))return;
-        try{await api('/api/retry',{id:task.id,checked_changes:true,note:'実行環境の復旧後、既存成果と完了済み工程を保持して、この工程のみ再開します。'});await refresh();notice('停止した工程から再開しました。');}catch(error){notice(error.message);}
+        try{if(await requestRetry(task,job,{note:'実行環境の復旧後、既存成果と完了済み工程を保持して、この工程のみ再開します。',
+          question:'実行環境が復旧した後に使用してください。完了済み工程と成果を保持し、この工程だけを再試行します。再開しますか？',
+          legacyNotice:'停止した工程から再開しました。'}))await refresh();}catch(error){notice(error.message);}
       }));
     const detail=el('details');detail.append(el('summary','技術的な停止理由'),el('p',task.summary||'詳細未取得'));box.append(detail);return box;
   }
@@ -1116,9 +1184,8 @@ function failureCard(task,job){
     retry:['補足を書いて再試行する','原因を解消したうえで、下の回答欄に補足を書いて再試行します。同じ条件のままでは、同じ結果になります。',jump('#retry-note','回答欄へ')],
     rerun:['そのまま再試行する（書き足すことはありません）','同じ指示のまま、この担当をもう一度動かします。この担当がすでに行った変更はそのまま残ります。',
       button('そのまま再試行する',async()=>{
-        if(!confirm('同じ指示のまま、この担当を再試行します。よろしいですか？'))return;
-        await api('/api/retry',{id:task.id,checked_changes:true,note:'担当の報告の形が決まりに合わなかったため、同じ指示で再試行します。報告は指定の形で返してください。'});
-        notice('再試行しました。担当が動き始めます。');},'primary')],
+        await requestRetry(task,job,{note:'担当の報告の形が決まりに合わなかったため、同じ指示で再試行します。報告は指定の形で返してください。',
+          question:'同じ指示のまま、この担当を再試行します。よろしいですか？',legacyNotice:'再試行しました。担当が動き始めます。'});},'primary')],
     redo:['依頼を中止して、出し直す',job.document_source?'依頼の内容を見直して出し直します。':'資料を作る依頼なら、台帳の「相談」で種類を「資料作成」にして出し直します。',jump('#cancel-job','中止ボタンへ')],
     model:['担当・モデルを切り替える','利用枠やモデルの不調が原因の場合に有効です。道具が足りない場合は解消しません。',button('担当・モデルを切り替える',()=>openModelSwitch(task.id))],
     cancel:['この依頼全体を中止する','作業済みの変更は自動では戻しません。',jump('#cancel-job','中止ボタンへ')]};
@@ -1216,7 +1283,8 @@ function recoveryPanel(task,job){
     confirmInput.type='checkbox';confirmLabel.append(confirmInput,document.createTextNode('登録済みの移管内容と実施済みの変更を確認しました。'));
     restart.type='button';restart.disabled=true;confirmInput.onchange=()=>{restart.disabled=!confirmInput.checked;};message.setAttribute('role','status');
     restart.onclick=async()=>{restart.disabled=true;message.textContent='担当を再開しています…';
-      try{await api('/api/retry',{id:task.id,checked_changes:true,note:'ボードで登録済みの工程間移管を確認しました。最新の移管範囲に従って再開してください。'});await refresh();}
+      try{if(await requestRetry(task,job,{note:'ボードで登録済みの工程間移管を確認しました。最新の移管範囲に従って再開してください。',question:null}))await refresh();
+        else restart.disabled=!confirmInput.checked;}
       catch(error){message.textContent=error.message;restart.disabled=!confirmInput.checked;}};
     box.append(confirmLabel,message,restart);
   }
@@ -1396,8 +1464,10 @@ function renderDetail(task,version) {
   if(!endedJob(task)&&task.previous_findings&&task.result?.status==='needs_changes')body.append(el('p','修正後も指摘が残っています。変更した箇所と根拠を確認してください。未変更のまま再試行せず、修正または未完了項目を残す引き継ぎを選んでください。','notice'));
   if(!endedJob(task)&&task.status==='failed')body.append(failureCard(task,job));
   if(!endedJob(task)&&group(task)===2)body.append(decisionHelp(task));
-  if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status))body.append(advicePanel(task));
-  if(!endedJob(task)&&['failed','blocked','interrupted'].includes(task.status)&&['researcher','builder'].includes(task.role))body.append(recoveryPanel(task,job));
+  // 新方式で保守の確認待ちの作業には、利用者向けの復旧・再試行の操作を出さない（保守の判断と利用者の確認を分ける）。
+  const maintenanceWait=isWorkflowJob(job)&&needsMaintenance(task,job);
+  if(!endedJob(task)&&!maintenanceWait&&['failed','blocked','interrupted'].includes(task.status))body.append(advicePanel(task));
+  if(!endedJob(task)&&!maintenanceWait&&['failed','blocked','interrupted'].includes(task.status)&&['researcher','builder'].includes(task.role))body.append(recoveryPanel(task,job));
   if(job.artifact_urls?.length){const box=el('section',undefined,'detail-section');box.append(el('h3','ClaudeのArtifact（claude.ai・デスクトップから送信）'));
     for(const a of job.artifact_urls){const p=el('p');const link=el('a',a.url);link.href=a.url;link.target='_blank';link.rel='noopener noreferrer';p.append(link,` ・送信 ${a.publishes||0}回`);box.append(p);}
     box.append(el('p','共有するかどうかはclaude.ai上で利用者が判断してください。','hint'));body.append(box);}
@@ -1510,7 +1580,9 @@ function renderDetail(task,version) {
       factMessage.textContent='保存しました。';factForm.reset();await showHandoffHistory(job.id,handoff);}
     catch(error){factMessage.textContent=error.message;}finally{factSubmit.disabled=false;}
   });
-  if(!endedJob(task)&&['failed','interrupted','blocked','cancelled'].includes(task.status)&&!pending(task.id).some(a=>a.payload.questions?.length)){
+  if(!endedJob(task)&&isWorkflowJob(job)&&needsMaintenance(task,job)&&['failed','interrupted','blocked'].includes(task.status)){
+    if(!body.querySelector('#maintenance-wait'))body.append(maintenanceWaitBox());
+  }else if(!endedJob(task)&&['failed','interrupted','blocked','cancelled'].includes(task.status)&&!pending(task.id).some(a=>a.payload.questions?.length)){
     const s=el('section',undefined,'detail-section'),input=el('textarea');input.id='retry-note';input.rows=4;input.placeholder='ここに回答・追加の作業指示、または解決した条件を入力してください。';input.value=drafts[input.id]||'';input.setAttribute('aria-label','回答・再開の補足');
     const label=el('label','回答・補足の入力欄');label.htmlFor=input.id;
     // 2026-10-08 「未実施として残して先へ進める」を、回答欄の文章だけでなく利用者の範囲指定として記録できるようにする。
@@ -1519,9 +1591,10 @@ function renderDetail(task,version) {
     const canScope=['builder','researcher'].includes(task.role);
     s.append(el('h3','回答・補足を入力して再開'),label,input,...(canScope?[scopeLabel]:[]),el('p','入力は再開する担当へ渡します。システムエラーの場合は、原因を解消してから再開してください。','hint'),button('回答・補足を送って再試行',async()=>{
       if(scope.checked&&!input.value.trim()){notice('未実施として残す項目を入力欄に書いてください。');input.focus();return;}
-      if(confirm(scope.checked?'書いた項目を未実施として残し、先へ進めることを許可して再試行します。よろしいですか？':'既に行われた編集や処理を確認しましたか？ 同じ依頼が再実行されます。'))await api('/api/retry',{id:task.id,note:input.value,checked_changes:true,handoff_allowed:scope.checked});}));body.append(s);
+      await requestRetry(task,job,{note:input.value,handoff:scope.checked,
+        question:scope.checked?'書いた項目を未実施として残し、先へ進めることを許可して再試行します。よろしいですか？':'既に行われた編集や処理を確認しましたか？ 同じ依頼が再実行されます。'});}));body.append(s);
   }
-  if(!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status)){const cancel=button('この依頼全体を中止',async()=>{if(confirm('実行中・待機中の作業を中止します。既存の変更は自動では戻しません。'))await api('/api/cancel',{id:job.id});},'danger');cancel.id='cancel-job';body.append(cancel);}
+  if(!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status)){const cancel=button('この依頼全体を中止',()=>requestCancel(job),'danger');cancel.id='cancel-job';body.append(cancel);}
   body.querySelectorAll('textarea').forEach(t=>{if(drafts[t.id])t.value=drafts[t.id];});
   body.querySelectorAll('input[type=checkbox][id]').forEach(c=>{if(checkedBoxes[c.id])c.checked=true;});
   foldDetailSections(body,task);
@@ -1689,7 +1762,7 @@ function decisionItems(){
         voice:'依頼全体の作業工程が終了しました。成果を確認してください。',completion:true}];
     }
     if(approvals.length)return [{task,key:approvals.map(a=>a.id).sort().join(':'),label:'判断・確認をお願いします'}];
-    if(!p0Phase(state.jobs.find(j=>j.id===task.job_id))&&['blocked','failed','interrupted'].includes(task.status)){const reason=stopReason(task);return [{task,key:`${task.id}:${task.attempt}:${task.status}:${reason?.code||'generic'}`,label:reason?.title||(task.status==='blocked'?'判断が必要です':'作業が停止しています'),detail:reason?.detail,voice:reason?.title}];}
+    if(!p0Phase(state.jobs.find(j=>j.id===task.job_id))&&!workflowMaintenanceWait(task)&&['blocked','failed','interrupted'].includes(task.status)){const reason=stopReason(task);return [{task,key:`${task.id}:${task.attempt}:${task.status}:${reason?.code||'generic'}`,label:reason?.title||(task.status==='blocked'?'判断が必要です':'作業が停止しています'),detail:reason?.detail,voice:reason?.title}];}
     return [];
   }).concat(state.jobs.filter(job=>!['cancelled','accepted','accepted_with_pending_checks'].includes(job.status)).flatMap(job=>{
     const review=stalledReview(job);
