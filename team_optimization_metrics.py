@@ -14,11 +14,14 @@ from contextlib import closing
 import sqlite3
 from pathlib import Path
 
-from team_usage_metrics import copilot_normalized, normalize, weighted
+from team_usage_metrics import copilot_normalized, normalize, weighted, workflow_measurements, _coverage, history_complete
 
 TOKEN_KEYS = ('input_uncached', 'cache_read', 'cache_creation', 'output', 'input_total')
 SUM_KEYS = TOKEN_KEYS + ('reasoning', 'weighted')
 ATTEMPT_FIELDS = ('job_id', 'task_id', 'role', 'agent', 'attempt', 'provider', 'model', 'status', 'failure_code',
+                  'agent_run_id','attempt_id','session_fingerprint','checkpoint_id','work_package_id','effort','cost_usd_reported',
+                  'initial_payload_characters','inherited_context_characters',
+                  'history_truncated','history_incomplete',
                   'measurement', *TOKEN_KEYS, 'reasoning', 'weighted', 'copilot_credits', 'copilot_premium_requests',
                   'first_call_input', 'reference_transport', 'token_reduction',
                   'num_turns', 'duration_ms', 'tool_calls', 'experience_refs',
@@ -39,6 +42,8 @@ def _first_call_input(usage):
 
 
 def _attempt(task, run):
+    metric=workflow_measurements([{'id':task['job_id']}],[dict(task,agent_run_history=[],agent_run=run)])['rows']
+    metric=metric[0] if metric else {}
     if run.get('provider') == 'copilot' and not run.get('usage'):
         # Copilot's counts come from its usage file, recorded per run since 2026-10-09 (team_adapters.copilot_tokens).
         usage = copilot_normalized(run.get('copilot_tokens'))
@@ -48,10 +53,16 @@ def _attempt(task, run):
     refs = run.get('context_refs') or {}
     raw = run.get('usage_raw') or {}
     return {'job_id': task['job_id'], 'task_id': task['id'], 'role': task.get('role'), 'agent': run.get('name'),
+            'history_truncated':bool(task.get('agent_run_history_truncated')),
+            'history_incomplete':not history_complete(task),
+            **{key:metric.get(source) for key,source in (('agent_run_id','run_id'),('attempt_id','attempt_id'),
+              ('session_fingerprint','session_fingerprint'),('checkpoint_id','checkpoint_id'),('work_package_id','work_package_id'),
+              ('effort','effort'),('cost_usd_reported','cost_usd_reported'),('initial_payload_characters','initial_payload_characters'),
+              ('inherited_context_characters','inherited_context_characters'))},
             'attempt': run.get('attempt'), 'provider': run.get('provider'), 'model': run.get('model') or (task.get('profile') or {}).get('model'),
-            'status': run.get('status'), 'failure_code': run.get('failure_code'), 'measurement': usage['measurement'],
-            **{k: usage.get(k) for k in TOKEN_KEYS},
-            'reasoning': usage.get('reasoning'), 'weighted': weighted(usage) if usage['measurement'] != 'unknown' else None,
+            'status': run.get('status'), 'failure_code': run.get('failure_code'), 'measurement': metric.get('measurement','unknown'),
+            **{k: metric.get(k) for k in TOKEN_KEYS},
+            'reasoning': metric.get('reasoning'), 'weighted': metric.get('weighted'),
             'copilot_credits': run.get('copilot_credits'), 'copilot_premium_requests': run.get('copilot_premium_requests'),
             'first_call_input': _first_call_input(run.get('first_call_usage')),
             'reference_transport': (run.get('context_optimization') or {}).get('selected_transport'),
@@ -78,21 +89,37 @@ def _attempt(task, run):
             'started_at': run.get('started_at'), 'finished_at': run.get('finished_at')}
 
 
-def attempts(database):
-    with closing(sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True)) as db:
-        tasks = [json.loads(body) for (body,) in db.execute("SELECT body FROM objects WHERE kind='task'")]
-        jobs = {j['id']: j for j in (json.loads(body) for (body,) in db.execute("SELECT body FROM objects WHERE kind='job'"))}
-        approvals = [json.loads(body) for (body,) in db.execute("SELECT body FROM objects WHERE kind='approval'")]
-    rows = []
+def attempts(database, *, records=None):
+    records=_measurement_snapshot(database) if records is None else records
+    tasks=records['task']; jobs={j['id']:j for j in records['job']}; approvals=records['approval']
+    rows = []; snapshots={}; owners={}
     for task in tasks:
         runs = list(task.get('agent_run_history') or []) + ([task['agent_run']] if task.get('agent_run') else [])
-        seen = set()
-        for run in runs:
-            if not isinstance(run, dict) or run.get('id') in seen:
-                continue
-            seen.add(run.get('id'))
-            rows.append(_attempt(task, run))
+        for index,run in enumerate(runs):
+            if not isinstance(run,dict) or run.get('status')=='held': continue
+            identity=run.get('id')
+            key=('id',identity) if isinstance(identity,str) and identity else ('unknown',task['id'],index)
+            owners.setdefault(key,set()).add(task['id']); snapshots[key]=(task,run)
+    for key,(task,run) in snapshots.items():
+        row=_attempt(task,run)
+        if key[0]=='unknown' or len(owners[key])!=1:
+            row.update(measurement='unknown',**dict.fromkeys(SUM_KEYS),cost_usd_reported=None)
+        rows.append(row)
     return rows, jobs, approvals
+
+
+def _measurement_snapshot(database):
+    """One read-only SELECT snapshot for all projections; never reread mixed revisions."""
+    records={kind:[] for kind in ('job','task','approval','checkpoint')}
+    with closing(sqlite3.connect(Path(database).resolve().as_uri()+'?mode=ro',uri=True)) as db:
+        for kind,body in db.execute("SELECT kind,body FROM objects WHERE kind IN ('job','task','approval','checkpoint')"):
+            records[kind].append(json.loads(body))
+    return records
+
+
+def workflow_report(database, *, records=None):
+    records=_measurement_snapshot(database) if records is None else records
+    return workflow_measurements(records['job'],records['task'],records['approval'],checkpoints=records['checkpoint'])
 
 
 def _total(rows):
@@ -103,6 +130,7 @@ def _total(rows):
     for key in SUM_KEYS:
         values = [r.get(key) for r in measured if isinstance(r.get(key), int)]
         out[key] = sum(values) if values else None
+    out['coverage']={key:_coverage([r.get(key) for r in rows],final=[r['measurement']=='final' and not r.get('history_incomplete') for r in rows]) for key in SUM_KEYS}
     # Credits are counted for every attempt that reported them (failed and cancelled runs also spent credits).
     credits = [r['copilot_credits'] for r in rows if isinstance(r.get('copilot_credits'), (int, float))]
     out['copilot_credits'] = round(sum(credits), 4) if credits else None
@@ -120,7 +148,7 @@ def _outcomes(ids, jobs, rows):
     # A partial value is only a measured lower bound. Historical accepted jobs
     # without any recorded run cannot support a cost-per-acceptance claim.
     recorded_jobs = {r['job_id'] for r in selected}
-    complete = bool(selected) and all(r['measurement'] == 'final'
+    complete = bool(selected) and all(r['measurement'] == 'final' and not r.get('history_incomplete')
                                       and isinstance(r.get('input_total'), int)
                                       and isinstance(r.get('output'), int) for r in selected)
     complete = complete and all(j in recorded_jobs for j in ids if jobs[j].get('status') == 'accepted')
@@ -139,7 +167,8 @@ def _outcomes(ids, jobs, rows):
 
 
 def report(database):
-    rows, jobs, approvals = attempts(database)
+    records=_measurement_snapshot(database)
+    rows, jobs, approvals = attempts(database,records=records)
     by = lambda key: {name: _total([r for r in rows if key(r) == name]) for name in sorted({str(key(r)) for r in rows})}
     per_job = {}
     for job_id in sorted(jobs):
@@ -172,7 +201,7 @@ def report(database):
               'reuse_chars_after': sum(r['reuse_chars_after'] for r in shadow) if shadow else None,
               'experience_dropped': sum(r['experience_dropped'] or 0 for r in shadow) if shadow else None,
               'unit': 'characters of reuse context (not tokens)'}
-    return {'overall': _total(rows),
+    return {'workflow_measurements':workflow_report(database,records=records),'overall': _total(rows),
             'evaluation_modes': evaluation,
             'by_route': routes,
             'context_budget': budget,

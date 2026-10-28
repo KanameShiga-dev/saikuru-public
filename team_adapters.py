@@ -311,6 +311,8 @@ class CodexAdapter:
                     raise ProviderError('CodexのWindowsサンドボックスの起動確認に失敗しました。モデル実行は開始していません。詳細: ' + str(exc)[:800], 'codex_sandbox', model_call_state='not_started') from exc
             from team_attachments import provider_input
             prompt += report_format_instruction(schema)
+            from team_usage_metrics import observe_prompt
+            observe_prompt(ctx,prompt)
             request('turn/start', {'threadId': thread_id, 'input': provider_input(ctx, prompt, 'codex'),
                                   'effort': profile['effort'], 'outputSchema': schema})
             final = ''
@@ -424,6 +426,8 @@ class ClaudeAdapter:
                   '--settings', json.dumps(settings), '--json-schema', json.dumps(schema),
                   '--no-session-persistence']
         prompt += report_format_instruction(schema)
+        from team_usage_metrics import observe_prompt
+        observe_prompt(ctx,prompt)
         # Images (user attachments or reference images drawn by 采来) need the structured input.
         structured = bool(getattr(ctx, 'attachment_ids', []) or getattr(ctx, 'reference_images', None))
         if structured:
@@ -719,6 +723,8 @@ class CopilotAdapter:
             ctx.agent_started('copilot-' + session_id, 'GitHub Copilot CLI / prompt mode（'
                               + ('采来の確認付きの実装' if work else '資料作成' if document and role == 'builder' else '読み取り専用') + '）')
             ctx.event('GitHub Copilotへ接続しました。モデル: ' + profile['model'])
+            from team_usage_metrics import observe_prompt
+            observe_prompt(ctx,text,includes_system=True)
             final = self._call(ctx, command, text, workdir.name, env, allowed)
             try:
                 result, errors = copilot_answer(final, schema), None
@@ -741,6 +747,7 @@ class CopilotAdapter:
                    '確認していないことは未確認と書いてください。前置き・説明文・コードブロックは付けないでください。\n'
                    + json.dumps(schema, ensure_ascii=False))
             first_errors = errors
+            observe_prompt(ctx,ask,includes_system=True,kind='format_repair')
             final = self._call(ctx, repair, ask, workdir.name, env, [], baseline=self._spent)
             try:
                 result = copilot_answer(final, schema)
@@ -894,6 +901,8 @@ class GeminiAdapter:
             for model in models:
                 try:
                     ctx.event('Geminiへ接続しました。モデル: ' + model)
+                    from team_usage_metrics import observe_prompt
+                    observe_prompt(ctx,text,includes_system=True)
                     answer = self._call(ctx, model, text, work, env)
                 except ProviderError as exc:
                     if exc.code in ('gemini_quota', 'gemini_busy'):
@@ -915,6 +924,7 @@ class GeminiAdapter:
                 ask = (text + '\n\n---\n直前の回答は、指定のJSONスキーマに合っていません（' + '、'.join(errors[:20])
                        + '）。直前の回答:\n' + (answer or '')[:20000] + '\n\n調べ直さず、同じ内容を指定のスキーマに合うJSONオブジェクト'
                        'だけで出力し直してください。確認していないことは未確認と書いてください。')
+                observe_prompt(ctx,ask,includes_system=True,kind='format_repair')
                 answer = self._call(ctx, model, ask, work, env, repair=True)
                 try:
                     result = copilot_answer(answer, schema)
