@@ -5983,125 +5983,152 @@ class Engine:
             'plan_digest': plan['digest'], 'workspace_identity': workspace_identity(workspace['current']),
             'files': files}
 
+    def _native_assessment_stamp(self):
+        """Called under Store.lock; catches local writes, rollbacks and other connections."""
+        return (self.store.db.total_changes,
+            self.store.db.execute('PRAGMA data_version').fetchone()[0],
+            tuple(sorted((key, ctx.project) for key, ctx in self.active.items())),
+            tuple(self.config['approved_roots']))
+
     def native_recovery_assessment(self, task_id, *, actor=None):
-        """Maintenance-only evidence preview; never confirmation or permission."""
-        from team_wbs import scope_file_observation
-        from team_p0_contract import checkpoint_scope
-        from team_harness import workspace_identity
+        """Maintenance-only optimistic read; never confirmation or permission."""
         if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
             raise ValueError('workflow_maintenance_action_required')
         with self.store.lock:
-            task = self.store.get(task_id, 'task'); job = self.store.get(task['job_id'], 'job')
-            attempt = task.get('current_attempt') or {}; reasons = []
-            try:
-                self._recovery_control_inputs(task_id, allow_native_assessment=True)
-            except (ValueError, KeyError, TypeError):
-                reasons.append('native_state_or_effects_unresolved')
-            if not task.get('work_package_id') or task.get('role') != 'builder':
-                reasons.append('native_builder_wp_required')
-            run = task.get('agent_run')
-            if (not isinstance(run, dict) or run.get('attempt_id') != attempt.get('id')
-                    or run.get('provider') not in ('codex', 'claude')
-                    or run.get('provider') != task.get('profile', {}).get('adapter')
-                    or run.get('model') != task.get('profile', {}).get('model')
-                    or run.get('effort') != task.get('profile', {}).get('effort')
-                    or not isinstance(run.get('measurement_ids'), dict)
-                    or any(run['measurement_ids'].get(k) != v for k, v in {
-                        'job_id': job['id'], 'task_id': task_id, 'attempt_id': attempt.get('id')}.items())):
-                reasons.append('native_run_identity_unresolved'); run = {}
-            run_records = self.store.for_job('agent_run', job['id'])
-            for other in run_records:
-                if other.get('task_id') == task_id or other.get('attempt_id') == attempt.get('id'):
-                    keys = ('id','attempt_id','provider','model','effort','measurement_ids',
-                            'tool_observation_version','tool_calls','started_at','scope_baseline')
-                    if any(other.get(k) != run.get(k) for k in keys):
-                        reasons.append('native_run_records_inconsistent')
-            if (type(run.get('tool_observation_version')) is not int or run['tool_observation_version'] != 1
-                    or not isinstance(run.get('tool_calls'), dict)):
-                reasons.append('native_tool_observation_unknown')
-            allowed = {'Read', 'Glob', 'Grep', 'Edit', 'Write', 'fileChange'}
-            named = allowed | {'Bash', 'commandExecution', 'WebSearch', 'webSearch', 'mcpToolCall'}
-            calls = {}; raw_calls = run.get('tool_calls') or {}
-            if not isinstance(raw_calls, dict) or len(raw_calls) > 100:
-                reasons.append('native_tool_observation_unknown'); raw_calls = {}
-            for name, count in raw_calls.items():
-                if not isinstance(name, str) or type(count) is not int or not 0 <= count <= 10_000_000:
-                    reasons.append('native_tool_observation_unknown'); continue
-                label = name if name in named else 'unsupported'
-                calls[label] = calls.get(label, 0) + count
-                if count and name not in allowed: reasons.append('native_tool_kind_unsupported')
-            start_seq = attempt.get('start_event_seq')
-            if type(start_seq) is not int or start_seq < 1:
-                reasons.append('native_attempt_history_unresolved'); start_seq = 0
+            if self.store.depth:
+                raise ValueError('native_assessment_requires_unlocked_transaction_boundary')
+            stamp = self._native_assessment_stamp()
+        result = self._native_recovery_observation(task_id)
+        with self.store.lock:
+            if self._native_assessment_stamp() != stamp:
+                result['eligible_for_reconciliation'] = False
+                result['reasons'] = sorted(set(result['reasons'] + ['native_assessment_changed']))
+                result['target'] = None
+                result['summary']['observation_stable'] = False
+        return result
+
+    def _native_recovery_observation(self, task_id):
+        # Metadata reads take their own short Store locks. Git, file hashing and
+        # prior-artifact validation run without an outer Store lock. Any DB write
+        # across this interval invalidates the public assessment, even a rollback
+        # or an unrelated write. Do not retry automatically or grant permission.
+        from team_wbs import scope_file_observation
+        from team_p0_contract import checkpoint_scope
+        from team_harness import workspace_identity
+        task = self.store.get(task_id, 'task'); job = self.store.get(task['job_id'], 'job')
+        attempt = task.get('current_attempt') or {}; reasons = []
+        try:
+            self._recovery_control_inputs(task_id, allow_native_assessment=True)
+        except (ValueError, KeyError, TypeError):
+            reasons.append('native_state_or_effects_unresolved')
+        if not task.get('work_package_id') or task.get('role') != 'builder':
+            reasons.append('native_builder_wp_required')
+        run = task.get('agent_run')
+        if (not isinstance(run, dict) or run.get('attempt_id') != attempt.get('id')
+                or run.get('provider') not in ('codex', 'claude')
+                or run.get('provider') != task.get('profile', {}).get('adapter')
+                or run.get('model') != task.get('profile', {}).get('model')
+                or run.get('effort') != task.get('profile', {}).get('effort')
+                or not isinstance(run.get('measurement_ids'), dict)
+                or any(run['measurement_ids'].get(k) != v for k, v in {
+                    'job_id': job['id'], 'task_id': task_id, 'attempt_id': attempt.get('id')}.items())):
+            reasons.append('native_run_identity_unresolved'); run = {}
+        run_records = self.store.for_job('agent_run', job['id'])
+        for other in run_records:
+            if other.get('task_id') == task_id or other.get('attempt_id') == attempt.get('id'):
+                keys = ('id','attempt_id','provider','model','effort','measurement_ids',
+                        'tool_observation_version','tool_calls','started_at','scope_baseline')
+                if any(other.get(k) != run.get(k) for k in keys):
+                    reasons.append('native_run_records_inconsistent')
+        if (type(run.get('tool_observation_version')) is not int or run['tool_observation_version'] != 1
+                or not isinstance(run.get('tool_calls'), dict)):
+            reasons.append('native_tool_observation_unknown')
+        allowed = {'Read', 'Glob', 'Grep', 'Edit', 'Write', 'fileChange'}
+        named = allowed | {'Bash', 'commandExecution', 'WebSearch', 'webSearch', 'mcpToolCall'}
+        calls = {}; raw_calls = run.get('tool_calls') or {}
+        if not isinstance(raw_calls, dict) or len(raw_calls) > 100:
+            reasons.append('native_tool_observation_unknown'); raw_calls = {}
+        for name, count in raw_calls.items():
+            if not isinstance(name, str) or type(count) is not int or not 0 <= count <= 10_000_000:
+                reasons.append('native_tool_observation_unknown'); continue
+            label = name if name in named else 'unsupported'
+            calls[label] = calls.get(label, 0) + count
+            if count and name not in allowed: reasons.append('native_tool_kind_unsupported')
+        start_seq = attempt.get('start_event_seq')
+        if type(start_seq) is not int or start_seq < 1:
+            reasons.append('native_attempt_history_unresolved'); start_seq = 0
+        with self.store.lock:
             rows = self.store.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.job_id')=? "
                 "AND json_extract(body,'$.task_id')=? AND seq>=? ORDER BY seq LIMIT 1001",
                 (job['id'], task_id, start_seq)).fetchall()
-            if len(rows) > 1000: reasons.append('native_attempt_history_unresolved')
-            events = [json.loads(body) for _, body in rows]
-            closes = [e for e in events if e.get('type') == 'attempt_closed'
-                      and (e.get('details') or {}).get('attempt_id') == attempt.get('id')]
-            stop_reason = (closes[-1].get('details') or {}).get('reason') if closes else None
-            if stop_reason not in ('restart','terminal-restart','cancelled','cancel','retry','completed',
-                                   'provider_finished','provider_error','task_timeout','context_checkpoint'):
-                stop_reason = 'other' if stop_reason else 'unknown'
-            outbound = sum(e.get('type') == 'outbound_guard' for e in events)
-            guard_types = {}
-            for event in events:
-                if event.get('type') != 'outbound_guard': continue
-                kind = (event.get('details') or {}).get('category')
-                kind = kind if kind in ('network','publish','delete','dynamic','native_command') else 'unspecified'
-                guard_types[kind] = guard_types.get(kind, 0) + 1
-            if outbound: reasons.append('native_outbound_guard_present')
-            approvals = {'tool': {}, 'question': {}}
-            approval_records = self.store.for_job('approval', job['id'])
-            for item in approval_records:
-                if item.get('task_id') != task_id or item.get('attempt') != task.get('attempt') or item.get('kind') not in approvals:
-                    continue
-                status = item.get('status')
-                status = status if status in ('pending','approved','denied','expired','superseded','cancelled') else 'other'
-                counts = approvals[item['kind']]; counts[status] = counts.get(status, 0) + 1
-            if approvals['tool']: reasons.append('native_tool_approval_present')
-            workspace = self.workspace_view(job['id'])
-            scope = {}; outside = None; head_changed_count = None; changed_count = None
-            if workspace.get('status') == 'ready':
-                plan = self.store.get(job.get('plan_approval_id'), 'approval')
-                checkpoint_scope(job, plan)
-                scope = scope_file_observation(job, plan)
-                outside = False; head_changed_count = len(workspace['current']['dirty_changes'])
-                baseline = run.get('scope_baseline')
-                expected = {'contract_version': 1, 'basis': 'attempt_start', 'job_id': job['id'],
-                    'task_id': task_id, 'attempt_id': attempt.get('id'), 'plan_approval_id': plan['id'],
-                    'plan_digest': plan['digest'], 'workspace_identity': workspace_identity(workspace['current'])}
-                if (not isinstance(baseline, dict) or type(baseline.get('contract_version')) is not int
-                        or any(baseline.get(k) != v for k, v in expected.items())
-                        or not isinstance(baseline.get('files'), dict) or set(baseline['files']) != set(scope)
-                        or any(value is not None and (not isinstance(value, str) or len(value) != 64
-                            or any(c not in '0123456789abcdef' for c in value)) for value in baseline['files'].values())):
-                    reasons.append('native_scope_baseline_unresolved')
-                else:
-                    changed_count = sum(value != baseline['files'][path] for path, value in scope.items())
+        if len(rows) > 1000: reasons.append('native_attempt_history_unresolved')
+        events = [json.loads(body) for _, body in rows]
+        closes = [e for e in events if e.get('type') == 'attempt_closed'
+                  and (e.get('details') or {}).get('attempt_id') == attempt.get('id')]
+        stop_reason = (closes[-1].get('details') or {}).get('reason') if closes else None
+        if stop_reason not in ('restart','terminal-restart','cancelled','cancel','retry','completed',
+                               'provider_finished','provider_error','task_timeout','context_checkpoint'):
+            stop_reason = 'other' if stop_reason else 'unknown'
+        if stop_reason in ('other', 'unknown'): reasons.append('native_stop_reason_unknown')
+        outbound = sum(e.get('type') == 'outbound_guard' for e in events)
+        guard_types = {}
+        for event in events:
+            if event.get('type') != 'outbound_guard': continue
+            kind = (event.get('details') or {}).get('category')
+            kind = kind if kind in ('network','publish','delete','dynamic','native_command') else 'unspecified'
+            guard_types[kind] = guard_types.get(kind, 0) + 1
+        if outbound: reasons.append('native_outbound_guard_present')
+        approvals = {'tool': {}, 'question': {}}
+        approval_records = self.store.for_job('approval', job['id'])
+        for item in approval_records:
+            if item.get('task_id') != task_id or item.get('attempt') != task.get('attempt') or item.get('kind') not in approvals:
+                continue
+            status = item.get('status')
+            status = status if status in ('pending','approved','denied','expired','superseded','cancelled') else 'other'
+            counts = approvals[item['kind']]; counts[status] = counts.get(status, 0) + 1
+        if approvals['tool']: reasons.append('native_tool_approval_present')
+        workspace = self.workspace_view(job['id'])
+        scope = {}; outside = None; head_changed_count = None; changed_count = None
+        if workspace.get('status') == 'ready':
+            plan = self.store.get(job.get('plan_approval_id'), 'approval')
+            checkpoint_scope(job, plan)
+            scope = scope_file_observation(job, plan)
+            outside = False; head_changed_count = len(workspace['current']['dirty_changes'])
+            baseline = run.get('scope_baseline')
+            expected = {'contract_version': 1, 'basis': 'attempt_start', 'job_id': job['id'],
+                'task_id': task_id, 'attempt_id': attempt.get('id'), 'plan_approval_id': plan['id'],
+                'plan_digest': plan['digest'], 'workspace_identity': workspace_identity(workspace['current'])}
+            if (not isinstance(baseline, dict) or type(baseline.get('contract_version')) is not int
+                    or any(baseline.get(k) != v for k, v in expected.items())
+                    or not isinstance(baseline.get('files'), dict) or set(baseline['files']) != set(scope)
+                    or any(value is not None and (not isinstance(value, str) or len(value) != 64
+                        or any(c not in '0123456789abcdef' for c in value)) for value in baseline['files'].values())):
+                reasons.append('native_scope_baseline_unresolved')
             else:
-                outside = True if workspace.get('reason') == 'workspace_dirty_outside_approved_scope' else None
-                reasons.append('native_workspace_unresolved')
-            def timestamp(value):
-                return value if type(value) in (int, float) and 0 <= value < 1e12 else None
-            summary = {'tool_calls_observed': calls, 'outbound_guard': {'count': outbound, 'types': guard_types},
-                'approvals': approvals, 'scope_changed_files': changed_count, 'outside_scope_changes': outside,
-                'scope_change_basis': 'attempt_start' if changed_count is not None else 'unknown',
-                'git_head_changed_files': head_changed_count,
-                'started_at': timestamp(run.get('started_at')), 'closed_at': timestamp(attempt.get('closed_at')),
-                'attempt_status': attempt.get('status') if attempt.get('status') in ('closed','fenced') else 'unknown',
-                'stop_reason_code': stop_reason,
-                'observation_only': True, 'external_effects': 'unconfirmed'}
-            operation_digest = self.store.operation_assessment(job['id'])['operation_digest']
-            target = {'contract_version': 1, 'action': 'reconcile_recovery', 'job_id': job['id'], 'task_id': task_id,
-                'attempt_id': attempt.get('id'), 'job_revision': job['state_revision'], 'task_revision': task['state_revision']}
-            target['state_digest'] = hashlib.sha256(json.dumps({'job': job, 'task': task, 'summary': summary,
-                'workspace': workspace, 'scope': scope, 'operation_digest': operation_digest,
-                'events': rows, 'approvals': approval_records, 'run_records': run_records},
-                sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
-            return {'contract_version': 1, 'eligible_for_reconciliation': not reasons, 'reasons': sorted(set(reasons)),
-                'target': target, 'summary': summary, 'execution_permission': 'none', 'reconciliation_recorded': False}
+                changed_count = sum(value != baseline['files'][path] for path, value in scope.items())
+        else:
+            outside = True if workspace.get('reason') == 'workspace_dirty_outside_approved_scope' else None
+            reasons.append('native_workspace_unresolved')
+        def timestamp(value):
+            return value if type(value) in (int, float) and 0 <= value < 1e12 else None
+        summary = {'tool_calls_observed': calls, 'outbound_guard': {'count': outbound, 'types': guard_types},
+            'approvals': approvals, 'scope_changed_files': changed_count, 'outside_scope_changes': outside,
+            'scope_change_basis': 'attempt_start' if changed_count is not None else 'unknown',
+            'git_head_changed_files': head_changed_count,
+            'started_at': timestamp(run.get('started_at')), 'closed_at': timestamp(attempt.get('closed_at')),
+            'attempt_status': attempt.get('status') if attempt.get('status') in ('closed','fenced') else 'unknown',
+            'stop_reason_code': stop_reason,
+            'observation_only': True, 'observation_stable': True, 'external_effects': 'unconfirmed'}
+        operation_digest = self.store.operation_assessment(job['id'])['operation_digest']
+        target = {'contract_version': 1, 'action': 'reconcile_recovery', 'job_id': job['id'], 'task_id': task_id,
+            'attempt_id': attempt.get('id'), 'job_revision': job['state_revision'], 'task_revision': task['state_revision']}
+        target['state_digest'] = hashlib.sha256(json.dumps({'job': job, 'task': task, 'summary': summary,
+            'workspace': workspace, 'scope': scope, 'operation_digest': operation_digest,
+            'events': rows, 'approvals': approval_records, 'run_records': run_records},
+            sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+        return {'contract_version': 1, 'eligible_for_reconciliation': not reasons, 'reasons': sorted(set(reasons)),
+            'target': target, 'summary': summary, 'execution_permission': 'none', 'reconciliation_recorded': False}
+
 
     def _recovery_control_inputs(self, task_id, *, allow_native_assessment=False):
         from team_p0_contract import workflow_version, checkpoint_scope

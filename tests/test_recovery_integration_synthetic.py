@@ -423,6 +423,81 @@ class NativeAssessmentTests(unittest.TestCase):
             self.assertFalse(result['eligible_for_reconciliation'])
             self.assertIn('native_scope_baseline_unresolved', result['reasons'])
 
+    def test_unknown_stop_reason_is_not_eligible(self):
+        attempt = self.store.get(self.task_id)['current_attempt']
+        for reason, label in (('fictional_future_reason', 'other'), ('', 'unknown')):
+            self.store.event('attempt_closed', 'SYNTHETIC unknown reason', self.task_id, self.job_id,
+                details={'attempt_id': attempt['id'], 'reason': reason})
+            result = self.assess()[1]
+            self.assertFalse(result['eligible_for_reconciliation'])
+            self.assertEqual(result['summary']['stop_reason_code'], label)
+            self.assertIn('native_stop_reason_unknown', result['reasons'])
+
+    def test_assessment_file_and_git_observations_do_not_hold_outer_store_lock(self):
+        from unittest.mock import patch
+        from team_wbs import scope_file_observation
+        workspace_view = self.engine.workspace_view
+        observed = []
+        def unlocked():
+            acquired = []
+            def reader():
+                ok = self.store.lock.acquire(blocking=False); acquired.append(ok)
+                if ok: self.store.lock.release()
+            thread = threading.Thread(target=reader); thread.start(); thread.join(2)
+            self.assertEqual(acquired, [True]); observed.append(True)
+        def files(job, plan): unlocked(); return scope_file_observation(job, plan)
+        def workspace(job_id): unlocked(); return workspace_view(job_id)
+        before = self.f.f.state()
+        with patch('team_wbs.scope_file_observation', side_effect=files), patch.object(self.engine, 'workspace_view', side_effect=workspace):
+            result = self.assess()[1]
+        self.assertEqual(len(observed), 2)
+        self.assertTrue(result['eligible_for_reconciliation'], result)
+        self.assertTrue(result['summary']['observation_stable'])
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_state_write_during_observation_invalidates_target(self):
+        from unittest.mock import patch
+        from team_wbs import scope_file_observation
+        def files(job, plan):
+            self.store.update(self.task_id, synthetic_observation_changed=True)
+            return scope_file_observation(job, plan)
+        with patch('team_wbs.scope_file_observation', side_effect=files): result = self.assess()[1]
+        self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertIn('native_assessment_changed', result['reasons'])
+        self.assertIsNone(result['target'])
+        self.assertFalse(result['summary']['observation_stable'])
+
+    def test_second_sqlite_connection_write_invalidates_target(self):
+        from unittest.mock import patch
+        from team_wbs import scope_file_observation
+        from team_store import Store
+        def files(job, plan):
+            other = Store(self.store.directory)
+            try: other.update(self.task_id, synthetic_external_connection=True)
+            finally: other.db.close()
+            return scope_file_observation(job, plan)
+        with patch('team_wbs.scope_file_observation', side_effect=files): result = self.assess()[1]
+        self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertIn('native_assessment_changed', result['reasons'])
+        self.assertIsNone(result['target'])
+
+    def test_rolled_back_write_still_invalidates_the_observation_interval(self):
+        from unittest.mock import patch
+        from team_wbs import scope_file_observation
+        before = self.f.f.state()
+        def files(job, plan):
+            try:
+                with self.store.atomic():
+                    self.store.update(self.task_id, synthetic_rolled_back=True)
+                    raise RuntimeError('SYNTHETIC rollback')
+            except RuntimeError: pass
+            return scope_file_observation(job, plan)
+        with patch('team_wbs.scope_file_observation', side_effect=files): result = self.assess()[1]
+        self.assertEqual(self.f.f.state(), before)
+        self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertIn('native_assessment_changed', result['reasons'])
+        self.assertIsNone(result['target'])
+
 
 class NativeBaselineCaptureTests(unittest.TestCase):
     def setUp(self):
