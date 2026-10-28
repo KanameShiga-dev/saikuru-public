@@ -157,6 +157,10 @@ class Store:
         if row and row[0] != kind:
             raise ValueError('保存IDは別の種類で使用されています。')
         previous = json.loads(row[1]) if row else None
+        if kind == 'native_scope_baseline':
+            if previous or getattr(self._worker, 'native_baseline_commit', None) != obj['id']:
+                raise ValueError('native_baseline_requires_immutable_server_commit')
+            return
         if kind == 'job':
             version = workflow_version(obj)
             if previous and previous.get('workflow_contract_version') != obj.get('workflow_contract_version'):
@@ -446,6 +450,60 @@ class Store:
                 return self.update(task_id, recovery_check_required=False, recovery_confirmation=marker)
             finally:
                 self._worker.recovery_commit = previous
+
+    def commit_native_scope_baseline(self, task_id, expected_task_revision, expected_job_revision, snapshot):
+        """Server-only immutable primitive; the engine supplies pre-provider observations.
+
+        This validates durable authority without filesystem IO or granting any
+        effect-reconciliation/recovery permission. It is not a worker API.
+        """
+        if getattr(self._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_commit_native_baseline')
+        from team_p0_contract import checkpoint_scope
+        from team_harness import workspace_identity
+        with self.atomic():
+            task = self.get(task_id, 'task'); job = self.get(task['job_id'], 'job')
+            self.assert_attempt(task)
+            if (task.get('role') != 'builder' or not task.get('work_package_id')
+                    or task.get('state_revision') != expected_task_revision
+                    or job.get('state_revision') != expected_job_revision
+                    or type(expected_task_revision) is not int or type(expected_job_revision) is not int):
+                raise StaleAttempt('native_baseline_authority_changed')
+            attempt_id = task['current_attempt']['id']
+            plan = self.get(job.get('plan_approval_id'), 'approval')
+            paths = checkpoint_scope(job, plan)
+            boundary = (plan.get('workflow_revision') or {}).get('workspace_boundary')
+            if not isinstance(boundary, dict) or boundary.get('status') != 'ready':
+                raise ValueError('native_baseline_workspace_binding_required')
+            expected = {'contract_version': 1, 'basis': 'attempt_start', 'job_id': job['id'],
+                'task_id': task_id, 'attempt_id': attempt_id, 'plan_approval_id': plan['id'],
+                'plan_digest': plan['digest'], 'workspace_identity': workspace_identity(boundary)}
+            if (not isinstance(snapshot, dict) or set(snapshot) != set(expected) | {'files'}
+                    or type(snapshot.get('contract_version')) is not int
+                    or any(snapshot.get(key) != value for key, value in expected.items())
+                    or not isinstance(snapshot.get('files'), dict) or set(snapshot['files']) != set(paths)
+                    or any(value is not None and (not isinstance(value, str) or len(value) != 64
+                        or any(c not in '0123456789abcdef' for c in value)) for value in snapshot['files'].values())):
+                raise ValueError('native_baseline_observation_invalid')
+            runs = [task.get('agent_run') or {}, *task.get('agent_run_history', []),
+                    *self.for_job('agent_run', job['id'])]
+            if any(run.get('attempt_id') == attempt_id for run in runs):
+                raise ValueError('native_baseline_after_launch_refused')
+            key = hashlib.sha256(json.dumps([job['id'], task_id, attempt_id]).encode()).hexdigest()
+            record = {'id': 'native-baseline-' + key, 'job_id': job['id'], 'task_id': task_id,
+                'attempt_id': attempt_id, 'snapshot': copy.deepcopy(snapshot),
+                'snapshot_digest': hashlib.sha256(json.dumps(snapshot, sort_keys=True,
+                    ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()}
+            previous = getattr(self._worker, 'native_baseline_commit', None)
+            self._worker.native_baseline_commit = record['id']
+            try:
+                saved = self.put('native_scope_baseline', record)
+                self.event('native_scope_baseline_committed', '開始時の範囲の観測を保存しました。', task_id, job['id'],
+                    details={'attempt_id': attempt_id, 'baseline_id': record['id'],
+                             'snapshot_digest': record['snapshot_digest']})
+                return saved
+            finally:
+                self._worker.native_baseline_commit = previous
 
     def update(self, object_id, _transition_reason=None, **values):
         with self.lock:

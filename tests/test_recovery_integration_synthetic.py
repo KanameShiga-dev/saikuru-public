@@ -546,6 +546,69 @@ class NativeBaselineCaptureTests(unittest.TestCase):
             self.engine.capture_native_scope_baseline(self.task)
 
 
+class NativeBaselineStorageTests(unittest.TestCase):
+    setUp = NativeBaselineCaptureTests.setUp
+
+    def commit(self, snapshot=None, task_revision=None, job_revision=None):
+        task = self.store.get(self.task['id']); job = self.store.get(task['job_id'])
+        return self.store.commit_native_scope_baseline(task['id'],
+            task['state_revision'] if task_revision is None else task_revision,
+            job['state_revision'] if job_revision is None else job_revision,
+            self.engine.capture_native_scope_baseline(self.task) if snapshot is None else snapshot)
+
+    def test_record_and_event_survive_reopen_and_cannot_be_overwritten(self):
+        from team_store import Store
+        record = self.commit(); before = self.f.f.state()
+        with self.assertRaises(ValueError): self.store.update(record['id'], snapshot={})
+        with self.assertRaises(ValueError): self.commit(record['snapshot'])
+        self.assertEqual(self.f.f.state(), before)
+        other = Store(self.store.directory)
+        try:
+            self.assertEqual(other.get(record['id'], 'native_scope_baseline'), record)
+            self.assertEqual(len(other.job_events(self.task['job_id'], 'native_scope_baseline_committed')), 1)
+        finally: other.db.close()
+
+    def test_worker_and_generic_save_cannot_forge_a_baseline(self):
+        snapshot = self.engine.capture_native_scope_baseline(self.task)
+        before = self.f.f.state()
+        with self.assertRaises(ValueError):
+            self.store.put('native_scope_baseline', {'id': 'fictional-forged-baseline', 'snapshot': snapshot})
+        with self.store.attempt_scope(self.task):
+            with self.assertRaisesRegex(ValueError, 'worker_cannot'):
+                self.commit(snapshot)
+            with self.assertRaises(ValueError):
+                self.store.put('native_scope_baseline', {'id': 'fictional-worker-forgery', 'snapshot': snapshot})
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_stale_revision_foreign_attempt_and_scope_are_rejected_atomically(self):
+        snapshot = self.engine.capture_native_scope_baseline(self.task)
+        before = self.f.f.state()
+        for kwargs in ({'task_revision': 0}, {'job_revision': 0}, {'task_revision': True},
+                       {'snapshot': dict(snapshot, attempt_id='fictional-other')},
+                       {'snapshot': dict(snapshot, files={'outside.py': '0' * 64})},
+                       {'snapshot': dict(snapshot, workspace_identity={})}):
+            with self.assertRaises(ValueError): self.commit(**dict({'snapshot': snapshot}, **kwargs))
+            self.assertEqual(self.f.f.state(), before)
+
+    def test_post_launch_capture_is_refused_without_persisting_record_or_event(self):
+        snapshot = self.engine.capture_native_scope_baseline(self.task)
+        self.store.update(self.task['id'], agent_run={'attempt_id': snapshot['attempt_id']})
+        before = self.f.f.state()
+        with self.assertRaisesRegex(ValueError, 'after_launch'): self.commit(snapshot)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_event_failure_rolls_back_record_and_restores_write_guard(self):
+        from unittest.mock import patch
+        snapshot = self.engine.capture_native_scope_baseline(self.task)
+        before = self.f.f.state()
+        with patch.object(self.store, 'event', side_effect=RuntimeError('SYNTHETIC interrupted commit')):
+            with self.assertRaises(RuntimeError): self.commit(snapshot)
+        self.assertEqual(self.f.f.state(), before)
+        self.assertIsNone(getattr(self.store._worker, 'native_baseline_commit', None))
+        with self.assertRaises(ValueError):
+            self.store.put('native_scope_baseline', {'id': 'fictional-after-failure', 'snapshot': snapshot})
+
+
 class CodexItemObservationTests(unittest.TestCase):
     def protocol(self, item_types):
         from types import SimpleNamespace
