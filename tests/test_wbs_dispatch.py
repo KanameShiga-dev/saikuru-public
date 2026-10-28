@@ -259,5 +259,45 @@ class DispatchTests(unittest.TestCase):
         self.assertIn('retry_wait',result['waiting'][0]['reasons'])
         self.assertEqual(self.state(),before)
 
+    def assert_ticks_skip_expensive_view(self):
+        with patch.object(self.engine, 'workflow_dispatch_view', side_effect=AssertionError('expensive view')) as view, \
+                patch.object(self.engine, '_start_task_thread') as start:
+            for _ in range(5): self.engine.tick()
+        self.assertEqual(view.call_count, 0)
+        self.assertEqual(start.call_count, 0)
+
+    def test_capacity_wait_skips_all_git_and_hash_preflight_on_repeated_ticks(self):
+        self.engine.config['max_parallel_projects'] = 0
+        before = self.state()
+        self.assert_ticks_skip_expensive_view()
+        self.assertEqual(self.state(), before)
+        self.engine.config['max_parallel_projects'] = 1
+        with patch.object(self.engine, '_start_task_thread') as start:
+            self.engine.tick()
+        self.assertEqual(start.call_count, 1)
+
+    def test_project_pause_wait_skips_expensive_preflight(self):
+        with patch.object(self.engine, 'project_blocked', return_value=True):
+            self.assert_ticks_skip_expensive_view()
+
+    def test_conflict_wait_skips_expensive_preflight(self):
+        with patch.object(self.engine.handoff, 'pending_conflicts', return_value=[{'id':'fictional-conflict'}]):
+            self.assert_ticks_skip_expensive_view()
+
+    def test_auth_wait_skips_expensive_preflight(self):
+        task = self.store.get(self.first['id'])
+        self.store.update(task['id'], profile=dict(task['profile'], adapter='copilot'), failure_code='copilot_auth_wait')
+        self.assert_ticks_skip_expensive_view()
+
+    def test_retry_wait_skips_expensive_preflight(self):
+        self.store.update(self.first['id'], retry_at=time.time()+600)
+        self.assert_ticks_skip_expensive_view()
+
+    def test_known_exhausted_provider_skips_expensive_preflight(self):
+        task = self.store.get(self.first['id'])
+        self.store.update(task['id'], profile=dict(task['profile'], adapter='claude'))
+        with patch.object(self.engine, '_known_exhausted', return_value=True):
+            self.assert_ticks_skip_expensive_view()
+
 
 if __name__ == '__main__': unittest.main()

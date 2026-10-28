@@ -4488,6 +4488,49 @@ class Engine:
     def _start_task_thread(self, task):
         threading.Thread(target=self._run, args=(task,), daemon=True).start()
 
+    def _workflow_preflight_candidates(self):
+        """Cheap scheduling exclusions before Git/hash inspection, never permission.
+
+        The assignment loop still checks its gates and atomically reserves fresh
+        authority. Do not cache file observations across ticks.
+        """
+        from team_recovery import retry_local_read
+        with self.store.lock:
+            tasks = self.store.all('task')
+            working = [t for t in tasks if t['status'] in ('running', 'awaiting_approval') or t['id'] in self.active
+                       or (t.get('current_attempt') or {}).get('status') == 'running']
+            slots = self.config['max_parallel_projects'] - len(working)
+            if slots <= 0: return [], 0
+            busy = {canonical(self.store.get(t['job_id'])['project']) for t in working} | self._checkpoint_projects
+            busy.update(key for t in working for key in (t.get('current_attempt') or {}).get('workflow_resources', []))
+            jobs = []
+            for task in tasks:
+                if task['status'] != 'queued' or task.get('role') == 'planner': continue
+                job = self.store.get(task['job_id'])
+                if (job['status'] != 'running' or job.get('plan_revision', 0) <= 0
+                        or not self._uses_wbs_dispatch(job, task) or job['id'] in jobs
+                        or canonical(job['project']) in busy or self.project_blocked(job['project'])):
+                    continue
+                if task.get('after') and self.store.get(task['after'])['status'] != 'succeeded': continue
+                if task.get('retry_at') and now() < task['retry_at']: continue
+                try:
+                    conflicts = retry_local_read(lambda: self.handoff.pending_conflicts(job['id']))
+                except Exception:
+                    continue  # No expensive observation on unreadable local authority.
+                if conflicts and not task.get('conflict_review_for'): continue
+                adapter = task['profile'].get('adapter')
+                if (not task.get('checkpoint_session_binding') and adapter in self.PROVIDER_NAMES
+                        and self._known_exhausted(task['profile'], (getattr(self, 'usage_snapshot', None) or (lambda: {}))())):
+                    continue
+                if task.get('failure_code') == 'copilot_auth_wait' and adapter == 'copilot': continue
+                guard = getattr(self, 'claude_auth', None)
+                if guard is not None and adapter == 'claude':
+                    if not guard.available(self.claude_logged_in()): continue
+                    if guard.refresh_window() and any(w['profile'].get('adapter') == 'claude'
+                                                      and w['status'] == 'running' for w in working): continue
+                jobs.append(job['id'])
+            return jobs, slots
+
     def tick(self):
 
         if self.paused or self.shutdown.is_set():
@@ -4496,12 +4539,13 @@ class Engine:
         # preparation is only a short-lived candidate, never a dispatch token.
         session_preflight = {}
         workflow_preflight = {}
-        with self.store.lock:
-            workflow_jobs = [j['id'] for j in self.store.all('job')
-                             if j['status'] == 'running' and j.get('plan_revision',0) > 0 and self._uses_wbs_dispatch(j)]
+        workflow_jobs, workflow_slots = self._workflow_preflight_candidates()
         for job_id in workflow_jobs:
+            if workflow_slots <= 0: break
             observed = self.workflow_dispatch_view(job_id)
-            if observed.get('status') == 'ready': workflow_preflight[observed['candidate_task_id']] = observed
+            if observed.get('status') == 'ready':
+                workflow_preflight[observed['candidate_task_id']] = observed
+                workflow_slots -= 1
         from team_session_policy import SessionPreparationDeferred
         for candidate in self._checkpoint_session_candidates():
             try:
