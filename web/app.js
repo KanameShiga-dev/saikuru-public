@@ -166,7 +166,7 @@ async function requestRetry(task,job,{note='',handoff,question,legacyNotice}){
     const body={id:task.id,checked_changes:true,note};if(handoff!==undefined)body.handoff_allowed=handoff;
     await api('/api/retry',body);if(legacyNotice)notice(legacyNotice);return true;
   }
-  if(needsMaintenance(task,job)){notice('この作業は、先に保守担当の確認が必要です。あなたの操作は不要です。確認が終わると再試行の操作が表示されます。');return false;}
+  if(needsMaintenance(task,job)){notice('この作業の確認と再開は保守担当が行います。あなたの画面からは再試行できません。待たずにやめる場合は、依頼全体を中止して新しい依頼として出し直せます。');return false;}
   const target=await workflowTarget(job,'retry_task',task.id);
   if(question&&!confirm(question+CONTROL_ONCE_NOTE))return false;
   const result=await api('/api/workflow/control',{action:'retry_task',job_id:job.id,task_id:task.id,target,
@@ -181,11 +181,14 @@ async function requestCancel(job){
   await api('/api/workflow/control',{action:'cancel_job',job_id:job.id,target,confirmed:true});
   notice('依頼を中止しました。作業済みの変更は戻していません。');
 }
-function maintenanceWaitBox(){
+// 保守の確認の後も、この作業の再試行には保守の認証が要る（サーバーの判定）。利用者の画面に再試行が出ると約束しない。
+function maintenanceWaitBox(task){
+  const confirmed=!!task?.recovery_confirmation&&!task?.recovery_check_required;
   const box=el('section',undefined,'decision-help');box.id='maintenance-wait';box.setAttribute('role','status');
-  box.append(el('h3','保守担当の確認を待っています'),
-    el('p','作業が途中で止まりました。保守担当が、担当の停止と現在の変更を確認するまで再開しません。作業の成果は保存されています。'),
-    el('p','あなたの操作は不要です。確認が終わると、ここに再試行の操作が表示されます。依頼をやめる場合は、下の「この依頼全体を中止」を使えます。','hint'));
+  box.append(el('h3',confirmed?'保守担当の再開を待っています':'保守担当の確認を待っています'),
+    el('p',confirmed?'保守担当が、担当の停止と現在の変更を確認しました。この作業の再開（再試行）も保守担当が行います。作業の成果は保存されています。'
+      :'作業が途中で止まりました。保守担当が、担当の停止と現在の変更を確認するまで再開しません。確認の後の再開も保守担当が行います。作業の成果は保存されています。'),
+    el('p','あなたの画面からは、この作業を再試行できません。待つ場合、あなたの操作は不要です。待たずにやめる場合は、下の「この依頼全体を中止」を使い、必要なら新しい依頼として出し直してください（中止しても、作業済みの変更は戻りません）。','hint'));
   return box;
 }
 async function action(fn) { if(busy)return; busy=true; try{await fn();await refresh();}catch(e){notice(e.message);}finally{busy=false;} }
@@ -1153,7 +1156,7 @@ function failureDiagnosis(task,job){
   return {cause:'担当が決められた回数で工程を終えられませんでした',why:'内容：'+(task.summary||'（記録なし）').slice(0,240),kinds:['retry','model','transfer','cancel']};
 }
 function failureCard(task,job){
-  if(isWorkflowJob(job)&&needsMaintenance(task,job))return maintenanceWaitBox();
+  if(isWorkflowJob(job)&&needsMaintenance(task,job))return maintenanceWaitBox(task);
   if(task.failure_code==='codex_sandbox'||task.failure_code==='claude_auth'){
     const box=el('section',undefined,'failure-card');box.id='failure-card';
     box.append(el('h3','実行環境の障害で一時停止しています'),
@@ -1581,7 +1584,7 @@ function renderDetail(task,version) {
     catch(error){factMessage.textContent=error.message;}finally{factSubmit.disabled=false;}
   });
   if(!endedJob(task)&&isWorkflowJob(job)&&needsMaintenance(task,job)&&['failed','interrupted','blocked'].includes(task.status)){
-    if(!body.querySelector('#maintenance-wait'))body.append(maintenanceWaitBox());
+    if(!body.querySelector('#maintenance-wait'))body.append(maintenanceWaitBox(task));
   }else if(!endedJob(task)&&['failed','interrupted','blocked','cancelled'].includes(task.status)&&!pending(task.id).some(a=>a.payload.questions?.length)){
     const s=el('section',undefined,'detail-section'),input=el('textarea');input.id='retry-note';input.rows=4;input.placeholder='ここに回答・追加の作業指示、または解決した条件を入力してください。';input.value=drafts[input.id]||'';input.setAttribute('aria-label','回答・再開の補足');
     const label=el('label','回答・補足の入力欄');label.htmlFor=input.id;
