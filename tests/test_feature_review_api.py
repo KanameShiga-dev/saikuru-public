@@ -36,6 +36,28 @@ class PlanEnvelopeTests(unittest.TestCase):
             self.assertEqual(self.request('/api/decide', body)[0], 400)
             self.assertEqual(self.f.state(), before)
 
+    def test_ui_shaped_denial_without_digest_succeeds_and_replay_is_refused(self):
+        body = {'id': self.body['id'], 'allow': False, 'note': 'Fictional declined plan'}
+        self.assertEqual(self.request('/api/decide', body)[0], 200)
+        self.assertEqual(self.f.store.get(body['id'], 'approval')['status'], 'denied')
+        self.assertEqual(self.f.job()['plan_revision'], 0)
+        before = self.f.state()
+        self.assertEqual(self.request('/api/decide', body)[0], 400)
+        self.assertEqual(self.f.state(), before)
+
+    def test_denial_with_current_digest_is_supported_without_publishing_plan(self):
+        self.assertEqual(self.request('/api/decide', dict(self.body, allow=False))[0], 200)
+        self.assertEqual(self.f.store.get(self.body['id'], 'approval')['status'], 'denied')
+        self.assertEqual(self.f.job()['plan_revision'], 0)
+
+    def test_denial_rejects_supplied_wrong_digest_and_extra_fields_without_writes(self):
+        before = self.f.state()
+        for body in (dict(self.body, allow=False, workflow_confirmation='fictional-stale'),
+                     dict(self.body, allow=False, workflow_confirmation=None),
+                     {'id': self.body['id'], 'allow': False, 'actor': 'end_user'}):
+            self.assertEqual(self.request('/api/decide', body)[0], 400)
+            self.assertEqual(self.f.state(), before)
+
 
 class FinalTransactionTests(unittest.TestCase):
     def setUp(self):

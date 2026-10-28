@@ -906,8 +906,14 @@ class Handler(BaseHTTPRequestHandler):
                     task = self.app.store.get(pending['task_id'], 'task')
                     job = self.app.store.get(task['job_id'], 'job')
                     if job.get('workflow_contract_version') == 1:
-                        required = {'id', 'allow', 'workflow_confirmation'}
-                        if not required <= set(body) or set(body) - (required | {'note'}):
+                        required = {'id', 'allow'}
+                        allowed = required | {'note', 'workflow_confirmation'}
+                        if not required <= set(body) or set(body) - allowed:
+                            raise WorkflowRequestError('workflow_request_invalid')
+                        if body['allow'] and 'workflow_confirmation' not in body:
+                            raise WorkflowRequestError('workflow_request_invalid')
+                        if (not body['allow'] and 'workflow_confirmation' in body
+                                and body['workflow_confirmation'] != pending.get('workflow_revision_digest')):
                             raise WorkflowRequestError('workflow_request_invalid')
                 if pending.get('intended_role') == 'maintainer' and not self.maintenance_authorized():
                     raise PermissionError('保守担当の認証が必要です。')
