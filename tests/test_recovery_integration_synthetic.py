@@ -295,4 +295,112 @@ class OperationCorrelationTests(unittest.TestCase):
         self.assertEqual(self.f.store.get(self.ctx.task['id']), before)
 
 
+class NativeAssessmentTests(unittest.TestCase):
+    def setUp(self):
+        from tests import test_workflow_api as fixtures
+        self.f = fixtures.WorkflowApiTests(); self.addCleanup(self.f.doCleanups); self.f.setUp()
+        self.engine, self.store = self.f.engine, self.f.store
+        self.job_id = self.f.f.job_id
+        task = self.engine._reserve_workflow_attempt(self.f.f.first, self.engine.workflow_dispatch_view(self.job_id))
+        self.task_id = task['id']
+        self.run = {'id': 'fictional-native-preview', 'provider': task['profile']['adapter'],
+            'model': task['profile']['model'], 'effort': task['profile'].get('effort'),
+            'attempt_id': task['current_attempt']['id'], 'started_at': task['current_attempt']['started_at'],
+            'measurement_ids': {'job_id': self.job_id, 'task_id': self.task_id, 'attempt_id': task['current_attempt']['id']},
+            'tool_observation_version': 1, 'tool_calls': {'fileChange': 1}}
+        self.store.update(self.task_id, agent_run=self.run)
+        path = self.f.f.workspace.project / 'app.py'
+        path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC native file edit\n')
+        self.store.recover()
+        self.body = {'action': 'assess_recovery', 'job_id': self.job_id, 'task_id': self.task_id}
+
+    def assess(self, **options):
+        return self.f.request('/api/workflow/recovery/assess', self.body, maintenance=True, **options)
+
+    def test_preview_requires_maintenance_and_browser_identity(self):
+        before = self.f.f.state()
+        self.assertEqual(self.f.request('/api/workflow/recovery/assess', self.body)[0], 403)
+        for options in ({'cookie': False}, {'ui': False}, {'origin': 'https://example.invalid'},
+                        {'cookie': False, 'headers': {'Authorization': 'Bearer fictional-worker'}}):
+            self.assertEqual(self.assess(**options)[0], 403)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_file_only_preview_is_read_only_and_does_not_confirm_or_resume(self):
+        before = self.f.f.state()
+        code, result = self.assess()
+        self.assertEqual(code, 200, result); self.assertTrue(result['eligible_for_reconciliation'], result)
+        self.assertEqual(result['execution_permission'], 'none'); self.assertFalse(result['reconciliation_recorded'])
+        self.assertEqual(result['summary']['tool_calls_observed'], {'fileChange': 1})
+        self.assertFalse(result['summary']['outside_scope_changes'])
+        self.assertGreaterEqual(result['summary']['scope_changed_files'], 1)
+        self.assertEqual(result['summary']['external_effects'], 'unconfirmed')
+        self.assertEqual(result['summary']['stop_reason_code'], 'restart')
+        self.assertEqual(self.f.f.state(), before)
+        with self.assertRaisesRegex(ValueError, '担当プロセスの作用が未照合'):
+            self.engine._recovery_control_inputs(self.task_id)
+
+    def test_unsupported_tools_and_legacy_observation_cannot_be_reconciled(self):
+        for calls in ({'WebSearch': 1}, {'fictional-private-tool-name': 1}, {'Bash': 1}):
+            self.store.update(self.task_id, agent_run=dict(self.run, tool_calls=calls))
+            code, result = self.assess()
+            self.assertEqual(code, 200); self.assertFalse(result['eligible_for_reconciliation'])
+            self.assertIn('native_tool_kind_unsupported', result['reasons'])
+            self.assertNotIn('fictional-private-tool-name', str(result))
+        old = dict(self.run); old.pop('tool_observation_version')
+        self.store.update(self.task_id, agent_run=old)
+        self.assertIn('native_tool_observation_unknown', self.assess()[1]['reasons'])
+        self.store.update(self.task_id, agent_run=dict(self.run, tool_observation_version=True))
+        self.assertIn('native_tool_observation_unknown', self.assess()[1]['reasons'])
+
+    def test_outbound_guard_and_tool_approval_are_reported_and_block_eligibility(self):
+        self.store.event('outbound_guard', 'fictional-private-guard-content', self.task_id, self.job_id,
+                         {'category': 'network'})
+        approval = self.engine.new_approval(self.store.get(self.task_id), 'tool',
+                                            {'operation': 'Bash', 'details': {'command': 'fictional external action'}})
+        self.store.update(approval['id'], status='denied')
+        code, result = self.assess()
+        self.assertEqual(code, 200); self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertEqual(result['summary']['outbound_guard'], {'count': 1, 'types': {'network': 1}})
+        self.assertEqual(result['summary']['approvals']['tool'], {'denied': 1})
+        self.assertNotIn('fictional-private-guard-content', str(result))
+
+    def test_outside_scope_change_and_own_operation_keep_the_preview_ineligible(self):
+        outside = self.f.f.workspace.project / 'fictional-unapproved.txt'
+        outside.write_text('SYNTHETIC outside approved checkpoint scope', encoding='utf-8')
+        code, result = self.assess()
+        self.assertEqual(code, 200); self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertTrue(result['summary']['outside_scope_changes'])
+        outside.unlink()
+        self.store.event('operation_result', 'SYNTHETIC unmatched target effect', self.task_id, self.job_id)
+        self.assertIn('native_state_or_effects_unresolved', self.assess()[1]['reasons'])
+
+    def test_target_changes_after_edit_and_extra_or_foreign_fields_are_rejected(self):
+        code, first = self.assess(); self.assertEqual(code, 200)
+        path = self.f.f.workspace.project / 'app.py'; path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC later edit\n')
+        self.assertNotEqual(first['target']['state_digest'], self.assess()[1]['target']['state_digest'])
+        before = self.f.f.state()
+        for body in (dict(self.body, actor='maintainer'), dict(self.body, job_id='fictional-other')):
+            self.assertEqual(self.f.request('/api/workflow/recovery/assess', body, maintenance=True)[0], 400)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_archived_run_must_agree_with_the_attempt_tool_observations(self):
+        self.store.put('agent_run', dict(self.run, task_id=self.task_id, job_id=self.job_id, status='interrupted'))
+        self.assertTrue(self.assess()[1]['eligible_for_reconciliation'])
+        self.store.update(self.run['id'], tool_calls={'WebSearch': 1})
+        result = self.assess()[1]
+        self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertIn('native_run_records_inconsistent', result['reasons'])
+
+    def test_foreign_attempt_or_changed_model_identity_is_not_an_eligible_preview(self):
+        for changes in ({'attempt_id': 'fictional-other-attempt'}, {'model': 'fictional-other-model'},
+                        {'effort': 'fictional-other-effort'},
+                        {'measurement_ids': dict(self.run['measurement_ids'], task_id='fictional-other-task')}):
+            self.store.update(self.task_id, agent_run=dict(self.run, **changes))
+            before = self.f.f.state()
+            code, result = self.assess()
+            self.assertEqual(code, 200); self.assertFalse(result['eligible_for_reconciliation'])
+            self.assertIn('native_run_identity_unresolved', result['reasons'])
+            self.assertEqual(self.f.f.state(), before)
+
+
 if __name__ == '__main__': unittest.main()

@@ -270,6 +270,8 @@ class CodexAdapter:
                     ctx.event('未対応の要求を拒否: ' + method)
             elif method == 'item/started':
                 item = params.get('item', {})
+                if item.get('type') not in ('agentMessage', 'reasoning', 'contextCompaction') and hasattr(ctx, 'count_tool'):
+                    ctx.count_tool(item.get('type') or 'unknownItem')
                 if item.get('type') == 'commandExecution' and hasattr(ctx, 'command_started'):
                     command = item.get('command')
                     ctx.command_started(' '.join(map(str, command)) if isinstance(command, list)

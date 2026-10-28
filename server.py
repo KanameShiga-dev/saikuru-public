@@ -688,7 +688,15 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized() or self.headers.get('X-Agent-Team-UI') != '1':
                 raise PermissionError('ブラウザからの認証済み操作が必要です。')
             engine = self.app.engine
-            if path == '/api/workflow/control':
+            if path == '/api/workflow/recovery/assess':
+                if not self.maintenance_authorized():
+                    raise PermissionError('保守担当の認証が必要です。')
+                workflow_body(body, ('action', 'job_id', 'task_id'), 'assess_recovery')
+                task = workflow_call(lambda:self.app.store.get(body['task_id'], 'task'))
+                if task['job_id'] != body['job_id']: raise WorkflowRequestError('workflow_request_invalid')
+                result = workflow_call(lambda:engine.native_recovery_assessment(
+                    task['id'], actor='authenticated_maintenance_session'))
+            elif path == '/api/workflow/control':
                 action = body.get('action')
                 fields = {'cancel_job':('action','job_id','target','confirmed'),
                     'retry_task':('action','job_id','task_id','target','checked_changes','note','handoff_allowed'),
