@@ -1668,9 +1668,19 @@ let focusPending=false;   // 詳細を閉じた直後は、描き直しでフォ
 // 操作の結果で押したボタンが消える場合（機能の確認・差し戻し）は、結果の行へフォーカスを移す（W05.05.UI、F3）。
 let nextFocusKey=null;
 function restoreFocus(key){
-  if(document.activeElement&&document.activeElement!==document.body)return;
-  if(!key&&nextFocusKey){key=nextFocusKey;nextFocusKey=null;}
-  let target=key&&[...document.querySelectorAll('[data-focus-key]')].find(e=>e.dataset.focusKey===key&&e.offsetParent!==null);
+  // 処理中の表示（id のない modal）がフォーカスを持つ間は何もしない。閉じた直後に hideBusy から呼び直す。
+  // 閉じた直後は、閉じた処理中の表示がまだフォーカスを持つため、BODY と同じに扱う。
+  const inBusy=typeof busyDialog!=='undefined'&&!!busyDialog&&busyDialog.contains(document.activeElement);
+  if(inBusy&&busyDialog.open)return;
+  const next=nextFocusKey;nextFocusKey=null;   // 操作の直後の1回だけ使う（後の描き直しで急に移さない）
+  if(!inBusy&&document.activeElement&&document.activeElement!==document.body)return;
+  // modal のダイアログの間は、外側（inert）の要素へは移さない。
+  const modal=[...document.querySelectorAll('dialog[open]')].filter(d=>d.id).at(-1)||null;
+  const find=k=>k?[...document.querySelectorAll('[data-focus-key]')].find(e=>e.dataset.focusKey===k&&e.offsetParent!==null&&(!modal||modal.contains(e))):null;
+  // 押したボタンが結果で消えた場合（前の鍵が見つからない）も、結果の行の鍵を使う。結果の鍵は1回で使い切る。
+  let target=find(key);
+  if(!target&&next)target=find(next);
+  if(!target&&modal){target=modal.querySelector(':scope > .dialog-notice:not([hidden])')||modal.querySelector(':scope > .dialog-title h2');if(target)target.tabIndex=-1;}
   if(!target&&focusPending){const progress=$('job-progress');target=progress&&!progress.hidden?$('job-progress-title'):$('board');}
   if(target){target.focus({preventScroll:true});focusPending=false;}
 }
@@ -1724,7 +1734,7 @@ function restoreDetailFocus(){
   if(target!==same)target.tabIndex=-1;
   revealSection(target);target.focus();
 }
-function hideBusy(){if(busyCount>0&&--busyCount===0){clearInterval(busyTimer);if(busyDialog.open)busyDialog.close();setTimeout(restoreDetailFocus,0);}}
+function hideBusy(){if(busyCount>0&&--busyCount===0){clearInterval(busyTimer);if(busyDialog.open)busyDialog.close();setTimeout(restoreDetailFocus,0);setTimeout(()=>restoreFocus(null),0);}}
 function refresh(){
   if(refreshing){
     if(!blockNext)return refreshing;
