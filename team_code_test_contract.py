@@ -123,7 +123,15 @@ def checkpoint_test_assets(project, snapshot, allowed_paths):
             'reason': 'test_assets_changed' if changed else None}
 
 
+def validation_job(job, task):
+    """Keep per-builder proof distinct from another WP's latest Job summary."""
+    if job.get('workflow_contract_version') == 1 and task and task.get('workflow_validation_evidence') is not None:
+        return dict(job,validation_evidence=task['workflow_validation_evidence'])
+    return job
+
+
 def builder_issues(job, task, result):
+    job = validation_job(job,task)
     plan = job.get('code_test_plan') or {}
     if not plan.get('required'):
         return [], None

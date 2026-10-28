@@ -620,6 +620,10 @@ class Context:
             evidence = dict(previous) if isinstance(previous, dict) else {}
             evidence[str(index)] = proof
             self.engine.store.update(job['id'], validation_evidence=evidence)
+            if job.get('workflow_contract_version') == 1:
+                own = dict(self.engine.store.get(self.task['id'],'task').get('workflow_validation_evidence') or {})
+                own[str(index)] = copy.deepcopy(proof)
+                self.engine.store.update(self.task['id'],workflow_validation_evidence=own)
 
     @_attempt_callback
     def agent_started(self, session_id, launch_method):
@@ -1249,6 +1253,9 @@ class Engine:
             if isinstance((approval.get('workflow_revision') or {}).get('workspace_boundary'), dict):
                 task.update(plan_revision=job['plan_revision'], requirement_revision=job['requirement_revision'],
                             spec_source_approval_id=job['plan_approval_id'], workflow_job_task=package_fields is None)
+                if package_fields is None:
+                    contract = job.get('goal_contract') or {}
+                    task.update(goal_links=list(dict.fromkeys(contract.get('deliverables',[]) + contract.get('acceptance_criteria',[]))), goal_id=job['id'])
         return self.store.put('task', task)
 
 
@@ -1887,6 +1894,9 @@ class Engine:
 
             approval = self.store.get(approval_id, 'approval')
 
+            if approval.get('kind') == 'feature_review':
+                raise ValueError('機能確認は対象版を指定した専用の確認操作を使用してください。')
+
             if approval.get('kind') == 'ai_start':
                 self._decide_g2(approval_id, allow, note)
                 return
@@ -2474,6 +2484,266 @@ class Engine:
         self.sync_handoff(job['id'])
 
 
+
+    def _issue_package_task(self, job, wp, kind, source, instruction, *, role='builder', after=None, repair=0, agent=None, root=None):
+        """Persist initial membership and a server-issued, event-bound specification."""
+        from team_wbs import issued_task_digest
+        fields = {'work_package_id':wp['id'],'workflow_generation':wp.get('workflow_generation',0),
+                  'plan_revision':job['plan_revision'],'requirement_revision':job['requirement_revision'],
+                  'spec_source_approval_id':job['plan_approval_id'],'goal_links':list(wp['goal_links']),
+                  'workflow_authority':{'kind':kind,'source_id':source,'recheck_root_id':root}}
+        if role == 'reviewer': fields['review_cycle'] = source
+        title = {'package_review':'機能の成果と検証を独立に確認する',
+                 'package_repair':'機能の差し戻し指摘を修正する','package_recheck':'影響する機能を再検証する'}[kind]
+        task = self._new_task_record(job,title,instruction,role,after,repair,agent,fields)
+        self.store.event('workflow_task_issued','承認済み機能の範囲で修正・再確認の工程を記録しました。',task['id'],job['id'],
+                         {'task_digest':issued_task_digest(task),'source_id':source,'work_package_id':wp['id'],'kind':kind})
+        return task
+
+    def _queue_package_reviews(self, job, wp, builder):
+        from team_wbs import package_members
+        members = package_members(self.store,job['id'],wp)
+        if any(t['role'] == 'reviewer' for t in members): return
+        review = self._issue_package_task(job,wp,'package_review',builder['id'],
+            'この機能の完了条件、成果物、テストと記録を読み取り専用で確認する。未確認を成功と推測しない。'
+            '機能承認や依頼全体の受領を代行しない。' + REVIEW_STATUS_RULE,
+            role='reviewer',after=builder['id'],repair=builder.get('repair',0),agent='common-reviewer')
+        if job.get('security_review_required') or self.config.get('security_review','always') == 'always':
+            self._issue_package_task(job,wp,'package_review',builder['id'],
+                'この機能の変更を読み取り専用で確認する。認証・権限・入力・秘密情報・外部送信の影響と根拠を確認し、'
+                '秘密情報は読まない。本人の確認・受領を代行しない。' + REVIEW_STATUS_RULE,
+                role='reviewer',after=review['id'],repair=builder.get('repair',0),agent='common-security-reviewer')
+
+    def _finish_work_package(self, task, result):
+        from team_wbs import package_members
+        job = self.store.get(task['job_id'],'job'); wp = self.store.get(task['work_package_id'],'work_package')
+        if result['status'] == 'needs_changes':
+            self._repair_package(job,wp,task,str(result.get('summary') or '機能の検証で指摘があります。'), automatic=True)
+            return
+        members = package_members(self.store,job['id'],wp)
+        if any(t['status'] != 'succeeded' or (t.get('result') or {}).get('status') != 'done' for t in members): return
+        if task['role'] != 'reviewer':
+            if (task.get('workflow_authority') or {}).get('kind') == 'package_repair':
+                if not self._expand_package_repair_impact(job,wp,task): return
+            self._queue_package_reviews(job,wp,task)
+        else:
+            self.store.update(wp['id'],execution_state='succeeded',review_status='not_requested')
+            self.store.event('feature_review_ready','技術確認が終了しました。機能の対象版を作成し、本人の確認を受けてください。',
+                             task['id'],job['id'],{'work_package_id':wp['id']})
+
+    def _repair_package(self, job, wp, source, note, *, automatic=False):
+        from team_wbs import approved_source, repair_impact, digest, scope_file_observation
+        from team_dlp import require_clean_input
+        note = str(note or '').strip()
+        if not note or len(note) > 4000: raise ValueError('work_package_defect_note_required')
+        require_clean_input(note,False,'機能の差し戻し理由')
+        plan = self.store.get(job['plan_approval_id'],'approval')
+        approved_source(job,plan,self.store.get(job['requirements_approval_id'],'approval'),for_review=True)
+        generation = wp.get('workflow_generation',0) + 1
+        if automatic and generation > self.config['max_repairs']:
+            self.store.update(wp['id'],execution_state='blocked',review_status='changes_requested')
+            self.store.update(job['id'],status='blocked')
+            self.store.event('feature_repair_limit','修正回数の上限に達したため、機能の対応方針を確認してください。',source['id'],job['id'])
+            return {'status':'blocked','reason':'repair_limit'}
+        impact = repair_impact(self.store,job,plan,wp)
+        requires_revision = bool(impact['upstream_impact_ids'])
+        tasks = self.store.for_job('task',job['id'])
+        if any(t['id'] != source['id'] and (t['status'] in ('running','awaiting_approval')
+                   or (t.get('current_attempt') or {}).get('status') == 'running' or t['id'] in self.active) for t in tasks):
+            raise ValueError('workflow_writer_not_stopped')
+        defect_id = uid()
+        basis = {'defect_id':defect_id,'source_task_id':source['id'],'source_evidence_digest':digest(source),
+                 'plan_revision':job['plan_revision'],'requirement_revision':job['requirement_revision'],
+                 'note':note,'impact':impact,'automatic':automatic,'scope_snapshot':scope_file_observation(job,plan)}
+        self.store.event('feature_defect_recorded','機能の指摘と再確認対象を記録しました。',source['id'],job['id'],basis)
+        for item in self.store.for_job('approval',job['id']):
+            target_wp = ((item.get('payload') or {}).get('feature_target') or {}).get('work_package_id')
+            if item['status'] == 'pending' and (item['kind'] == 'completion' or target_wp in impact['affected_ids']):
+                self.store.update(item['id'],status='superseded',note='機能の差し戻しにより対象版を再確認します。')
+        for t in tasks:
+            if (t.get('work_package_id') in impact['affected_ids'] or t.get('workflow_job_task')) and t['status'] == 'queued':
+                self.store.update(t['id'],status='cancelled',summary='機能の修正・再確認工程へ置き換えます。')
+        fixes = []
+        for wp_id in impact['affected_ids']:
+            row = self.store.get(wp_id,'work_package')
+            old_receipt = row.get('feature_review_approval_id')
+            row = self.store.update(wp_id,execution_state='blocked' if requires_revision else 'planned',review_status='changes_requested' if wp_id == wp['id'] else 'invalidated',
+                workflow_generation=row.get('workflow_generation',0)+1,feature_defect_id=defect_id,
+                invalidation_reason=impact['reasons'][wp_id], prior_feature_review_approval_id=old_receipt)
+            kind = 'package_repair' if wp_id == wp['id'] else 'package_recheck'
+            instruction = ('承認済みの機能と許可範囲を維持し、次の指摘を修正する。' if kind == 'package_repair'
+                           else '関連機能の修正による影響だけを現行版で再確認する。無関係な成果を作り直さない。')
+            instruction += '\n指摘: ' + note + '\n完了条件: ' + '\n'.join(row['done_when']) + '\n必要な検証を記録し、権限・モデル・送信範囲を広げない。'
+            fix = self._issue_package_task(job,row,kind,defect_id,instruction,after=source['id'],repair=generation,
+                                           root=None if wp_id == wp['id'] else wp['id'])
+            if requires_revision:
+                self.store.update(fix['id'],status='blocked',failure_code='workflow_upstream_impact_requires_plan_revision',
+                    summary='共有ファイルの修正が上流機能にも影響します。機能の分割・依存を計画改訂で確認してください。')
+            fixes.append(fix['id'])
+        self.store.update(job['id'],status='blocked' if requires_revision else 'running',validation_evidence={})
+        if requires_revision:
+            self.store.event('feature_repair_plan_revision_required','共有ファイルの影響が上流へ及ぶため、計画の分割・依存を再確認します。',
+                             source['id'],job['id'],{'defect_id':defect_id,'impact':impact})
+        return {'status':'blocked' if requires_revision else 'queued',
+                'reason':'workflow_upstream_impact_requires_plan_revision' if requires_revision else None,
+                'defect_id':defect_id,'task_ids':fixes,**impact}
+
+    def _expand_package_repair_impact(self, job, wp, task):
+        from team_wbs import repair_impact, scope_file_observation
+        defect_id = wp.get('feature_defect_id')
+        row = self.store.db.execute("SELECT body FROM events WHERE json_extract(body,'$.type')='feature_defect_recorded' "
+            "AND json_extract(body,'$.details.defect_id')=? ORDER BY seq DESC LIMIT 1",(defect_id,)).fetchone()
+        if not row: raise ValueError('work_package_defect_basis_missing')
+        original = json.loads(row[0])['details']; plan = self.store.get(job['plan_approval_id'],'approval')
+        before = original['scope_snapshot']; after = scope_file_observation(job,plan)
+        changed = {p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
+        impact = repair_impact(self.store,job,plan,wp,changed)
+        additional = [i for i in impact['affected_ids'] if i not in original['impact']['affected_ids']]
+        requires_revision = bool(impact['upstream_impact_ids'])
+        for wp_id in additional:
+            affected = self.store.get(wp_id,'work_package')
+            for old in self.store.for_job('task',job['id']):
+                if old.get('work_package_id') == wp_id and old['status'] == 'queued':
+                    self.store.update(old['id'],status='cancelled',summary='修正後の影響確認へ置き換えます。')
+            for approval in self.store.for_job('approval',job['id']):
+                if (approval['status'] == 'pending' and ((approval.get('payload') or {}).get('feature_target') or {}).get('work_package_id') == wp_id):
+                    self.store.update(approval['id'],status='superseded')
+            affected = self.store.update(wp_id,execution_state='blocked' if requires_revision else 'planned',review_status='invalidated',
+                workflow_generation=affected.get('workflow_generation',0)+1,feature_defect_id=defect_id,
+                invalidation_reason=impact['reasons'][wp_id],prior_feature_review_approval_id=affected.get('feature_review_approval_id'))
+            check = self._issue_package_task(job,affected,'package_recheck',defect_id,
+                '関連機能の修正で共有ファイルが変わったため、完了条件と検証を現行版で再確認する。権限・対象範囲を広げない。',
+                after=task['id'],repair=task.get('repair',0),root=wp['id'])
+            if requires_revision:
+                self.store.update(check['id'],status='blocked',failure_code='workflow_upstream_impact_requires_plan_revision')
+        self.store.event('feature_impact_reassessed','修正後の実際のファイル変更から再確認範囲を照合しました。',task['id'],job['id'],
+            {'defect_id':defect_id,'changed_paths':sorted(changed),'additional_ids':additional,'impact':impact})
+        if requires_revision:
+            self.store.update(wp['id'],execution_state='blocked',review_status='changes_requested')
+            self.store.update(job['id'],status='blocked')
+            self.store.event('feature_repair_plan_revision_required','実際の修正が上流の共有成果にも影響するため、計画の確認へ戻します。',
+                             task['id'],job['id'],{'defect_id':defect_id,'impact':impact})
+        return not requires_revision
+
+    def _feature_observation(self, job_id, wp_id):
+        from team_wbs import feature_basis, feature_target
+        from team_recovery import retry_local_read
+        if retry_local_read(lambda: self.handoff.pending_conflicts(job_id)):
+            raise ValueError('workflow_conflict_review_required')
+        with self.store.lock:
+            basis = feature_basis(self.store,job_id,wp_id)
+            if any(t['id'] in self.active for t in self.store.for_job('task',job_id)):
+                raise ValueError('workflow_writer_not_stopped')
+            if (basis['job'].get('security_review_required') or self.config.get('security_review','always') == 'always') and not any(
+                    t.get('agent_name') == 'common-security-reviewer' for t in basis['members']):
+                raise ValueError('work_package_security_review_required')
+        if self.workspace_view(job_id).get('status') != 'ready': raise ValueError('workspace_identity_changed')
+        return basis, feature_target(basis)
+
+    def request_feature_review(self, job_id, wp_id, *, expected_wp_revision):
+        from team_wbs import feature_basis, digest
+        if getattr(self.store._worker,'task',None) is not None: raise ValueError('workflow_user_action_required')
+        if type(expected_wp_revision) is not int: raise ValueError('work_package_revision_changed')
+        basis, target = self._feature_observation(job_id,wp_id)
+        if basis['job']['status'] != 'running': raise ValueError('workflow_feature_job_not_running')
+        if basis['wp']['state_revision'] != expected_wp_revision: raise ValueError('work_package_revision_changed')
+        with self.store.atomic():
+            fresh = feature_basis(self.store,job_id,wp_id)
+            if fresh['signature'] != basis['signature']: raise ValueError('workflow_feature_observation_changed')
+            if fresh['wp'].get('review_status') == 'pending':
+                previous = self.store.get(fresh['wp'].get('feature_review_approval_id'),'approval')
+                if previous['status'] in ('pending','expired') and previous['expires_at'] < now():
+                    self.store.update(previous['id'],status='superseded',note='機能確認の期限が切れたため対象版を再提示します。')
+                else: raise ValueError('work_package_review_already_requested')
+            elif fresh['wp'].get('review_status') == 'approved':
+                raise ValueError('work_package_review_already_requested')
+            if any(a['status'] == 'pending' for a in self.store.for_job('approval',job_id)):
+                raise ValueError('workflow_pending_decision')
+            last = fresh['members'][-1]
+            approval = self.new_approval(last,'feature_review',{'feature_target':target,'feature_target_digest':digest(target),
+                'summary':'機能の動作・見た目・完了条件を対象版で確認してください。依頼全体の受領とは別です。'})
+            self.store.update(approval['id'],category='ACCEPTANCE',intended_role='end_user')
+            self.store.update(wp_id,review_status='pending',feature_review_approval_id=approval['id'],feature_target_digest=digest(target))
+            return {'approval_id':approval['id'],'target_digest':digest(target),'permission_effect':'none'}
+
+    def decide_feature_review(self, approval_id, allow, confirmation, note='', *, actor='authenticated_local_app_session'):
+        from team_wbs import feature_basis, digest, feature_review_receipt, approved_source
+        if actor != 'authenticated_local_app_session' or getattr(self.store._worker,'task',None) is not None:
+            raise ValueError('workflow_user_action_required')
+        if type(allow) is not bool: raise ValueError('workflow_feature_confirmation_required')
+        from team_dlp import require_clean_input
+        if not isinstance(note,str) or len(note) > 4000: raise ValueError('work_package_defect_note_required')
+        require_clean_input(note,False,'機能確認の補足')
+        with self.store.lock:
+            approval = self.store.get(approval_id,'approval')
+            payload = approval.get('payload') or {}; target = payload.get('feature_target') or {}
+            if (approval.get('kind') != 'feature_review' or approval['status'] != 'pending'
+                    or approval['expires_at'] < now() or approval.get('digest') != self._g2_payload_digest(payload)
+                    or confirmation != {'action':'feature_review_confirmation','target_digest':digest(target),'decision':'approved' if allow else 'rejected'}):
+                raise ValueError('workflow_feature_confirmation_required')
+            job_id, wp_id = approval['job_id'], target.get('work_package_id')
+        basis, current = self._feature_observation(job_id,wp_id)
+        if digest(current) != digest(target): raise ValueError('workflow_feature_target_changed')
+        with self.store.atomic():
+            fresh = feature_basis(self.store,job_id,wp_id)
+            current_approval = self.store.get(approval_id,'approval')
+            if (fresh['signature'] != basis['signature'] or current_approval != approval
+                    or current_approval['expires_at'] < now()
+                    or fresh['wp'].get('feature_review_approval_id') != approval_id
+                    or fresh['wp'].get('feature_target_digest') != digest(target)):
+                raise ValueError('workflow_feature_observation_changed')
+            self.store.update(approval_id,status='approved' if allow else 'rejected',note=str(note or '')[:4000],
+                review_acknowledgement={'action':'feature_review_confirmation','target_digest':digest(target),'actor':actor})
+            self.store.update(wp_id,execution_state='succeeded',review_status='approved' if allow else 'changes_requested')
+            self.store.event('feature_review_decided','本人の機能確認を対象版に記録しました。',approval['task_id'],job_id,
+                {'approval_id':approval_id,'work_package_id':wp_id,'target_digest':digest(target),'decision':'approved' if allow else 'rejected',
+                 'actor':actor,'requirement_revision':fresh['job']['requirement_revision'],'plan_revision':fresh['job']['plan_revision']})
+            if not allow:
+                return self._repair_package(fresh['job'],self.store.get(wp_id),self.store.get(approval['task_id']),note)
+            rows = [w for w in self.store.for_job('work_package',job_id) if w['plan_revision'] == fresh['job']['plan_revision']]
+            if all(w['review_status'] == 'approved' for w in rows):
+                specs = approved_source(fresh['job'],fresh['plan'],fresh['requirements'])
+                for wp in rows:
+                    feature_review_receipt(self.store,fresh['job'],fresh['plan'],fresh['requirements'],wp,{s['wbs_id']:s for s in specs},rows,{})
+                if not any(t.get('workflow_job_task') and t.get('plan_revision') == fresh['job']['plan_revision']
+                           and t['status'] == 'queued' for t in self.store.for_job('task',job_id)):
+                    self._queue_reviews(fresh['job'],approval['task_id'])
+            return {'status':'approved','work_package_id':wp_id,'formal_receipt':False}
+
+    def request_package_rework(self, job_id, wp_id, confirmation, note, *, expected_wp_revision,
+                               actor='authenticated_local_app_session'):
+        """An explicit rejection of this feature, retaining other accepted evidence."""
+        from team_wbs import approved_source, validate_projection, digest, feature_review_receipt
+        if actor != 'authenticated_local_app_session' or getattr(self.store._worker,'task',None) is not None:
+            raise ValueError('workflow_user_action_required')
+        if type(expected_wp_revision) is not int: raise ValueError('work_package_revision_changed')
+        from team_recovery import retry_local_read
+        if retry_local_read(lambda: self.handoff.pending_conflicts(job_id)):
+            raise ValueError('workflow_conflict_review_required')
+        with self.store.lock:
+            job = self.store.get(job_id,'job'); wp = self.store.get(wp_id,'work_package')
+            plan = self.store.get(job.get('plan_approval_id'),'approval')
+            requirements = self.store.get(job.get('requirements_approval_id'),'approval')
+            specs = approved_source(job,plan,requirements,for_review=True)
+            rows = [w for w in self.store.for_job('work_package',job_id) if w['plan_revision'] == job['plan_revision']]
+            validate_projection(job,plan,specs,rows)
+            if wp_id not in {w['id'] for w in rows}: raise ValueError('work_package_not_current')
+            proof = feature_review_receipt(self.store,job,plan,requirements,wp,{s['wbs_id']:s for s in specs},rows,{})
+            approval = self.store.get(proof['approval_id'],'approval')
+            observed = digest({'job':job,'wp':wp,'approval':approval,'tasks':self.store.for_job('task',job_id)})
+        if self.workspace_view(job_id).get('status') != 'ready': raise ValueError('workspace_identity_changed')
+        from team_p0_contract import artifact_records
+        for path,sha in proof['files'].items():
+            if artifact_records(job['project'],[path]) != [{'path':path,'sha256':sha}]: raise ValueError('workflow_feature_target_changed')
+        with self.store.atomic():
+            current_job = self.store.get(job_id,'job'); current_wp = self.store.get(wp_id,'work_package')
+            if (digest({'job':current_job,'wp':current_wp,'approval':self.store.get(approval['id'],'approval'),
+                        'tasks':self.store.for_job('task',job_id)}) != observed or wp['state_revision'] != expected_wp_revision
+                    or wp['review_status'] != 'approved'
+                    or confirmation != {'action':'request_feature_rework','target_digest':proof['target_digest']}):
+                raise ValueError('workflow_feature_target_changed')
+            source = self.store.get(self.store.get(wp['feature_review_approval_id'],'approval')['task_id'],'task')
+            return self._repair_package(current_job,current_wp,source,note)
 
     def workflow_dispatch_view(self, job_id, *, running_task_id=None):
         """A fresh observation, never a reusable launch permission."""
@@ -3753,7 +4023,8 @@ class Engine:
                 from team_validation_gate import findings
                 from team_code_test_contract import commands, verify_snapshot
                 cycle = self.store.get(task['review_cycle'], 'task') if task.get('review_cycle') else None
-                missing = findings(commands(job), cycle, job=job, project=job['project'])
+                from team_code_test_contract import validation_job
+                missing = findings(commands(job), cycle, job=validation_job(job,cycle), project=job['project'])
                 if (job.get('code_test_plan') or {}).get('required') and not verify_snapshot(
                         job['project'], (cycle or {}).get('test_asset_snapshot') or {}):
                     missing.append('テスト実行後にテストファイルが変更・削除されています。')
@@ -3777,9 +4048,9 @@ class Engine:
                                      for t in self.store.all('task'))
             if (task['role'] == 'builder' and result.get('status') == 'done'
                     and (job.get('code_test_plan') or {}).get('required')
-                    and any(t['job_id'] == job['id'] and t.get('review_cycle') == task['id']
+                    and (task.get('work_package_id') or any(t['job_id'] == job['id'] and t.get('review_cycle') == task['id']
                             and t['role'] == 'reviewer' and t['status'] == 'queued'
-                            for t in self.store.all('task'))):
+                            for t in self.store.all('task')))):
                 from team_code_test_contract import builder_issues
                 issues, snapshot = builder_issues(job, current, result)
                 if snapshot is not None:
@@ -3845,6 +4116,12 @@ class Engine:
                     return
 
             self.store.update(task['id'], result=result, summary=result['summary'], status='succeeded', finished_at=now())
+
+            if (job.get('workflow_contract_version') == 1 and task.get('work_package_id')
+                    and result.get('status') in ('done','needs_changes')
+                    and not result.get('questions') and not result.get('question')):
+                self._finish_work_package(self.store.get(task['id'],'task'), result)
+                return
 
             if result.get('status') == 'blocked' and ('Computer Use was not approved' in json.dumps(result, ensure_ascii=False) or 'Computer Useの承認' in result['summary']):
 
