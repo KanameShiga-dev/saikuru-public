@@ -191,7 +191,231 @@ def p0_artifact_text(job, relative):
     return {'path': relative, 'content': content, 'truncated': False}
 
 
-def progress(job, tasks, approvals):
+class _WorkflowRecords:
+    """Read-only typed record access; no database, files or permission changes."""
+    def __init__(self, job, tasks, approvals, packages):
+        self.rows = {'job':[job], 'task':tasks, 'approval':approvals, 'work_package':packages}
+        self.index = {}
+        for kind, rows in self.rows.items():
+            for row in rows:
+                key = (kind,row['id'])
+                if key in self.index: raise ValueError('workflow_record_identity_invalid')
+                self.index[key] = row
+
+    def get(self, ident, kind): return self.index[(kind,ident)]
+    def for_job(self, kind, ident): return [r for r in self.rows[kind] if r.get('job_id') == ident]
+
+
+def _workflow_event(events, kind, approval_id):
+    rows = [e for e in events if e.get('type') == kind and (e.get('details') or {}).get('approval_id') == approval_id]
+    if not rows: return {}
+    if all(type(e.get('seq')) is int for e in rows): rows = sorted(rows,key=lambda e:e['seq'])
+    return rows[-1].get('details') or {}  # Otherwise the caller supplies chronological records.
+
+
+def current_workflow_tasks(job, tasks, packages):
+    """Current plan/generation only. Cancelled global queues remain history."""
+    by_id = {w['id']:w for w in packages if w.get('job_id') == job['id'] and w.get('plan_revision') == job['plan_revision']}
+    result = []; global_tasks = []
+    generations = {ident:wp.get('workflow_generation',0) for ident,wp in by_id.items()}
+    for task in tasks:
+        if (task.get('job_id') != job['id'] or task.get('role') == 'planner'
+                or type(task.get('plan_revision')) is not int or task['plan_revision'] != job['plan_revision']
+                or type(task.get('requirement_revision')) is not int or task['requirement_revision'] != job['requirement_revision']
+                or task.get('spec_source_approval_id') != job['plan_approval_id']): continue
+        wp = by_id.get(task.get('work_package_id'))
+        if wp:
+            if task.get('workflow_generation',0) == wp.get('workflow_generation',0): result.append(task)
+        elif task.get('work_package_id') is None and task.get('workflow_job_task') is True and task.get('status') != 'cancelled':
+            binding = task.get('workflow_package_generations')
+            if binding is None:
+                if any(generations.values()): continue  # Historical initial queue only.
+            elif (not isinstance(binding,dict) or any(type(v) is not int for v in binding.values()) or binding != generations): continue
+            global_tasks.append(task)
+    reviews = [t for t in global_tasks if t.get('role') == 'reviewer']
+    if reviews:
+        latest = max(enumerate(reviews),key=lambda pair:(pair[1].get('created_at') or 0,pair[0]))[1]
+        cycle = latest.get('review_cycle')
+        global_tasks = [t for t in global_tasks if t['id'] == cycle
+                        or (t.get('role') == 'reviewer' and t.get('review_cycle') == cycle)
+                        or t.get('role') not in ('builder','reviewer')]
+    result.extend(global_tasks)
+    return result
+
+
+def _workflow_task_state(task):
+    result = task.get('result') or {}
+    if (task.get('current_attempt') or {}).get('status') == 'running': return 'running'
+    if task.get('status') == 'handed_off' or result.get('status') == 'handoff': return 'handed_off'
+    if task.get('status') == 'interrupted': return 'interrupted'
+    if task.get('recovery_check_required'): return 'blocked'
+    if task.get('status') == 'succeeded':
+        if result.get('status') != 'done': return 'needs_changes'
+        if result.get('pending_checks') or result.get('blocking_reasons'): return 'unconfirmed'
+        return 'execution_succeeded'
+    return task.get('status') if task.get('status') in ('queued','running','awaiting_approval','blocked','failed','cancelled') else 'unconfirmed'
+
+
+def workflow_state_digest(job, tasks, approvals, packages):
+    """Stable acceptance binding excluding the acknowledgement/decision itself."""
+    from team_wbs import digest, task_evidence_digest
+    current = [w for w in packages if w.get('job_id') == job['id'] and w.get('plan_revision') == job['plan_revision']]
+    ids = {job.get('plan_approval_id'),job.get('requirements_approval_id')} | {w.get('feature_review_approval_id') for w in current}
+    return digest({'job_binding':{k:job.get(k) for k in ('id','project','request_origin','route','workflow_contract_version','p0_contract_version')},
+        'versions':{k:job.get(k) for k in ('requirement_revision','requirements_approval_id','plan_revision','plan_approval_id')},
+        'packages':sorted(current,key=lambda w:w['id']),
+        'tasks':{t['id']:task_evidence_digest(t) for t in current_workflow_tasks(job,tasks,current)},
+        'authorities':{a['id']:{k:a.get(k) for k in ('kind','status','digest','review_acknowledgement','workflow_revision')}
+                       for a in approvals if a.get('job_id') == job['id'] and a.get('id') in ids}})
+
+
+def workflow_progress(job, tasks, approvals, *, work_packages=None, events=None):
+    """Persisted-state projection. It never checks files, starts work or grants acceptance."""
+    from team_wbs import approved_source, validate_projection, feature_review_receipt
+    result = {'state':'inconclusive','reason':'workflow_records_required','packages':[],
+              'counts':{'packages':0,'technical_complete':0,'feature_approved':0,'feature_waiting':0,'invalidated':0},
+              'tasks':{},'historical_tasks':0,'current_task_ids':[],
+              'uat':{'required':0,'confirmed':0,'complete':False},'formal_receipt':False,
+              'review_available':False,'evidence_recording_available':False,
+              'ready_for_formal_acceptance':False,'complete':False,'filesystem_verified':False,
+              'permission_effect':'none','decides_nothing':True}
+    try:
+        if workflow_version(job) != 1: raise ValueError('workflow_version_required')
+        if work_packages is None or events is None: return result
+        owned = [t for t in tasks if t.get('job_id') == job['id']]
+        approvals = [a for a in approvals if a.get('job_id') == job['id']]
+        events = [e for e in events if e.get('job_id') == job['id']]
+        packages = [w for w in work_packages if w.get('job_id') == job['id'] and w.get('plan_revision') == job['plan_revision']]
+        records = _WorkflowRecords(job,owned,approvals,packages)
+        plan = records.get(job.get('plan_approval_id'),'approval')
+        requirements = records.get(job.get('requirements_approval_id'),'approval')
+        import os
+        boundary = (plan.get('workflow_revision') or {}).get('workspace_boundary') or {}
+        if (boundary.get('status') != 'ready' or not isinstance(boundary.get('execution_root'),str)
+                or os.path.normcase(os.path.normpath(boundary['execution_root'])) != os.path.normcase(os.path.normpath(job['project']))):
+            raise ValueError('workflow_project_binding_changed')
+        # Stopped jobs may be inspected; this grants no permission to dispatch.
+        source_job = dict(job,status='blocked') if job.get('status') in ('cancelled','interrupted') else job
+        specs = approved_source(source_job,plan,requirements,for_review=True)
+        if any((job.get('goal_contract') or {}).get(k) != requirements['payload']['goal_contract'].get(k)
+               for k in ('primary_goal','deliverables','acceptance_criteria','non_goals','constraints')):
+            raise ValueError('workflow_goal_contract_changed')
+        validate_projection(job,plan,specs,packages)
+        if any(type(w.get('workflow_generation',0)) is not int or w.get('workflow_generation',0) < 0 for w in packages):
+            raise ValueError('workflow_generation_invalid')
+        current = current_workflow_tasks(job,owned,packages)
+        result['current_task_ids'] = [t['id'] for t in current]
+        result['historical_tasks'] = len(owned)-len(current)
+        states = [_workflow_task_state(t) for t in current]
+        result['tasks'] = {s:states.count(s) for s in sorted(set(states))}
+        result['tasks']['total'] = len(current)
+        result['tasks']['incomplete'] = sum(s != 'execution_succeeded' for s in states)
+        cache = {}; by_label = {s['wbs_id']:s for s in specs}
+        for spec in specs:
+            wp = next(w for w in packages if w['wbs_id'] == spec['wbs_id'])
+            members = [t for t in current if t.get('work_package_id') == wp['id']]
+            technical = (bool(members) and wp['execution_state'] == 'succeeded'
+                         and any(t['role'] == 'reviewer' for t in members)
+                         and all(_workflow_task_state(t) == 'execution_succeeded' for t in members))
+            approved = False; reason = None
+            if wp['review_status'] == 'approved':
+                try:
+                    feature_review_receipt(records,job,plan,requirements,wp,by_label,packages,cache,
+                        decision_lookup=lambda ident:_workflow_event(events,'feature_review_decided',ident))
+                    approved = technical
+                except (ValueError,KeyError,TypeError): reason = 'feature_receipt_not_current'
+            item = {'id':wp['id'],'wbs_id':wp['wbs_id'],'title':wp['title'],'execution_state':wp['execution_state'],
+                    'review_status':wp['review_status'],'technical_complete':technical,'feature_approved':approved,
+                    'reason':reason,'task_ids':[t['id'] for t in members]}
+            result['packages'].append(item)
+        counts = result['counts']; counts['packages'] = len(packages)
+        counts['technical_complete'] = sum(w['technical_complete'] for w in result['packages'])
+        counts['feature_approved'] = sum(w['feature_approved'] for w in result['packages'])
+        counts['feature_waiting'] = len(packages)-counts['feature_approved']
+        counts['invalidated'] = sum(w['review_status'] == 'invalidated' or bool(w['reason']) for w in result['packages'])
+        all_features = bool(packages) and counts['feature_approved'] == len(packages)
+        clean = bool(current) and result['tasks']['incomplete'] == 0
+        completions = [a for a in approvals if a.get('kind') == 'completion']
+        latest = completions[-1] if completions else None
+        global_tasks = {t['id']:t for t in current if t.get('workflow_job_task') is True}
+        payload = (latest or {}).get('payload') or {}; task = global_tasks.get((latest or {}).get('task_id'))
+        receipt_current = (task is not None and latest.get('status') in ('pending','approved') and task.get('role') == 'reviewer'
+                           and _workflow_task_state(task) == 'execution_succeeded'
+                           and latest.get('attempt') == task.get('attempt')
+                           and latest.get('digest') == hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest())
+        required = list(requirements['payload']['goal_contract']['acceptance_criteria']) + ['完成物が起動し、操作できる']
+        recorded_checks = set()
+        if (receipt_current and all_features and clean and job.get('status') in
+                ('awaiting_acceptance','accepted','accepted_with_pending_checks')):
+            sources = {a['id'] for a in completions if a.get('task_id') == task['id'] and a.get('attempt') == task.get('attempt')}
+            for item in payload.get('resolved_checks') or []:
+                if (item.get('authority') == 'user_confirmed' and item.get('source_approval_id') in sources
+                        and isinstance(item.get('evidence'),str) and item['evidence'].strip()
+                        and isinstance(item.get('confirmed_at'),(int,float))): recorded_checks.add(item.get('check'))
+        result['uat'] = {'required':len(required),'confirmed':sum(c in recorded_checks for c in required),
+                         'complete':all(c in recorded_checks for c in required),
+                         'unconfirmed':[c for c in required if c not in recorded_checks]}
+        ack = (latest or {}).get('review_acknowledgement') or {}
+        acknowledged = (receipt_current and ack.get('action') == 'review_result_confirmation'
+            and ack.get('actor') == 'authenticated_local_app_session' and ack.get('approval_id') == latest['id']
+            and ack.get('authorization') == 'session_cookie_and_ui_marker'
+            and ack.get('task_id') == task['id'] and ack.get('from_status') == ack.get('to_status') == 'awaiting_acceptance'
+            and ack.get('target_job_id') == job['id'] and ack.get('payload_digest') == latest['digest']
+            and isinstance(ack.get('target_version_token'),str)
+            and ack.get('target_state',{}).get('workflow_digest') == workflow_state_digest(job,owned,approvals,packages)
+            and _workflow_event(events,'review_result_acknowledged',latest['id']) == ack)
+        pending_other = any(a['status'] == 'pending' and a['id'] != (latest or {}).get('id') for a in approvals)
+        result['review_available'] = bool(all_features and clean and receipt_current and not pending_other
+                                          and latest['status'] == 'pending' and job['status'] == 'awaiting_acceptance')
+        result['evidence_recording_available'] = bool(result['review_available'] and payload.get('pending_items'))
+        evidence_ready = (all_features and clean and receipt_current and acknowledged
+                 and result['uat']['complete'] and not payload.get('pending_items') and not payload.get('review_findings'))
+        result['ready_for_formal_acceptance'] = bool(evidence_ready and not pending_other
+            and latest['status'] == 'pending' and job['status'] == 'awaiting_acceptance')
+        decision = (latest or {}).get('decision') or {}
+        accepted = (evidence_ready and job['status'] == 'accepted' and latest['status'] == 'approved'
+            and decision.get('action') == 'formal_acceptance' and decision.get('actor') == 'authenticated_local_app_session'
+            and decision.get('authorization') == 'session_cookie_and_ui_marker' and decision.get('task_id') == task['id']
+            and decision.get('from_status') == 'awaiting_acceptance'
+            and decision.get('approval_id') == latest['id'] and decision.get('target_job_id') == job['id']
+            and decision.get('to_status') == 'accepted' and decision.get('conditional') is False
+            and decision.get('unresolved_items') == 0
+            and _workflow_event(events,'formal_acceptance_decided',latest['id']) == decision)
+        result.update(formal_receipt=bool(accepted),complete=bool(accepted),
+            state='complete' if accepted else 'invalidated' if counts['invalidated'] else 'incomplete',reason=None)
+    except (ValueError,KeyError,TypeError,AttributeError):
+        result.update(state='inconclusive',reason='workflow_authority_or_records_invalid',complete=False,
+                      formal_receipt=False,ready_for_formal_acceptance=False,review_available=False,evidence_recording_available=False)
+    return result
+
+
+def progress(job, tasks, approvals, *, work_packages=None, events=None):
+    base = _legacy_progress(job,tasks,approvals)
+    if 'workflow_contract_version' not in job: return base
+    workflow = workflow_progress(job,tasks,approvals,work_packages=work_packages,events=events)
+    base['workflow'] = workflow
+    base['completed'] = [w['title'] for w in workflow['packages'] if w['feature_approved']]
+    base['remaining'] = [w['title'] for w in workflow['packages'] if not w['feature_approved']]
+    if not workflow['complete']: base['remaining'].append('利用者による依頼全体の確認・正式受領')
+    base['completion_status'] = ('accepted' if workflow['complete'] else
+        'accepted_with_pending_checks' if job.get('status') == 'accepted_with_pending_checks' else
+        'awaiting_user_acceptance' if job.get('status') == 'awaiting_acceptance' else 'in_progress')
+    if not workflow['complete']:
+        criteria = list((job.get('goal_contract') or {}).get('acceptance_criteria') or [])
+        base['unmet_acceptance_criteria'] = (criteria if workflow['state'] == 'inconclusive' else
+            [c for c in criteria if c in workflow['uat'].get('unconfirmed',[])])
+        base['next_action'] = ('対象版と機能・受領の証拠を確認する' if workflow['state'] in ('inconclusive','invalidated')
+                               else '依頼全体の正式受領を判断する' if workflow['ready_for_formal_acceptance']
+                               else '完成物を起動・操作し、残る受入条件を確認する' if workflow['evidence_recording_available']
+                               else '機能の実装・技術確認・本人確認を順に進める')
+        base['available_actions'] = [a for a in base['available_actions'] if a == 'cancel_job']
+        if workflow['review_available']: base['available_actions'].append('review_completion')
+        if workflow['evidence_recording_available']: base['available_actions'].append('record_completion_evidence')
+        if workflow['ready_for_formal_acceptance']: base['available_actions'].append('accept_completion')
+    return base
+
+
+def _legacy_progress(job, tasks, approvals):
     """A user-facing projection from persisted work, never an independent ledger."""
     contract = job.get('goal_contract') or {}
     interruption = job.get('p0_interruption') or {}

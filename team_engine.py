@@ -1256,6 +1256,8 @@ class Engine:
                 if package_fields is None:
                     contract = job.get('goal_contract') or {}
                     task.update(goal_links=list(dict.fromkeys(contract.get('deliverables',[]) + contract.get('acceptance_criteria',[]))), goal_id=job['id'])
+                    task['workflow_package_generations'] = {w['id']:w.get('workflow_generation',0)
+                        for w in self.store.for_job('work_package',job['id']) if w['plan_revision'] == job['plan_revision']}
         return self.store.put('task', task)
 
 
@@ -2047,10 +2049,29 @@ class Engine:
                         self.store.update(job['id'], status='blocked')
 
 
+    def _workflow_projection_records(self, job):
+        return {'tasks':self.store.for_job('task',job['id']),
+                'approvals':self.store.for_job('approval',job['id']),
+                'work_packages':self.store.for_job('work_package',job['id']),
+                'events':[e for kind in ('feature_review_decided','review_result_acknowledged','formal_acceptance_decided')
+                          for e in self.store.job_events(job['id'],kind)]}
+
+    def workflow_progress(self, job_id):
+        from team_p0_contract import workflow_progress
+        with self.store.lock:
+            job = self.store.get(job_id,'job')
+            return workflow_progress(job,**self._workflow_projection_records(job))
+
     def _acceptance_target_snapshot(self, job):
         from team_validation_evidence import snapshot
         from team_code_test_contract import commands
-        return snapshot(job['project'], self.store.directory, commands(job))
+        proof = snapshot(job['project'], self.store.directory, commands(job))
+        if job.get('workflow_contract_version') == 1:
+            from team_p0_contract import workflow_state_digest
+            records = self._workflow_projection_records(job)
+            proof['workflow_digest'] = workflow_state_digest(job,records['tasks'],records['approvals'],records['work_packages'])
+            proof['digest'] = hashlib.sha256((proof['digest']+proof['workflow_digest']).encode('ascii')).hexdigest()
+        return proof
 
     def _acceptance_target_state(self, job, proof):
         """Persist only opaque fingerprints needed to decide whether reissue is safe."""
@@ -2066,7 +2087,7 @@ class Engine:
         }
         policy_digest = hashlib.sha256(json.dumps(
             policy, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
-        return {
+        result = {
             'files_digest': hashlib.sha256(stable_files).hexdigest(),
             'excluded': proof['excluded'],
             'validation_commands': proof['validation_commands'],
@@ -2075,6 +2096,8 @@ class Engine:
             'environment': proof['environment'] if proof['environment_scope'] == 'none' else None,
             'acceptance_policy_digest': policy_digest,
         }
+        if 'workflow_digest' in proof: result['workflow_digest'] = proof['workflow_digest']
+        return result
 
     def _acceptance_review_state(self, job, task):
         cycle_id = task.get('review_cycle')
@@ -2108,6 +2131,11 @@ class Engine:
             if approval.get('kind') != 'completion':
                 raise ValueError('レビュー結果の確認対象を選択してください。')
             job = self.store.get(approval['job_id'], 'job')
+            if job.get('workflow_contract_version') == 1:
+                state = self.workflow_progress(job['id'])
+                if (state['counts']['packages'] == 0 or state['counts']['feature_waiting']
+                        or state['tasks'].get('incomplete',1)):
+                    raise ValueError('workflow_acceptance_not_ready')
             task = self.store.get(approval['task_id'], 'task')
             if task.get('job_id') != job.get('id') or approval.get('job_id') != job.get('id'):
                 raise ValueError('承認要求のジョブ・担当の紐付けが不正です。')
@@ -2129,6 +2157,9 @@ class Engine:
                                       and self.config.get('document_review_relaxed', False)
                                       and bool(job.get('document_source')))
             allowed_review_states = ('succeeded', 'handed_off', 'cancelled') if no_fix_document_review else ('succeeded', 'handed_off')
+            if job.get('workflow_contract_version') == 1:
+                from team_p0_contract import current_workflow_tasks
+                tasks = current_workflow_tasks(job,tasks,self.store.for_job('work_package',job['id']))
             if any(t.get('status') not in allowed_review_states for t in tasks):
                 raise ValueError('未完了の担当があるためレビュー結果を確認できません。')
             pending = [a for a in self.store.for_job('approval', job['id'])
@@ -2299,6 +2330,11 @@ class Engine:
                     or not secrets.compare_digest(review_ack['target_version_token'], current_target_token)):
                 raise ValueError('レビュー確認後に対象版が変化したか、確認証跡を再検証できません。最新のレビュー結果を確認してください。')
             tasks = self.store.for_job('task', job['id'])
+            if job.get('workflow_contract_version') == 1:
+                from team_p0_contract import current_workflow_tasks
+                if not self.workflow_progress(job['id'])['ready_for_formal_acceptance']:
+                    raise ValueError('workflow_acceptance_not_ready')
+                tasks = current_workflow_tasks(job,tasks,self.store.for_job('work_package',job['id']))
             if any(t.get('status') not in ('succeeded', 'handed_off') for t in tasks):
                 raise ValueError('未完了の担当があるため正式受領できません。')
             pending = [a for a in self.store.for_job('approval', job['id'])

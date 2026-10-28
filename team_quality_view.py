@@ -80,11 +80,28 @@ def _deliverable(job, events, recorded_hashes):
     return {'id': 'DQA-01', 'state': PASSED, 'files': len(recorded_hashes), 'detail': '検査時のハッシュと現在が一致'}
 
 
-def quality_view(job, tasks, approvals, events=(), recorded_hashes=None):
+def quality_view(job, tasks, approvals, events=(), recorded_hashes=None, *, work_packages=None):
     """QA view of one job. All arguments are plain records; nothing is read from a database here."""
+    events = list(events)
+    workflow = None
+    if 'workflow_contract_version' in job:
+        from team_p0_contract import workflow_progress
+        workflow = workflow_progress(job,tasks,approvals,work_packages=work_packages,events=events)
+        current = set(workflow['current_task_ids'])
+        tasks = [t for t in tasks if t.get('job_id') == job.get('id') and t.get('id') in current]
+        approvals = [a for a in approvals if a.get('job_id') == job.get('id')]
     builder = _latest_builder(tasks)
-    facts = [item for item in (_verification(job, builder), _tests(job, builder),
-                               _deliverable(job, list(events), recorded_hashes)) if item]
+    from team_code_test_contract import validation_job
+    validation = validation_job(job,builder) if workflow is not None else job
+    if workflow is not None and workflow['state'] == 'inconclusive':
+        facts = []  # Missing current records are not a failed test execution.
+    else:
+        facts = [item for item in (_verification(validation, builder), _tests(job, builder),
+                                   _deliverable(job, events, recorded_hashes)) if item]
+    if workflow is not None:
+        facts.append({'id':'WFQA-01','state':PASSED if workflow['complete'] else INVALIDATED
+                      if workflow['state'] == 'invalidated' else INCONCLUSIVE,
+                      'detail':'機能確認とUAT・正式受領の記録を区別して照合','decides_nothing':True})
     reviews = [{'agent': t.get('agent_name') or 'reviewer', 'status': (t.get('result') or {}).get('status'),
                 'summary_chars': len(str((t.get('result') or {}).get('summary') or ''))}
                for t in _reviews(tasks) if t.get('status') == 'succeeded']
@@ -100,7 +117,7 @@ def quality_view(job, tasks, approvals, events=(), recorded_hashes=None):
         overall = PASSED
     else:
         overall = INCONCLUSIVE
-    return {
+    result = {
         'job_id': job.get('id'),
         'overall': overall,
         'facts': facts,
@@ -111,3 +128,9 @@ def quality_view(job, tasks, approvals, events=(), recorded_hashes=None):
                      'conditional': job.get('status') == 'accepted_with_pending_checks'},
         'decides_nothing': True,
     }
+    if workflow is not None:
+        result['workflow'] = workflow
+        result['approval']['accepted'] = workflow['formal_receipt']
+        result['unresolved']['feature_waiting'] = workflow['counts']['feature_waiting']
+        result['unresolved']['uat_remaining'] = workflow['uat']['required']-workflow['uat']['confirmed']
+    return result

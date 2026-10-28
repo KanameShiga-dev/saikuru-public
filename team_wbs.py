@@ -406,7 +406,7 @@ def plan_instruction_matches(task, expected):
     return task.get('instruction') == expected
 
 
-def feature_review_receipt(store, job, plan, requirements, wp, specs, records, cache):
+def feature_review_receipt(store, job, plan, requirements, wp, specs, records, cache, *, decision_lookup=None):
     """Read an existing typed decision; never issue or infer feature approval.
 
     W04.05 owns target creation, technical checks and authenticated decisions.
@@ -438,9 +438,12 @@ def feature_review_receipt(store, job, plan, requirements, wp, specs, records, c
     if (ack.get('action') != 'feature_review_confirmation' or ack.get('actor') != 'authenticated_local_app_session'
             or ack.get('target_digest') != target_hash):
         raise ValueError('dependency_feature_confirmation_required')
-    row = store.db.execute("SELECT body FROM events WHERE json_extract(body,'$.type')='feature_review_decided' "
-        "AND json_extract(body,'$.details.approval_id')=? ORDER BY seq DESC LIMIT 1", (review['id'],)).fetchone()
-    decision = (json.loads(row[0]).get('details') or {}) if row else {}
+    if decision_lookup is None:
+        row = store.db.execute("SELECT body FROM events WHERE json_extract(body,'$.type')='feature_review_decided' "
+            "AND json_extract(body,'$.details.approval_id')=? ORDER BY seq DESC LIMIT 1", (review['id'],)).fetchone()
+        decision = (json.loads(row[0]).get('details') or {}) if row else {}
+    else:
+        decision = decision_lookup(review['id']) or {}
     expected = {'approval_id':review['id'], 'work_package_id':wp['id'], 'target_digest':target_hash,
         'decision':'approved', 'actor':'authenticated_local_app_session',
         'requirement_revision':job['requirement_revision'], 'plan_revision':job['plan_revision']}
@@ -478,7 +481,8 @@ def feature_review_receipt(store, job, plan, requirements, wp, specs, records, c
     dependencies = {}
     by_label = {row['wbs_id']:row for row in records}
     for label in specs[wp['wbs_id']]['depends_on']:
-        proof = feature_review_receipt(store,job,plan,requirements,by_label[label],specs,records,cache)
+        proof = feature_review_receipt(store,job,plan,requirements,by_label[label],specs,records,cache,
+                                      decision_lookup=decision_lookup)
         dependencies[by_label[label]['id']] = {'approval_id':proof['approval_id'],'target_digest':proof['target_digest']}
         for path,sha in proof['files'].items():
             if path in files and files[path] != sha: raise ValueError('dependency_feature_snapshot_invalid')
