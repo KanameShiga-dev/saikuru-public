@@ -4,6 +4,7 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import threading
 import time
@@ -26,6 +27,30 @@ from team_cli_update import CliUpdateMonitor
 from team_harness import Harnesses
 from team_ui_automation import UiAutomation
 from team_consultation import Consultations
+
+
+class WorkflowRequestError(ValueError):
+    """Fixed-code errors for the new workflow boundary; no raw diagnostic echo."""
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def workflow_call(operation):
+    try:
+        return operation()
+    except (ValueError, KeyError, TypeError) as error:
+        message = str(error)
+        if re.fullmatch(r'(?:workflow|work_package|dependency)_[a-z_]+',message): code = message
+        elif message.startswith('[INPUT_GUARD_CONFIRM]') or 'AIへ送る前' in message or '情報保護' in message:
+            code = 'workflow_sensitive_input_blocked'
+        else: code = 'workflow_input_or_maintenance_check_required'
+        raise WorkflowRequestError(code) from None
+
+
+def workflow_body(body, fields, action):
+    if set(body) != set(fields) or body.get('action') != action:
+        raise WorkflowRequestError('workflow_request_invalid')
 
 
 class DataLock:
@@ -215,9 +240,14 @@ class App:
     def quality(self, job_id):
         """SQAH Phase 3: a read-only QA view of one job. It decides nothing and writes nothing."""
         from team_quality_view import quality_view
-        job = self.store.get(job_id, 'job')
-        events = [e for e in self.store.events(500) if e.get('job_id') == job_id]
-        return quality_view(job, self.store.for_job('task', job_id), self.store.for_job('approval', job_id), events)
+        with self.store.lock:
+            job = self.store.get(job_id, 'job')
+            if job.get('workflow_contract_version') == 1:
+                records = self.engine._workflow_projection_records(job)
+                records['events'] += self.store.job_events(job_id,'deliverable_missing')
+                return quality_view(job,**records)
+            events = [e for e in self.store.events(500) if e.get('job_id') == job_id]
+            return quality_view(job, self.store.for_job('task', job_id), self.store.for_job('approval', job_id), events)
 
     def history_days(self):
         days = self.config.get('history_days', 7)
@@ -245,7 +275,8 @@ class App:
             fresh, tasks, approvals = {}, [], []
             for job in shown:
                 if job.get('status') in self.ENDED_JOB_STATUSES:
-                    ckey = (job['id'], job.get('updated_at'), job.get('status'))
+                    ckey = (job['id'], job.get('updated_at'), job.get('status'),
+                            self.store.revision if job.get('workflow_contract_version') == 1 else None)
                     rows = ended_cache.get(ckey)
                     if rows is None:
                         rows = ([self.slim_task(t) for t in self.store.for_job('task', job['id'])],
@@ -260,8 +291,20 @@ class App:
             jobs_total = len(jobs)
             self._state_cache = (key, (jobs_total, shown, tasks, approvals))
         from team_p0_contract import progress as p0_progress
-        visible_jobs = [dict(job, p0_progress=p0_progress(job, tasks, approvals))
-                        if job.get('p0_contract_version') == 1 else job for job in shown]
+        visible_jobs = []
+        actionable = {}
+        for job in shown:
+            if job.get('workflow_contract_version') == 1:
+                with self.store.lock:
+                    current = self.store.get(job['id'],'job')
+                    records = self.engine._workflow_projection_records(current)
+                    view = self.engine.workflow_view(job['id'])
+                    visible_jobs.append(dict(current,workflow=view,p0_progress=p0_progress(current,**records)))
+                    actionable.update({item['id']:item['actionable'] for item in view['pending_decisions']})
+            else:
+                visible_jobs.append(dict(job,p0_progress=p0_progress(job,tasks,approvals))
+                                    if job.get('p0_contract_version') == 1 else job)
+        approvals = [dict(a,actionable=actionable[a['id']]) if a['id'] in actionable else a for a in approvals]
         return {'jobs': visible_jobs, 'tasks': tasks,
                 'approvals': approvals, 'events': self.store.events(),
                 'history': {'days': self.history_days(), 'hidden_jobs': jobs_total - len(shown)},
@@ -385,6 +428,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.common()
             path = urlparse(self.path).path
+            if path in ('/api/workflow/job','/api/maintenance/workflow'):
+                if not self.authorized(): raise PermissionError('画面を再読み込みしてください。')
+                maintenance = path == '/api/maintenance/workflow'
+                if maintenance and not self.maintenance_authorized(): raise PermissionError('保守担当の認証が必要です。')
+                query = parse_qs(urlparse(self.path).query,keep_blank_values=True)
+                if set(query) != {'id'} or len(query['id']) != 1: raise WorkflowRequestError('workflow_request_invalid')
+                return self.send(200,workflow_call(lambda:self.app.engine.workflow_view(query['id'][0],maintainer=maintenance)))
             if path == '/health':
                 return self.send(200, {'status': 'ok', 'app': 'agent-team', 'version': '0.1.0'})
             if path == '/api/project-history':
@@ -601,6 +651,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, file.read_bytes(), (mimetypes.guess_type(file)[0] or 'text/plain') + '; charset=utf-8', path in ('/', '/ledger', '/operation-tests', '/history', '/context-optimization'))
         except PermissionError as exc:
             self.send(403, {'error': str(exc)})
+        except WorkflowRequestError as exc:
+            self.send(400, {'error':'対象版または操作条件を再確認してください。','code':exc.code})
         except ValueError as exc:
             if path in ('/api/attachments/image', '/api/attachments/meta', '/api/ledger/consultation/models', '/api/job/p0-artifact'):
                 self.send(400, {'error': str(exc)[:300]})
@@ -632,7 +684,19 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized() or self.headers.get('X-Agent-Team-UI') != '1':
                 raise PermissionError('ブラウザからの認証済み操作が必要です。')
             engine = self.app.engine
-            if path == '/api/attachments':
+            if path == '/api/workflow/feature-review/prepare':
+                workflow_body(body,('job_id','work_package_id','work_package_revision','action'),'request_feature_review')
+                result = workflow_call(lambda:engine.request_feature_review(body['job_id'],body['work_package_id'],
+                    expected_wp_revision=body['work_package_revision']))
+            elif path == '/api/workflow/feature-review/decide':
+                workflow_body(body,('approval_id','allow','confirmation','note','action'),'decide_feature_review')
+                result = workflow_call(lambda:engine.decide_feature_review(body['approval_id'],body['allow'],body['confirmation'],
+                    body['note'],actor='authenticated_local_app_session'))
+            elif path == '/api/workflow/feature-rework':
+                workflow_body(body,('job_id','work_package_id','work_package_revision','confirmation','note','action'),'rework_job')
+                result = workflow_call(lambda:engine.request_package_rework(body['job_id'],body['work_package_id'],
+                    body['confirmation'],body['note'],expected_wp_revision=body['work_package_revision'],actor='authenticated_local_app_session'))
+            elif path == '/api/attachments':
                 result = self.app.attachments.upload(body)
             elif path == '/api/ledger/consultation/open':
                 result = self.app.consultations.open(body)
@@ -782,6 +846,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/jobs/artifact-url':
                 result = engine.record_artifact_url(str(body.get('id', '')), str(body.get('url', '')), str(body.get('note', '')))
             elif path == '/api/jobs/rework':
+                if self.app.store.get(str(body.get('id','')),'job').get('workflow_contract_version') == 1:
+                    raise WorkflowRequestError('workflow_feature_target_required')
                 result = engine.rework_from_rejection(str(body.get('id', '')), body.get('note', ''))
             elif path == '/api/jobs/plan-revision':
                 if set(body) != {'id', 'plan', 'job_revision'}:
@@ -833,6 +899,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('既に行われた変更を確認してください。')
                 retry_task = self.app.store.get(body['id'], 'task')
                 retry_job = self.app.store.get(retry_task['job_id'], 'job')
+                if retry_job.get('workflow_contract_version') == 1:
+                    if (('action' in body and body['action'] != 'retry_task')
+                            or set(body)-{'id','action','checked_changes','note','handoff_allowed'}):
+                        raise WorkflowRequestError('workflow_request_invalid')
                 recovery_control = retry_job.get('workflow_contract_version') == 1 and (
                     retry_task.get('recovery_check_required') or retry_task.get('recovery_confirmation')
                     or self.app.store.has_operation_history(retry_job['id']))
@@ -1044,6 +1114,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 return self.send(404, {'error': '未対応の操作です。'})
             self.send(200, result)
+        except WorkflowRequestError as exc:
+            self.send(400, {'error':'対象版または操作条件を再確認してください。','code':exc.code})
         except PermissionError as exc:
             self.send(403, {'error': str(exc)})
         except (ValueError, KeyError, TypeError) as exc:

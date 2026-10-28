@@ -2688,6 +2688,10 @@ class Engine:
             if fresh['signature'] != basis['signature']: raise ValueError('workflow_feature_observation_changed')
             if fresh['wp'].get('review_status') == 'pending':
                 previous = self.store.get(fresh['wp'].get('feature_review_approval_id'),'approval')
+                if (previous.get('job_id') != job_id or previous.get('kind') != 'feature_review'
+                        or previous.get('intended_role') != 'end_user' or previous.get('category') != 'ACCEPTANCE'
+                        or ((previous.get('payload') or {}).get('feature_target') or {}).get('work_package_id') != wp_id):
+                    raise ValueError('workflow_feature_target_changed')
                 if previous['status'] in ('pending','expired') and previous['expires_at'] < now():
                     self.store.update(previous['id'],status='superseded',note='機能確認の期限が切れたため対象版を再提示します。')
                 else: raise ValueError('work_package_review_already_requested')
@@ -2712,16 +2716,21 @@ class Engine:
         require_clean_input(note,False,'機能確認の補足')
         with self.store.lock:
             approval = self.store.get(approval_id,'approval')
+            if self.store.get(approval['job_id'],'job')['status'] != 'running':
+                raise ValueError('workflow_feature_job_not_running')
             payload = approval.get('payload') or {}; target = payload.get('feature_target') or {}
             if (approval.get('kind') != 'feature_review' or approval['status'] != 'pending'
+                    or approval.get('intended_role') != 'end_user' or approval.get('category') != 'ACCEPTANCE'
                     or approval['expires_at'] < now() or approval.get('digest') != self._g2_payload_digest(payload)
                     or confirmation != {'action':'feature_review_confirmation','target_digest':digest(target),'decision':'approved' if allow else 'rejected'}):
                 raise ValueError('workflow_feature_confirmation_required')
             job_id, wp_id = approval['job_id'], target.get('work_package_id')
         basis, current = self._feature_observation(job_id,wp_id)
+        if basis['job']['status'] != 'running': raise ValueError('workflow_feature_job_not_running')
         if digest(current) != digest(target): raise ValueError('workflow_feature_target_changed')
         with self.store.atomic():
             fresh = feature_basis(self.store,job_id,wp_id)
+            if fresh['job']['status'] != 'running': raise ValueError('workflow_feature_job_not_running')
             current_approval = self.store.get(approval_id,'approval')
             if (fresh['signature'] != basis['signature'] or current_approval != approval
                     or current_approval['expires_at'] < now()
@@ -2923,10 +2932,15 @@ class Engine:
 
     def work_package_view(self, job_id):
         """Read-only projection; dependency/task lists are never stored on WP."""
-        from team_wbs import validate_projection
+        from team_wbs import validate_projection, approved_source
         with self.store.lock:
             job = self.store.get(job_id, 'job')
-            approval, specs = self._work_package_source(job)
+            approval = self.store.get(job.get('plan_approval_id'),'approval')
+            requirements = self.store.get(job.get('requirements_approval_id'),'approval')
+            viewed = dict(job,status='blocked') if job['status'] in ('cancelled','interrupted') else job
+            specs = approved_source(viewed,approval,requirements,for_review=True)
+            from team_p0_contract import validate_plan
+            validate_plan(job,approval['payload'],check_current_inputs=False)
             records = [row for row in self.store.for_job('work_package', job_id)
                        if row.get('plan_revision') == job['plan_revision']]
             if not records:
@@ -2938,6 +2952,125 @@ class Engine:
                 dict(by_id[mapping[spec['wbs_id']]], depends_on=list(spec['depends_on']),
                      task_ids=[t['id'] for t in tasks if t.get('work_package_id') == mapping[spec['wbs_id']]])
                 for spec in specs]}
+
+    def workflow_view(self, job_id, *, maintainer=False):
+        """Request-scoped UI hints; no Context construction, file/Git reads or dispatch."""
+        from team_wbs import dispatch_state, digest
+        from team_recovery import workflow_failure_advice
+        with self.store.lock:
+            job = self.store.get(job_id,'job')
+            from team_p0_contract import workflow_version
+            if workflow_version(job) != 1: raise ValueError('workflow_version_required')
+            records = self._workflow_projection_records(job)
+            projection = self.workflow_progress(job_id)
+            try: packages = self.work_package_view(job_id)['work_packages']
+            except (ValueError,KeyError,TypeError): packages = []
+            try:
+                observed = dispatch_state(self.store,job_id,active=set(self.active))
+                dispatch = {k:observed[k] for k in ('status','candidate_task_id','reasons','waiting') if k in observed}
+            except (ValueError,KeyError,TypeError):
+                dispatch = {'status':'blocked','candidate_task_id':None,'reasons':['workflow_authority_or_records_invalid']}
+            active = any(t['id'] in self.active or t['status'] in ('running','awaiting_approval')
+                         or (t.get('current_attempt') or {}).get('status') == 'running' for t in records['tasks'])
+            pending = []; actions = []; maintenance = False; unknown_effects = False; stop_codes = set()
+            guidance = []
+            interruption = job.get('p0_interruption') or {}
+            current_ids = set(projection['current_task_ids'])
+            for task in records['tasks']:
+                if (task['id'] not in current_ids and task['id'] != interruption.get('interrupted_task_id')
+                        and not (job['plan_revision'] == 0 and task.get('role') == 'planner' and task['status'] != 'cancelled')):
+                    continue
+                if task.get('recovery_check_required'):
+                    maintenance = True; unknown_effects = True; stop_codes.add('workflow_recovery_confirmation_required')
+                advisory = workflow_failure_advice(task)
+                if advisory:
+                    maintenance = maintenance or advisory['state'] == 'maintenance'
+                    unknown_effects = True; stop_codes.add(advisory['code'])
+                    if maintainer: guidance.append({'task_id':task['id'],**advisory})
+                if (maintainer and task['status'] in ('failed','blocked','interrupted') and not active
+                        and job['status'] not in ('accepted','accepted_with_pending_checks','cancelled')
+                        and task.get('recovery_confirmation') and not task.get('recovery_check_required')):
+                    actions.append('retry_task')
+            if interruption.get('recovery_status') == 'maintenance_required':
+                maintenance = True; stop_codes.add('workflow_maintenance_required')
+            if interruption.get('recovery_status') == 'safety_blocked': stop_codes.add('workflow_safety_blocked')
+            if job['status'] in ('blocked','failed','interrupted'): stop_codes.add('workflow_' + job['status'])
+            known = job['status'] in ('planning','running','awaiting_approval','awaiting_acceptance','blocked','failed',
+                                     'interrupted','accepted','accepted_with_pending_checks','cancelled')
+            if not known:
+                maintenance = True; stop_codes.add('workflow_state_unknown')
+            elif job['plan_revision'] > 0 and projection['state'] == 'inconclusive':
+                maintenance = True; stop_codes.add('workflow_state_verification_required')
+            by_id = {w['id']:w for w in packages}
+            for approval in records['approvals']:
+                if approval['status'] != 'pending': continue
+                role = approval.get('intended_role')
+                actionable = (known and role in ('end_user','authorized_person')
+                    and approval.get('expires_at',0) > now() and job['status'] not in ('cancelled','interrupted'))
+                if job['status'] in ('accepted','accepted_with_pending_checks') and approval['kind'] != 'plan': actionable = False
+                if role == 'maintainer':
+                    actionable = (known and maintainer and approval.get('expires_at',0) > now()
+                        and job['status'] not in ('cancelled','interrupted'))
+                if approval['kind'] == 'feature_review':
+                    target = (approval.get('payload') or {}).get('feature_target') or {}
+                    wp = by_id.get(target.get('work_package_id'))
+                    actionable = bool(job['status'] == 'running' and not active and role == 'end_user'
+                        and approval.get('category') == 'ACCEPTANCE' and approval.get('expires_at',0) > now()
+                        and wp and wp.get('review_status') == 'pending' and wp.get('feature_review_approval_id') == approval['id']
+                        and wp.get('feature_target_digest') == digest(target)
+                        and target.get('plan_revision') == job['plan_revision']
+                        and target.get('requirement_revision') == job['requirement_revision'])
+                    if actionable: actions.append('decide_feature_review')
+                elif approval['kind'] == 'completion':
+                    actionable = actionable and role == 'end_user' and projection['review_available']
+                pending.append({'id':approval['id'],'kind':approval['kind'],'intended_role':role,'actionable':bool(actionable)})
+            for wp in packages:
+                members = [t for t in records['tasks'] if t.get('work_package_id') == wp['id']
+                           and t.get('workflow_generation',0) == wp.get('workflow_generation',0)]
+                technical = next((w['technical_complete'] for w in projection['packages'] if w['id'] == wp['id']),False)
+                wp['available_actions'] = []
+                expired = [a for a in records['approvals'] if a['id'] == wp.get('feature_review_approval_id')
+                           and a.get('kind') == 'feature_review' and a.get('intended_role') == 'end_user'
+                           and a.get('category') == 'ACCEPTANCE' and a['status'] in ('pending','expired') and a.get('expires_at',0) < now()]
+                only_expired = len(pending) == 1 and expired and pending[0]['id'] == expired[0]['id']
+                if (job['status'] == 'running' and not active and technical and (not pending or only_expired)
+                        and (wp['review_status'] in ('not_requested','invalidated','changes_requested') or expired)):
+                    wp['available_actions'].append('request_feature_review')
+                current_approved = any(w['id'] == wp['id'] and w['feature_approved'] for w in projection['packages'])
+                if not active and current_approved and job['status'] not in ('cancelled','interrupted'):
+                    wp['available_actions'].append('rework_job')
+                wp['task_ids'] = [t['id'] for t in members]
+            user_pending = any(p['actionable'] and p['intended_role'] == 'end_user' for p in pending)
+            authorized_pending = any(p['actionable'] and p['intended_role'] == 'authorized_person' for p in pending)
+            waiting = any('dependency' in reason for row in dispatch.get('waiting',[]) for reason in row.get('reasons',[]))
+            terminal = job['status'] in ('accepted','accepted_with_pending_checks','cancelled')
+            preparing = any('request_feature_review' in w['available_actions'] for w in packages)
+            owner = ('maintainer' if maintenance else 'user' if user_pending else 'authorized_person' if authorized_pending
+                     else 'saikuru' if preparing
+                     else 'dependency' if waiting else 'none' if terminal else 'saikuru')
+            for wp in packages:
+                wp['dependencies'] = [{'id':w['id'],'title':w['title'],'execution_state':w['execution_state'],
+                                       'review_status':w['review_status']} for w in packages if w['wbs_id'] in wp['depends_on']]
+            if terminal or job['status'] in ('blocked','failed','interrupted'): actions.append('new_request_from_job')
+            if any('rework_job' in w['available_actions'] for w in packages): actions.append('rework_job')
+            plan = next((a for a in records['approvals'] if a['id'] == job.get('plan_approval_id')),None)
+            context = {'basis':'approved_records' if job['plan_revision'] > 0 and projection['reason'] is None else 'unverified',
+                'goal_contract':{k:copy.deepcopy((job.get('goal_contract') or {}).get(k)) for k in
+                    ('primary_goal','deliverables','acceptance_criteria','non_goals','constraints')},
+                'requirement_revision':job['requirement_revision'],'plan_revision':job['plan_revision'],
+                'pending_decision_ids':[p['id'] for p in pending],
+                'input_versions':[{'wbs_id':s['wbs_id'],'artifacts':copy.deepcopy(s.get('input_artifacts',[]))}
+                    for s in (plan['payload'].get('work_packages') or [])] if plan and projection['reason'] is None else []}
+            result = {'job_id':job_id,'job_revision':job['state_revision'],'plan_revision':job['plan_revision'],
+                'requirement_revision':job['requirement_revision'],'progress':projection,'work_packages':packages,
+                'context':context,
+                'dispatch':dispatch,'wait_owner':owner,'uncertain_operation':unknown_effects,
+                'stop_codes':sorted(stop_codes),'pending_decisions':pending,
+                'feature_confirmation_count':sum(p['kind'] == 'feature_review' for p in pending),
+                'available_actions':sorted(set(actions)),'maintenance_authentication_required':maintenance,
+                'execution_permission':'none','file_validation':'not_performed','decides_nothing':True}
+            if maintainer: result['maintenance_guidance'] = guidance
+            return result
 
     def _plan_task_fields(self, expected_job, title, instruction, role, after, repair, agent_name, task_index):
         """Initial-save membership only; never reassign a persisted Task."""

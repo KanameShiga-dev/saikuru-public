@@ -60,3 +60,98 @@ Warnings and out-of-scope improvements reuse `job.warning_issues` and do not blo
 ## Fixture and interface compatibility
 
 `tests/fixtures/p0/state.json` is synthetic UI input. It contains only invented jobs and no operational logs, tokens, or real identifiers. Claude may implement L1–L4 against that fixture while Codex implements the API. Missing P0 fields on a legacy record must not be interpreted as success. Contract changes require an updated fixture and a note to the other owner before integration.
+
+## Workflow feature confirmation and state API (W05.01)
+
+For `workflow_contract_version: 1`, the authenticated state feed adds `job.workflow`.
+`GET /api/workflow/job?id=<job_id>` returns the same request-scoped projection.
+These reads construct no worker Context, start no task, inspect no project files/Git,
+and grant no execution permission. `file_validation: "not_performed"` and
+`execution_permission: "none"` are explicit: write operations validate authority,
+current files, target versions and stopped writers again. An action hint can become
+stale between display and submission; a refusal requires refreshing the target.
+
+The projection contains:
+
+- Current `work_packages`: IDs/titles, goal links, done-when checks, plan/requirement
+  revisions, execution/review states, current-generation task IDs, dependency IDs
+  and names, and per-package `available_actions`.
+- Canonical `progress` from current tasks, WPs, approvals and ordered typed decision
+  events. `/api/state`'s `p0_progress` and `/api/quality/job` use these same canonical
+  records, including for ended jobs whose visible task rows are slimmed. Technical
+  completion, feature confirmation, UAT and formal receipt remain separate. Missing
+  records are inconclusive, never complete.
+- `wait_owner`: `user`, `saikuru`, `maintainer`, `authorized_person`, `dependency`,
+  or `none`; `uncertain_operation`; fixed `stop_codes`; and pending decision
+  IDs/kinds/roles with server-computed `actionable`. The top-level approval rows
+  also receive `actionable`. No UI summary-text inference or role inference.
+- `context`: approved business goal fields, plan/requirement revisions, approved
+  input-version references, pending decision IDs and an `approved_records` or
+  `unverified` basis. This is a business summary, not a native prompt/transcript,
+  full Handoff export, reusable session binding or permission grant.
+- `available_actions`: hints including `decide_feature_review`, `rework_job`,
+  `new_request_from_job`, and (only in an authenticated maintenance view) a
+  conservative `retry_task`. Per-WP `request_feature_review` prepares a target
+  after technical checks. Preparing that target does not record consent.
+
+`new_request_from_job` opens a draft only. It does not send a request or carry old
+AI-start/plan approval into a new job. Unknown contracts/states must remain stopped.
+Stopped/cancelled jobs may expose current WPs for reading; installation and dispatch
+retain their stricter state fences.
+
+New POST bodies have **exact** fields; extra actor, role or authority fields are
+rejected. Every POST requires the existing session cookie, same-origin/Host/fetch
+checks and `X-Agent-Team-UI: 1`. Worker bearer credentials are insufficient. The
+server supplies the actor `authenticated_local_app_session` itself.
+
+| Route | Exact body fields | Action |
+|---|---|---|
+| `/api/workflow/feature-review/prepare` | `job_id`, `work_package_id`, `work_package_revision`, `action` | `request_feature_review` |
+| `/api/workflow/feature-review/decide` | `approval_id`, boolean `allow`, `confirmation`, `note`, `action` | `decide_feature_review` |
+| `/api/workflow/feature-rework` | `job_id`, `work_package_id`, `work_package_revision`, `confirmation`, `note`, `action` | `rework_job` |
+
+Preparation returns `approval_id`, `target_digest`, `permission_effect: "none"`.
+Decision confirmation is exactly `{action: "feature_review_confirmation",
+target_digest, decision: "approved" | "rejected"}` and must match `allow`.
+Rework confirmation is exactly `{action: "request_feature_rework", target_digest}`.
+Revision fields are current WP state revisions, not plan revisions. Expired targets
+require a fresh preparation and explicit new confirmation; consent never carries.
+Foreign approval pointers, stale versions/files, changed roles/categories, active
+writers, cancelled/received/unknown jobs and duplicate decisions are refused.
+A feature confirmation returns `formal_receipt: false`; it cannot receive the job.
+Targeted rework preserves unaffected confirmation evidence, issues bounded repair
+and rechecks, and may stop for explicit plan revision if actual changes affect
+upstream evidence. The legacy whole-job `/api/jobs/rework` is refused for new
+workflow jobs, which must identify the current feature target.
+
+New-route validation errors return HTTP 400 with a fixed `code` and safe message;
+unknown diagnostics are not echoed. Input protection refusals use
+`workflow_sensitive_input_blocked`; other unclassified failures use
+`workflow_input_or_maintenance_check_required`. DLP remains unchanged. Use section
+or case IDs in examples; transcript-shaped `User:`/`System:` labels can be refused.
+Technical-review text rejected before repair issuance remains a stopped diagnostic
+case, not an automatic retry or permission to expose that text.
+
+`GET /api/maintenance/workflow?id=<job_id>` additionally requires the existing
+`X-Saikuru-Maintenance` capability and returns only validated fixed maintenance
+guidance. Normal state views omit this guidance and redact maintenance diagnostics.
+The UI must never infer, store or auto-grant maintenance authority. If no capability
+is configured, this route refuses access; setting credentials/restarting the App
+requires its separate authorization. Standard users can cancel or draft a new
+request without impersonating a maintainer.
+
+The existing maintenance-confirm route still requires exactly `id`, `task_revision`,
+`job_revision`, `attempt_id`, `writer_stopped`, `checked_changes` and the existing
+capability/browser guards. Confirmation does not queue execution. A separate
+`/api/retry` operation uses `action: "retry_task"`, `checked_changes: true`,
+`id`, and optionally `note`/`handoff_allowed`. Existing clients may omit the action
+marker; an incorrect marker or extra authority fields are refused. Recovery cases require the capability
+again and retain all Engine retry checks. No model/Effort/permission changes follow
+from either operation. Checkpoint reservation/ready/binding/started are distinct;
+the internal checkpoint-session helper is not a public resume shortcut. A newly
+answered question changes bound authority and requires explicit re-preparation;
+the UI must not silently refresh a session binding or repeat unknown operations.
+
+Formal acceptance continues through the existing review acknowledgement, current
+UAT evidence and explicit receipt endpoints. No feature decision, test result,
+checkpoint or maintenance action can act for the actual recipient.
