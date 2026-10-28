@@ -7,28 +7,29 @@ Usage while 采来 is running:  python -X utf8 team_context_metrics.py
 """
 import json
 from collections import Counter
+from team_usage_metrics import token_count, workflow_measurements
 
 
 def input_total(usage):
     """Input tokens of a run as the CLI reported them, or None (unknown is not zero)."""
     usage = usage or {}
     claude = [usage.get(k) for k in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')]
-    if all(isinstance(v, int) for v in claude):
+    if all(token_count(v) is not None for v in claude):
         return sum(claude)
-    return usage.get('inputTokens') if isinstance(usage.get('inputTokens'), int) else None
+    return token_count(usage.get('inputTokens'))
 
 
 def _add(groups, name, task, run, record):
     group = groups.setdefault(name, {'runs': 0, 'succeeded': 0, 'input_tokens': [], 'output_tokens': [],
                                      'estimated_saving_ratio': []})
     group['runs'] += 1
-    group['succeeded'] += task.get('status') in ('succeeded', 'handed_off')
+    group['succeeded'] += run.get('status') == 'succeeded'
     total = input_total(run.get('usage'))
     if total is not None:
         group['input_tokens'].append(total)
     usage = run.get('usage') or {}
     output = usage.get('output_tokens', usage.get('outputTokens'))
-    if isinstance(output, int):
+    if token_count(output) is not None:
         group['output_tokens'].append(output)
     group['estimated_saving_ratio'] += [i['estimated_saving_ratio'] for i in record.get('references', [])
                                         if isinstance(i.get('estimated_saving_ratio'), (int, float))]
@@ -48,10 +49,16 @@ def _finish(groups):
 
 
 def summary(tasks):
+    tasks=list(tasks)
     runs, reasons, by_adapter, chars = 0, Counter(), Counter(), []
     transport, mode = {}, {}
+    snapshots={}
     for task in tasks:
-        run = task.get('agent_run') or {}
+        for index,run in enumerate(list(task.get('agent_run_history') or [])+([task['agent_run']] if task.get('agent_run') else [])):
+            if not isinstance(run,dict) or run.get('status')=='held': continue
+            key=run.get('id') or (task.get('id'),index)
+            snapshots[key]=(task,run)
+    for task,run in snapshots.values():
         record = run.get('context_optimization')
         if not record:
             continue
@@ -64,7 +71,8 @@ def summary(tasks):
         _add(transport, record.get('selected_transport', 'text'), task, run, record)
         # Token reduction ON (auto) vs OFF with recording (shadow): the comparison for the measurement.
         _add(mode, record.get('optimization_mode', 'shadow'), task, run, record)
-    return {'runs_recorded': runs, 'decision_reasons': dict(reasons),
+    linkage=workflow_measurements([{'id':j} for j in {t.get('job_id') for t in tasks} if isinstance(j,str)],tasks)
+    return {'workflow_measurements':linkage,'runs_recorded': runs, 'decision_reasons': dict(reasons),
             'by_adapter': {f'{a}:{r}': n for (a, r), n in sorted(by_adapter.items(), key=str)},
             'by_transport': _finish(transport), 'by_mode': _finish(mode),
             'reference_chars': {'count': len(chars), 'min': min(chars, default=None), 'max': max(chars, default=None)},
@@ -90,13 +98,15 @@ def comparisons(jobs, tasks):
         for side, job in sides.items():
             totals = dict.fromkeys(COMPARE_KEYS)
             runs = unmeasured = images = 0
+            seen = set()
             for task in (t for t in tasks if t.get('job_id') == job['id']):
                 history = list(task.get('agent_run_history') or []) + ([task['agent_run']] if task.get('agent_run') else [])
-                seen = set()
-                for run in history:
-                    if not isinstance(run, dict) or run.get('id') in seen or run.get('status') == 'held':
+                for index,run in enumerate(reversed(history)):
+                    if not isinstance(run, dict) or run.get('status') == 'held':
                         continue
-                    seen.add(run.get('id'))
+                    key=run.get('id') or (task.get('id'),index)
+                    if key in seen: continue
+                    seen.add(key)
                     runs += 1
                     images += (run.get('context_optimization') or {}).get('selected_transport') == 'image'
                     attempt = _attempt(task, run)

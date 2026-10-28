@@ -363,7 +363,7 @@ class Context:
         self.agent_run = {'id': uid(), 'name': definition.name, 'provider': self.task['profile']['adapter'],
 
                           'attempt': self.task['attempt'], 'status': 'starting', 'session_id': None,
-                          'model': self.task['profile']['model'],
+                          'model': self.task['profile']['model'], 'effort': self.task['profile'].get('effort'),
 
                           'started_at': now(), 'definition_hash': definition.digest, 'sandbox': definition.sandbox,
                           'saikuru_version': code_version(),
@@ -374,6 +374,11 @@ class Context:
 
         if self.engine.store.get(self.task['job_id'], 'job').get('workflow_contract_version') == 1:
             self.agent_run['attempt_id'] = self.task['current_attempt']['id']
+        self.agent_run['measurement_ids'] = {
+            'job_id':self.task['job_id'],'task_id':self.task['id'],
+            'work_package_id':self.task.get('work_package_id'),
+            'attempt_id':(self.task.get('current_attempt') or {}).get('id'),
+            'checkpoint_id':(self.task.get('checkpoint_session_binding') or {}).get('checkpoint_id') or self.task.get('resume_checkpoint_id')}
 
         with self.engine.store.lock:
 
@@ -382,12 +387,14 @@ class Context:
             history = self.engine.store.get(self.task['id']).get('agent_run_history', [])
 
             if previous:
-
+                if len(history)>=30:
+                    self.task['agent_run_history_truncated']=True
                 history = (history + [previous])[-30:]
 
             self.task.update(self.engine.store.update(self.task['id'], agent_run=self.agent_run,
 
-                agent_run_history=history, common_agents=[definition.name],
+                agent_run_history=history, agent_run_history_truncated=self.task.get('agent_run_history_truncated',False),
+                common_agents=[definition.name],
 
                 common_agent_hashes={definition.name: definition.digest}))
 
@@ -506,9 +513,9 @@ class Context:
 
         allowed = {'input_tokens','cache_creation_input_tokens','cache_read_input_tokens','output_tokens',
 
-                   'inputTokens','cachedInputTokens','outputTokens','totalTokens','reasoningOutputTokens'}
+                   'inputTokens','cachedInputTokens','cacheWriteInputTokens','outputTokens','totalTokens','reasoningOutputTokens'}
 
-        self.agent_run['usage'] = {k:v for k,v in values.items() if k in allowed and isinstance(v,int) and v >= 0}
+        self.agent_run['usage'] = {k:v for k,v in values.items() if k in allowed and type(v) is int and v >= 0}
         # Measurement (Phase 1): the provider's own total for this run. Codex reports a running total, so the
         # latest value replaces the previous one (never added up twice).
         self.agent_run['usage_source'] = 'provider_total' if self.agent_run.get('provider') == 'claude' else 'provider_running_total'
@@ -555,6 +562,20 @@ class Context:
                 name = str(block.get('name') or 'tool')[:80]
                 calls = self.agent_run.setdefault('tool_calls', {})
                 calls[name] = calls.get(name, 0) + 1
+
+    @_attempt_callback
+    def record_prompt_measurement(self, text, *, stage='adapter_payload', includes_system=False, kind='initial'):
+        """Count prepared text only; never retain prompt text or infer tokens/capacity."""
+        if (self.agent_run is None or not isinstance(text,str) or stage not in ('engine_ready','adapter_payload')
+                or kind not in ('initial','format_repair') or type(includes_system) is not bool): return
+        rows=self.agent_run.setdefault('prompt_measurements',[])
+        if len(rows) >= 64:
+            self.agent_run['prompt_measurements_truncated']=True
+            self.engine.store.update(self.task['id'],agent_run=self.agent_run)
+            return
+        rows.append({'stage':stage,'kind':kind,'characters':len(text),'includes_system':includes_system,
+                     'unit':'unicode_codepoints','prepared_at':now(),'model_invocation_proven':False})
+        self.engine.store.update(self.task['id'],agent_run=self.agent_run)
 
     def _store_measurement(self):
         from team_usage_metrics import normalize
@@ -4717,7 +4738,8 @@ class Engine:
                 ctx.agent_run['context_optimization'] = optimization
             ctx.agent_run['context_size'] = {'user_prompt_chars':len(prompt),
                 'native_instructions_chars':len(ctx.agent_system_instructions),
-                'skill_catalog_chars':len(shared_catalog(definition.name)), 'metric':'characters, not provider tokens'}
+                'skill_catalog_chars':len(shared_catalog(definition.name)), 'metric':'characters, not provider tokens',
+                'stage':'before_late_checkpoint_context','complete_native_context_known':False}
             self.store.update(task['id'], agent_run=ctx.agent_run)
             job_for_schema = self.store.get(task['job_id'], 'job')
             if task['role'] == 'planner':
@@ -4751,7 +4773,12 @@ class Engine:
                 # the current, freshly checked domain context for this path.
                 if prompt.count('__SAIKURU_FRESH_CHECKPOINT_CONTEXT__') != 1:
                     raise ValueError('checkpoint_session_context_missing')
-                prompt = prompt.replace('__SAIKURU_FRESH_CHECKPOINT_CONTEXT__', self._checkpoint_session_context(ctx))
+                inherited = self._checkpoint_session_context(ctx)
+                prompt = prompt.replace('__SAIKURU_FRESH_CHECKPOINT_CONTEXT__', inherited)
+                ctx.agent_run['inherited_context']={'characters':len(inherited),'unit':'unicode_codepoints',
+                    'checkpoint_id':task['checkpoint_session_binding']['checkpoint_id']}
+            from team_usage_metrics import observe_prompt
+            observe_prompt(ctx,prompt,stage='engine_ready')
             result = ADAPTERS[task['profile']['adapter']]().run(ctx, prompt, schema)
             if task['role'] == 'planner':
                 with self.store.atomic():
