@@ -280,6 +280,16 @@ class Store:
                 raise ValueError('対象が見つかりません。')
             return json.loads(row[1])
 
+    def native_checkpoint_requires_transition(self, task):
+        """A confirmed native attempt cannot use ordinary checkpoint publication."""
+        marker = task.get('recovery_confirmation')
+        if not isinstance(marker, dict) or not marker:
+            return False
+        attempt_id = (task.get('current_attempt') or {}).get('id')
+        return ('native_reconciliation' in marker or bool(task.get('agent_run') or task.get('agent_run_id'))
+            or any(run.get('task_id') == task['id'] or (attempt_id and run.get('attempt_id') == attempt_id)
+                   for run in self.for_job('agent_run', task['job_id'])))
+
     def commit_checkpoint(self, record, references):
         """Internal publisher: caller verifies files outside Store lock first.
 
@@ -293,6 +303,8 @@ class Store:
                 raise StaleAttempt('Checkpointの下書きが変化しました。')
             task = self.get(record['task_id'], 'task')
             job = self.get(record['job_id'], 'job')
+            if self.native_checkpoint_requires_transition(task):
+                raise ValueError('native_checkpoint_transition_required')
             validate_draft_record(current, job, task, references)
             if current['resume_preconditions'] != ['checkpoint_not_ready']:
                 raise ValueError('未解決の条件があるCheckpointは確定できません。')

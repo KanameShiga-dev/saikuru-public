@@ -3467,6 +3467,9 @@ class Engine:
             record = self.store.get(checkpoint_id, 'checkpoint')
             task_id = record['task_id']
         with self._checkpoint_project(task_id):
+            with self.store.lock:
+                if self.store.native_checkpoint_requires_transition(self.store.get(task_id, 'task')):
+                    raise CheckpointUnavailable('native_checkpoint_transition_required')
             try:
                 with self.store.lock:
                     inputs = self._checkpoint_draft_inputs(checkpoint_id, writer_stopped)

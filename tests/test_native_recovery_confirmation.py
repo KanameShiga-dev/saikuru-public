@@ -261,22 +261,38 @@ class NativeConfirmedAssessmentTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.engine.retry(self.task_id, 'SYNTHETIC no binding permission')
         self.assertEqual(self.f.f.state(), before)
 
-    def test_ready_checkpoint_does_not_implicitly_authorize_same_task_retry(self):
+    def test_confirmed_native_checkpoint_ordinary_publication_is_refused(self):
         self.confirmed(); confirmed = self.store.get(self.task_id)
         draft = self.engine.collect_checkpoint(self.task_id, writer_stopped=True)
-        result = self.engine.finalize_checkpoint(draft['id'], writer_stopped=True)
+        record, job, task, paths, refs = self.engine._checkpoint_draft_inputs(draft['id'], True)
+        before = self.f.f.state()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_required'):
+            self.store.commit_checkpoint(record, refs)
+        self.assertEqual(self.f.f.state(), before)
+        with patch.object(self.store._worker, 'task', confirmed, create=True):
+            # The pre-existing attempt fence may reject the closed worker first.
+            with self.assertRaises(ValueError):
+                self.store.commit_checkpoint(record, refs)
+        self.assertEqual(self.f.f.state(), before)
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_required'):
+            self.engine.finalize_checkpoint(draft['id'], writer_stopped=True)
+        self.assertEqual(self.f.f.state(), before)
+        self.assertEqual(self.store.get(self.task_id), confirmed)
+        self.assertEqual(self.store.get(draft['id'])['state'], 'writing')
+        self.assertTrue(self.inspect()['fresh_for_checkpoint_binding'])
+        with self.assertRaises(ValueError): self.engine.retry(self.task_id, 'SYNTHETIC no same-task binding')
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_pre_guard_native_ready_checkpoint_remains_non_authoritative(self):
+        self.confirmed(); draft = self.engine.collect_checkpoint(self.task_id, writer_stopped=True)
+        # Reproduce the historical pre-guard publication path in this process only.
+        with patch.object(self.store, 'native_checkpoint_requires_transition', return_value=False):
+            result = self.engine.finalize_checkpoint(draft['id'], writer_stopped=True)
         self.assertTrue(result['store_ready']); self.assertTrue(result['handoff_synced'])
-        self.assertFalse(result['resume_allowed'])
-        current = self.store.get(self.task_id)
-        self.assertEqual(current['state_revision'], confirmed['state_revision'] + 1)
-        self.assertEqual(current['resume_checkpoint_id'], draft['id'])
-        ready, event = self.store.checkpoint_binding(draft['id'])
-        self.assertEqual(ready['snapshot_revisions']['task'], confirmed['state_revision'])
-        self.assertEqual(event['type'], 'checkpoint_ready')
         before = self.f.f.state(); assessment = self.inspect()
         self.assertFalse(assessment['fresh_for_checkpoint_binding'])
         self.assertIsNone(assessment['confirmed_target'])
-        with self.assertRaises(ValueError): self.engine.retry(self.task_id, 'SYNTHETIC no same-task binding')
+        with self.assertRaises(ValueError): self.engine.retry(self.task_id, 'SYNTHETIC no transition')
         self.assertEqual(self.f.f.state(), before)
 
     def test_changed_file_and_new_history_cannot_be_projected_away(self):
