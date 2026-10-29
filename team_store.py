@@ -157,6 +157,12 @@ class Store:
         if row and row[0] != kind:
             raise ValueError('保存IDは別の種類で使用されています。')
         previous = json.loads(row[1]) if row else None
+        if obj['id'].startswith('native-reconciliation-') and kind != 'native_effect_reconciliation':
+            raise ValueError('native_reconciliation_id_reserved')
+        if kind == 'native_effect_reconciliation':
+            if previous or getattr(self._worker, 'native_reconciliation_commit', None) != obj['id']:
+                raise ValueError('native_reconciliation_requires_server_commit')
+            return
         if obj['id'].startswith('native-baseline-') and kind != 'native_scope_baseline':
             raise ValueError('native_baseline_id_reserved')
         if kind == 'native_scope_baseline':
@@ -531,6 +537,75 @@ class Store:
             expected = {'attempt_id': attempt_id, 'baseline_id': ident, 'snapshot_digest': record['snapshot_digest']}
             if len(rows) != 1 or json.loads(rows[0][1]).get('details') != expected:
                 raise ValueError('native_baseline_event_invalid')
+            return dict(record, event_seq=rows[0][0])
+
+    def commit_native_reconciliation(self, task_id, target, summary, note, database_stamp, assert_process):
+        """Durable server CAS for a maintenance judgment; never clears a fence."""
+        if getattr(self._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_reconcile_native_effects')
+        with self.atomic():
+            if (self.db.total_changes, self.db.execute('PRAGMA data_version').fetchone()[0]) != database_stamp:
+                raise StaleAttempt('native_reconciliation_state_changed')
+            assert_process()  # Engine metadata only, no Git/file IO in this txn.
+            task = self.get(task_id, 'task'); job = self.get(task['job_id'], 'job')
+            expected = {'contract_version': 1, 'action': 'reconcile_recovery', 'job_id': job['id'],
+                'task_id': task_id, 'attempt_id': (task.get('current_attempt') or {}).get('id'),
+                'job_revision': job['state_revision'], 'task_revision': task['state_revision']}
+            if (not isinstance(target, dict) or set(target) != set(expected) | {'state_digest'}
+                    or any(target.get(k) != v for k, v in expected.items())
+                    or any(type(target.get(k)) is not int for k in ('contract_version', 'job_revision', 'task_revision'))
+                    or not isinstance(target.get('state_digest'), str) or len(target['state_digest']) != 64
+                    or any(c not in '0123456789abcdef' for c in target['state_digest'])
+                    or task.get('role') != 'builder' or not task.get('work_package_id')
+                    or task.get('status') not in ('failed', 'blocked', 'interrupted')
+                    or job.get('status') not in ('failed', 'blocked', 'interrupted')
+                    or (task.get('current_attempt') or {}).get('status') not in ('closed', 'fenced')
+                    or not isinstance(summary, dict) or summary.get('observation_stable') is not True
+                    or not isinstance(note, str) or not note.strip() or len(note) > 1000):
+                raise ValueError('native_reconciliation_target_invalid')
+            baseline = self.native_scope_baseline(task_id, expected['attempt_id'])
+            if baseline is None: raise ValueError('native_reconciliation_baseline_required')
+            key = hashlib.sha256(json.dumps([job['id'], task_id, expected['attempt_id'], target['state_digest']]).encode()).hexdigest()
+            record = {'id': 'native-reconciliation-' + key, 'job_id': job['id'], 'task_id': task_id,
+                'attempt_id': expected['attempt_id'], 'target': copy.deepcopy(target), 'summary': copy.deepcopy(summary),
+                'baseline_id': baseline['id'], 'actor': 'authenticated_maintenance_session',
+                'writer_stopped': True, 'checked_changes': True, 'external_effects': 'none_confirmed', 'note': note}
+            record['record_digest'] = hashlib.sha256(json.dumps(record, sort_keys=True, ensure_ascii=False,
+                separators=(',', ':')).encode()).hexdigest()
+            previous = getattr(self._worker, 'native_reconciliation_commit', None)
+            self._worker.native_reconciliation_commit = record['id']
+            try:
+                saved = self.put('native_effect_reconciliation', record)
+                self.event('recovery_effects_reconciled', '保守担当の作用の照合を記録しました。', task_id, job['id'],
+                    {'attempt_id': expected['attempt_id'], 'reconciliation_id': record['id'],
+                     'target_digest': target['state_digest'], 'record_digest': record['record_digest']})
+                return saved
+            finally:
+                self._worker.native_reconciliation_commit = previous
+
+    def native_reconciliation(self, task_id, target):
+        with self.lock:
+            job_id = self.get(task_id, 'task')['job_id']
+            key = hashlib.sha256(json.dumps([job_id, task_id, target['attempt_id'], target['state_digest']]).encode()).hexdigest()
+            ident = 'native-reconciliation-' + key
+            row = self.db.execute('SELECT kind,body FROM objects WHERE id=?', (ident,)).fetchone()
+            if row is None: return None
+            record = json.loads(row[1])
+            body = {k:v for k,v in record.items() if k not in ('record_digest', 'updated_at')}
+            if (row[0] != 'native_effect_reconciliation' or record.get('id') != ident
+                    or record.get('job_id') != job_id or record.get('task_id') != task_id
+                    or record.get('target') != target or record.get('attempt_id') != target['attempt_id']
+                    or record.get('record_digest') != hashlib.sha256(json.dumps(body, sort_keys=True,
+                        ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()):
+                raise ValueError('native_reconciliation_record_invalid')
+            rows = self.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.type')=? "
+                "AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.task_id')=? "
+                "AND json_extract(body,'$.details.reconciliation_id')=? ORDER BY seq LIMIT 2",
+                ('recovery_effects_reconciled', job_id, task_id, ident)).fetchall()
+            details = {'attempt_id': target['attempt_id'], 'reconciliation_id': ident,
+                'target_digest': target['state_digest'], 'record_digest': record['record_digest']}
+            if len(rows) != 1 or json.loads(rows[0][1]).get('details') != details:
+                raise ValueError('native_reconciliation_event_invalid')
             return dict(record, event_seq=rows[0][0])
 
     def update(self, object_id, _transition_reason=None, **values):

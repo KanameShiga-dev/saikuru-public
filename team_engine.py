@@ -6024,6 +6024,10 @@ class Engine:
             'plan_digest': plan['digest'], 'workspace_identity': workspace_identity(workspace['current']),
             'files': files}
 
+    def _native_maintenance_idle(self):
+        return not self.active and not any(t.get('status') == 'running'
+            or (t.get('current_attempt') or {}).get('status') == 'running' for t in self.store.all('task'))
+
     def _native_assessment_stamp(self):
         """Called under Store.lock; catches local writes, rollbacks and other connections."""
         return (self.store.db.total_changes,
@@ -6041,11 +6045,23 @@ class Engine:
             stamp = self._native_assessment_stamp()
         result = self._native_recovery_observation(task_id)
         with self.store.lock:
+            if not self._native_maintenance_idle():
+                result['eligible_for_reconciliation'] = False
+                result['reasons'] = sorted(set(result['reasons'] + ['native_maintenance_idle_required']))
+                result['target'] = None
+            if result['eligible_for_reconciliation']:
+                try:
+                    result['reconciliation_recorded'] = self.store.native_reconciliation(task_id, result['target']) is not None
+                except (ValueError, KeyError, TypeError):
+                    result['eligible_for_reconciliation'] = False
+                    result['reasons'] = sorted(set(result['reasons'] + ['native_reconciliation_record_unresolved']))
+                    result['target'] = None
             if self._native_assessment_stamp() != stamp:
                 result['eligible_for_reconciliation'] = False
                 result['reasons'] = sorted(set(result['reasons'] + ['native_assessment_changed']))
                 result['target'] = None
                 result['summary']['observation_stable'] = False
+                result['reconciliation_recorded'] = False
         return result
 
     def _native_recovery_observation(self, task_id):
@@ -6100,7 +6116,8 @@ class Engine:
             reasons.append('native_attempt_history_unresolved'); start_seq = 0
         with self.store.lock:
             rows = self.store.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.job_id')=? "
-                "AND json_extract(body,'$.task_id')=? AND seq>=? ORDER BY seq LIMIT 1001",
+                "AND json_extract(body,'$.task_id')=? AND seq>=? "
+                "AND COALESCE(json_extract(body,'$.type'),'')!='recovery_effects_reconciled' ORDER BY seq LIMIT 1001",
                 (job['id'], task_id, start_seq)).fetchall()
         if len(rows) > 1000: reasons.append('native_attempt_history_unresolved')
         events = [json.loads(body) for _, body in rows]
@@ -6165,7 +6182,8 @@ class Engine:
             'started_at': timestamp(run.get('started_at')), 'closed_at': timestamp(attempt.get('closed_at')),
             'attempt_status': attempt.get('status') if attempt.get('status') in ('closed','fenced') else 'unknown',
             'stop_reason_code': stop_reason,
-            'observation_only': True, 'observation_stable': True, 'external_effects': 'unconfirmed'}
+            'observation_only': True, 'observation_stable': True, 'external_effects': 'unconfirmed',
+            'reconciliation_policy': 'idle_system_file_only'}
         operation_digest = self.store.operation_assessment(job['id'])['operation_digest']
         target = {'contract_version': 1, 'action': 'reconcile_recovery', 'job_id': job['id'], 'task_id': task_id,
             'attempt_id': attempt.get('id'), 'job_revision': job['state_revision'], 'task_revision': task['state_revision']}
@@ -6176,6 +6194,33 @@ class Engine:
         return {'contract_version': 1, 'eligible_for_reconciliation': not reasons, 'reasons': sorted(set(reasons)),
             'target': target, 'summary': summary, 'execution_permission': 'none', 'reconciliation_recorded': False}
 
+
+    def reconcile_native_recovery(self, task_id, target, *, writer_stopped=False, checked_changes=False,
+                                  external_effects=None, note=None, actor=None):
+        """Record an explicit maintenance judgment, without confirming or retrying."""
+        if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
+            raise ValueError('workflow_maintenance_action_required')
+        if writer_stopped is not True or checked_changes is not True or external_effects != 'none_confirmed':
+            raise ValueError('workflow_native_confirmation_required')
+        if not isinstance(note, str) or not note.strip() or len(note) > 1000:
+            raise ValueError('workflow_native_note_required')
+        from team_dlp import require_clean_input
+        require_clean_input(note, False, '保守照合の根拠')
+        with self._checkpoint_project(task_id):
+            with self.store.lock: stamp = self._native_assessment_stamp()
+            first = self.native_recovery_assessment(task_id, actor=actor)
+            if not first['eligible_for_reconciliation'] or first['target'] != target:
+                raise ValueError('workflow_native_reconciliation_changed')
+            second = self.native_recovery_assessment(task_id, actor=actor)
+            if not second['eligible_for_reconciliation'] or second['target'] != target:
+                raise ValueError('workflow_native_reconciliation_changed')
+            def validate_process():
+                if self._native_assessment_stamp() != stamp or not self._native_maintenance_idle():
+                    raise ValueError('workflow_native_reconciliation_changed')
+            record = self.store.commit_native_reconciliation(task_id, target, second['summary'], note.strip(),
+                stamp[:2], validate_process)
+        return {'recorded': True, 'reconciliation_id': record['id'], 'task_id': task_id,
+                'queued': False, 'resume_allowed': False, 'execution_permission': 'none'}
 
     def _recovery_control_inputs(self, task_id, *, allow_native_assessment=False):
         from team_p0_contract import workflow_version, checkpoint_scope

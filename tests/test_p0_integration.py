@@ -262,5 +262,213 @@ class ReviewedOperationRecoveryTests(unittest.TestCase):
         self.assertFalse(self.f.store.get(task['id']).get('checkpoint_session_binding'))
 
 
+class NativeReconciliationTests(unittest.TestCase):
+    def setUp(self):
+        from tests.test_recovery_integration_synthetic import NativeAssessmentTests
+        NativeAssessmentTests.setUp(self)
+
+    def assess(self):
+        return self.f.request('/api/workflow/recovery/assess', self.body, maintenance=True)[1]
+
+    def request_body(self):
+        assessment = self.assess()
+        self.assertTrue(assessment['eligible_for_reconciliation'], assessment)
+        return {'action': 'reconcile_recovery', 'job_id': self.job_id, 'task_id': self.task_id,
+            'target': assessment['target'], 'writer_stopped': True, 'checked_changes': True,
+            'external_effects': 'none_confirmed', 'note': 'SYNTHETIC maintenance judgment; files inspected, no external effect.'}
+
+    def reconcile(self, body, **options):
+        return self.f.request('/api/workflow/recovery/reconcile', body, maintenance=True, **options)
+
+    def test_record_is_durable_immutable_and_does_not_confirm_or_queue(self):
+        body = self.request_body(); task = self.store.get(self.task_id); job = self.store.get(self.job_id)
+        code, result = self.reconcile(body)
+        self.assertEqual(code, 200, result); self.assertTrue(result['recorded'])
+        self.assertFalse(result['queued']); self.assertFalse(result['resume_allowed'])
+        self.assertEqual(result['execution_permission'], 'none')
+        self.assertEqual(self.store.get(self.task_id), task); self.assertEqual(self.store.get(self.job_id), job)
+        record = self.store.native_reconciliation(self.task_id, body['target'])
+        self.assertEqual(record['id'], result['reconciliation_id'])
+        other = Store(self.store.directory)
+        try: self.assertEqual(other.native_reconciliation(self.task_id, body['target']), record)
+        finally: other.db.close()
+        with self.assertRaises(ValueError): self.store.update(record['id'], note='SYNTHETIC replacement')
+        self.assertEqual(self.reconcile(body)[0], 400)  # Same evidence cannot overwrite the first judgment.
+        after = self.assess()
+        self.assertEqual(after['target'], body['target']); self.assertTrue(after['reconciliation_recorded'])
+        with self.assertRaises(ValueError):
+            self.engine.confirm_recovery(self.task_id, task['state_revision'], job['state_revision'],
+                task['current_attempt']['id'], writer_stopped=True, checked_changes=True)
+
+    def test_browser_and_maintenance_identity_and_exact_schema_required(self):
+        body = self.request_body(); before = self.f.f.state()
+        self.assertEqual(self.f.request('/api/workflow/recovery/reconcile', body)[0], 403)
+        for options in ({'cookie': False}, {'ui': False}, {'origin': 'https://example.invalid'},
+                        {'cookie': False, 'headers': {'Authorization': 'Bearer fictional-worker'}}):
+            self.assertEqual(self.reconcile(body, **options)[0], 403)
+        for extra in ({'actor': 'authenticated_maintenance_session'}, {'job_id': 'fictional-other-job'}, {'target': None}):
+            self.assertEqual(self.reconcile(dict(body, **extra))[0], 400)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_confirmation_note_type_length_and_dlp_fail_without_writes(self):
+        body = self.request_body(); before = self.f.f.state()
+        for changes in ({'writer_stopped': False}, {'writer_stopped': 1}, {'checked_changes': False},
+                        {'external_effects': 'unknown'}, {'note': None}, {'note': ''}, {'note': 'x' * 1001},
+                        {'note': 'fictional-internal-tag'}):
+            self.assertEqual(self.reconcile(dict(body, **changes))[0], 400, changes.keys())
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_changed_files_or_own_operation_refuse_stale_target(self):
+        body = self.request_body()
+        path = self.f.f.workspace.project / 'app.py'
+        path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC changed after inspection\n')
+        before = self.f.f.state()
+        self.assertEqual(self.reconcile(body)[0], 400); self.assertEqual(self.f.f.state(), before)
+        body = self.request_body()
+        self.store.event('operation_result', 'SYNTHETIC uncorrelated effect', self.task_id, self.job_id)
+        before = self.f.f.state()
+        self.assertEqual(self.reconcile(body)[0], 400); self.assertEqual(self.f.f.state(), before)
+
+    def test_other_running_task_requires_idle_without_stopping_it(self):
+        body = self.request_body()
+        job = self.store.put('job', {'id': 'fictional-other-job', 'goal': 'SYNTHETIC unrelated',
+            'project': str(self.f.f.workspace.project.parent / 'fictional-other'), 'status': 'running'})
+        task = self.engine.new_task(job, 'SYNTHETIC other worker', 'SYNTHETIC', 'builder')
+        self.store.update(task['id'], status='running')
+        before = self.f.f.state(); assessment = self.assess()
+        self.assertFalse(assessment['eligible_for_reconciliation'])
+        self.assertIn('native_maintenance_idle_required', assessment['reasons'])
+        self.assertIsNone(assessment['target'])
+        self.assertEqual(self.reconcile(body)[0], 400)
+        self.assertEqual(self.f.f.state(), before); self.assertEqual(self.store.get(task['id'])['status'], 'running')
+
+    def test_edit_between_two_observations_refuses_commit(self):
+        from unittest.mock import patch
+        body = self.request_body(); read = self.engine.native_recovery_assessment; count = []
+        def observe(*args, **kwargs):
+            result = read(*args, **kwargs); count.append(True)
+            if len(count) == 1:
+                path = self.f.f.workspace.project / 'app.py'
+                path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC between observations\n')
+            return result
+        before = self.f.f.state()
+        with patch.object(self.engine, 'native_recovery_assessment', side_effect=observe):
+            self.assertEqual(self.reconcile(body)[0], 400)
+        self.assertEqual(len(count), 2); self.assertEqual(self.f.f.state(), before)
+
+    def test_database_update_before_cas_refuses_without_a_record(self):
+        from unittest.mock import patch
+        body = self.request_body(); commit = self.store.commit_native_reconciliation
+        def changed(*args, **kwargs):
+            self.store.update(self.task_id, synthetic_concurrent_update=True)
+            return commit(*args, **kwargs)
+        with patch.object(self.store, 'commit_native_reconciliation', side_effect=changed):
+            self.assertEqual(self.reconcile(body)[0], 400)
+        self.assertEqual(self.store.for_job('native_effect_reconciliation', self.job_id), [])
+        self.assertEqual(self.store.job_events(self.job_id, 'recovery_effects_reconciled'), [])
+
+    def test_concurrent_submission_records_exactly_one_judgment(self):
+        from concurrent.futures import ThreadPoolExecutor
+        body = self.request_body()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: self.reconcile(body)[0], range(2)))
+        self.assertEqual(sorted(results), [200, 400])
+        self.assertEqual(len(self.store.for_job('native_effect_reconciliation', self.job_id)), 1)
+        self.assertEqual(len(self.store.job_events(self.job_id, 'recovery_effects_reconciled')), 1)
+
+    def test_worker_and_generic_store_writes_cannot_forge_a_judgment(self):
+        from unittest.mock import patch
+        body = self.request_body(); before = self.f.f.state()
+        with self.assertRaises(ValueError):
+            self.store.put('native_effect_reconciliation', {'id': 'fictional-forged-judgment'})
+        with self.assertRaises(ValueError):
+            self.store.put('fictional_other_kind', {'id': 'native-reconciliation-fictional-preempt'})
+        with patch.object(self.store._worker, 'task', self.store.get(self.task_id), create=True):
+            with self.assertRaises(ValueError):
+                self.engine.reconcile_native_recovery(self.task_id, body['target'], writer_stopped=True,
+                    checked_changes=True, external_effects='none_confirmed', note=body['note'],
+                    actor='authenticated_maintenance_session')
+            with self.assertRaisesRegex(ValueError, 'worker_cannot'):
+                self.store.commit_native_reconciliation(self.task_id, body['target'], {}, body['note'], (), lambda: None)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_event_failure_rolls_back_judgment_and_restores_guard(self):
+        from unittest.mock import patch
+        body = self.request_body(); before = self.f.f.state()
+        with patch.object(self.store, 'event', side_effect=RuntimeError('SYNTHETIC commit failure')):
+            with self.assertRaises(RuntimeError):
+                self.engine.reconcile_native_recovery(self.task_id, body['target'], writer_stopped=True,
+                    checked_changes=True, external_effects='none_confirmed', note=body['note'],
+                    actor='authenticated_maintenance_session')
+        self.assertEqual(self.f.f.state(), before)
+        self.assertIsNone(getattr(self.store._worker, 'native_reconciliation_commit', None))
+
+    def test_new_file_edit_invalidates_record_display_without_changing_old_record(self):
+        body = self.request_body(); self.assertEqual(self.reconcile(body)[0], 200)
+        record = self.store.native_reconciliation(self.task_id, body['target'])
+        path = self.f.f.workspace.project / 'app.py'
+        path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC after reconciliation\n')
+        self.assertFalse(self.assess()['reconciliation_recorded'])
+        self.assertEqual(self.store.native_reconciliation(self.task_id, body['target']), record)
+
+    def test_active_worker_before_cas_refuses_without_a_record(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        body = self.request_body(); commit = self.store.commit_native_reconciliation
+        def changed(*args, **kwargs):
+            self.engine.active['fictional-concurrent-worker'] = SimpleNamespace(project='fictional-other-project')
+            return commit(*args, **kwargs)
+        try:
+            with patch.object(self.store, 'commit_native_reconciliation', side_effect=changed):
+                self.assertEqual(self.reconcile(body)[0], 400)
+        finally: self.engine.active.clear()
+        self.assertEqual(self.store.for_job('native_effect_reconciliation', self.job_id), [])
+
+    def test_duplicated_reconciliation_event_is_not_a_valid_record(self):
+        body = self.request_body(); self.assertEqual(self.reconcile(body)[0], 200)
+        record = self.store.native_reconciliation(self.task_id, body['target'])
+        self.store.event('recovery_effects_reconciled', 'SYNTHETIC duplicate', self.task_id, self.job_id,
+            {'attempt_id': record['attempt_id'], 'reconciliation_id': record['id'],
+             'target_digest': body['target']['state_digest'], 'record_digest': record['record_digest']})
+        assessment = self.assess()
+        self.assertFalse(assessment['eligible_for_reconciliation'])
+        self.assertIn('native_reconciliation_record_unresolved', assessment['reasons'])
+        self.assertIsNone(assessment['target'])
+
+    def test_fresh_diagnostic_target_cannot_override_unsupported_tools(self):
+        body = self.request_body()
+        self.store.update(self.task_id, agent_run=dict(self.run, tool_calls={'mcpToolCall': 1}))
+        assessment = self.assess()
+        self.assertFalse(assessment['eligible_for_reconciliation'])
+        self.assertIsNotNone(assessment['target'])
+        body['target'] = assessment['target']; before = self.f.f.state()
+        self.assertEqual(self.reconcile(body)[0], 400)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_other_connection_archive_update_before_cas_is_rejected(self):
+        from unittest.mock import patch
+        body = self.request_body(); commit = self.store.commit_native_reconciliation
+        def changed(*args, **kwargs):
+            other = Store(self.store.directory)
+            try:
+                other.put('agent_run', dict(self.run, job_id=self.job_id, task_id=self.task_id,
+                    status='interrupted', tool_calls={'mcpToolCall': 1}))
+            finally: other.db.close()
+            return commit(*args, **kwargs)
+        with patch.object(self.store, 'commit_native_reconciliation', side_effect=changed):
+            self.assertEqual(self.reconcile(body)[0], 400)
+        self.assertEqual(self.store.for_job('native_effect_reconciliation', self.job_id), [])
+
+    def test_identifier_types_are_bounded_before_storage_lookup(self):
+        from unittest.mock import patch
+        body = self.request_body(); before = self.f.f.state()
+        with patch.object(self.store, 'get', side_effect=AssertionError('SYNTHETIC unexpected storage lookup')) as get:
+            for key in ('task_id', 'job_id'):
+                for value in (None, True, [], {}, '', ' ', 'x' * 129):
+                    self.assertEqual(self.reconcile(dict(body, **{key: value}))[0], 400)
+            get.assert_not_called()
+        self.assertEqual(self.f.f.state(), before)
+
+
 if __name__ == '__main__':
     unittest.main()

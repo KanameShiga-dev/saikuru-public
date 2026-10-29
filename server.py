@@ -696,6 +696,19 @@ class Handler(BaseHTTPRequestHandler):
                 if task['job_id'] != body['job_id']: raise WorkflowRequestError('workflow_request_invalid')
                 result = workflow_call(lambda:engine.native_recovery_assessment(
                     task['id'], actor='authenticated_maintenance_session'))
+            elif path == '/api/workflow/recovery/reconcile':
+                if not self.maintenance_authorized():
+                    raise PermissionError('保守担当の認証が必要です。')
+                workflow_body(body, ('action', 'job_id', 'task_id', 'target', 'writer_stopped',
+                    'checked_changes', 'external_effects', 'note'), 'reconcile_recovery')
+                if any(not isinstance(body[key], str) or not body[key].strip() or len(body[key]) > 128
+                       for key in ('job_id', 'task_id')):
+                    raise WorkflowRequestError('workflow_request_invalid')
+                task = workflow_call(lambda:self.app.store.get(body['task_id'], 'task'))
+                if task['job_id'] != body['job_id']: raise WorkflowRequestError('workflow_request_invalid')
+                result = workflow_call(lambda:engine.reconcile_native_recovery(task['id'], body['target'],
+                    writer_stopped=body['writer_stopped'], checked_changes=body['checked_changes'],
+                    external_effects=body['external_effects'], note=body['note'], actor='authenticated_maintenance_session'))
             elif path == '/api/workflow/control':
                 action = body.get('action')
                 fields = {'cancel_job':('action','job_id','target','confirmed'),
