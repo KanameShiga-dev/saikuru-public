@@ -505,6 +505,75 @@ class Store:
             finally:
                 self._worker.native_confirmation_commit = previous
 
+    def native_confirmation_basis(self, task_id):
+        """Read the exact confirmed source projection; never execution permission."""
+        if getattr(self._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_read_native_confirmation_basis')
+        with self.lock:
+            task = self.get(task_id, 'task'); job = self.get(task['job_id'], 'job')
+            marker = task.get('recovery_confirmation'); attempt = task.get('current_attempt') or {}
+            if (not isinstance(attempt, dict) or not isinstance(marker, dict) or set(marker) != {
+                    'attempt_id', 'job_revision', 'task_revision', 'event_seq', 'native_reconciliation'}
+                    or any(type(marker.get(k)) is not int or marker[k] < 1
+                        for k in ('job_revision', 'task_revision', 'event_seq'))
+                    or marker['attempt_id'] != attempt.get('id')
+                    or type(job.get('state_revision')) is not int or type(task.get('state_revision')) is not int
+                    or marker['job_revision'] != job.get('state_revision')
+                    or marker['task_revision'] != task.get('state_revision')
+                    or task.get('recovery_check_required') is not False
+                    or attempt.get('status') not in ('closed', 'fenced')
+                    or task.get('status') not in ('failed', 'blocked', 'interrupted')
+                    or job.get('status') not in ('failed', 'blocked', 'interrupted')):
+                raise ValueError('native_confirmation_transition_invalid')
+            proof = marker['native_reconciliation']
+            fields = {'state_revision', 'updated_at', 'recovery_check_required', 'recovery_confirmation'}
+            if (not isinstance(proof, dict) or set(proof) != {'record_id', 'record_digest', 'record_event_seq',
+                    'source_target', 'source_fields', 'task_invariants_digest'}
+                    or not isinstance(proof['source_fields'], dict) or set(proof['source_fields']) != fields
+                    or any(not isinstance(v, dict) or set(v) != {'present', 'value'} or type(v['present']) is not bool
+                        for v in proof['source_fields'].values())):
+                raise ValueError('native_confirmation_projection_invalid')
+            target = proof['source_target']
+            expected = {'contract_version': 1, 'action': 'reconcile_recovery', 'job_id': job['id'],
+                'task_id': task_id, 'attempt_id': attempt.get('id'), 'job_revision': job['state_revision'],
+                'task_revision': marker['task_revision'] - 1}
+            if (not isinstance(target, dict) or set(target) != set(expected) | {'state_digest'}
+                    or any(target.get(k) != v for k, v in expected.items())
+                    or any(type(target.get(k)) is not int for k in ('contract_version', 'job_revision', 'task_revision'))):
+                raise ValueError('native_confirmation_source_target_invalid')
+            invariants = {k:v for k,v in task.items() if k not in fields}
+            digest = hashlib.sha256(json.dumps(invariants, sort_keys=True, ensure_ascii=False,
+                separators=(',', ':')).encode()).hexdigest()
+            if proof['task_invariants_digest'] != digest:
+                raise ValueError('native_confirmation_invariants_changed')
+            source = copy.deepcopy(task)
+            for key, previous in proof['source_fields'].items():
+                if previous['present']: source[key] = copy.deepcopy(previous['value'])
+                else: source.pop(key, None)
+            if (type(source.get('state_revision')) is not int or source['state_revision'] != target['task_revision']
+                    or source.get('recovery_confirmation') is not None):
+                raise ValueError('native_confirmation_projection_invalid')
+            record = self.native_reconciliation(task_id, target)
+            if (record is None or record['id'] != proof['record_id'] or record['record_digest'] != proof['record_digest']
+                    or type(proof['record_event_seq']) is not int or record['event_seq'] != proof['record_event_seq']
+                    or record['event_seq'] >= marker['event_seq']):
+                raise ValueError('native_confirmation_reconciliation_invalid')
+            operations = {'operations': 'none'}
+            if self.has_operation_history(job['id']):
+                operations = {'operations': 'reviewed_prior',
+                    'operation_digest': self.operation_assessment(job['id'])['operation_digest']}
+            rows = self.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.type')='recovery_confirmed' "
+                "AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.task_id')=? "
+                "AND json_extract(body,'$.details.attempt_id')=? ORDER BY seq LIMIT 2",
+                (job['id'], task_id, marker['attempt_id'])).fetchall()
+            expected_details = {'attempt_id': marker['attempt_id'], 'task_revision': target['task_revision'],
+                'job_revision': marker['job_revision'], **operations, 'native_reconciliation': proof}
+            if (len(rows) != 1 or rows[0][0] != marker['event_seq']
+                    or json.loads(rows[0][1]).get('details') != expected_details):
+                raise ValueError('native_confirmation_event_invalid')
+            return {'source_task': source, 'source_target': copy.deepcopy(target),
+                'confirmation_event_seq': marker['event_seq'], 'reconciliation_id': record['id']}
+
     def commit_native_scope_baseline(self, task_id, expected_task_revision, expected_job_revision, snapshot):
         """Server-only immutable primitive; the engine supplies pre-provider observations.
 

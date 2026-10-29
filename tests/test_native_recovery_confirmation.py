@@ -232,6 +232,112 @@ class NativeConfirmationTests(unittest.TestCase):
         self.assertEqual(code, 400); self.assertEqual(result['code'], 'workflow_native_reconciliation_changed')
 
 
+class NativeConfirmedAssessmentTests(unittest.TestCase):
+    setUp = NativeConfirmationTests.setUp
+    assess = NativeConfirmationTests.assess
+    reconcile = NativeConfirmationTests.reconcile
+    confirmation_body = NativeConfirmationTests.confirmation_body
+    confirm = NativeConfirmationTests.confirm
+
+    def confirmed(self):
+        body = self.reconcile(); source = self.store.get(self.task_id)
+        code, result = self.confirm(); self.assertEqual(code, 200, result)
+        return body['target'], source
+
+    def inspect(self):
+        return self.engine.native_confirmed_recovery_assessment(self.task_id,
+            actor='authenticated_maintenance_session')
+
+    def test_exact_source_projection_is_fresh_read_only_and_grants_no_permission(self):
+        target, source = self.confirmed(); before = self.f.f.state()
+        basis = self.store.native_confirmation_basis(self.task_id)
+        self.assertEqual(basis['source_task'], source); self.assertEqual(basis['source_target'], target)
+        result = self.inspect()
+        self.assertTrue(result['fresh_for_checkpoint_binding'], result)
+        self.assertEqual(result['confirmed_target'], target)
+        self.assertEqual(result['execution_permission'], 'none'); self.assertFalse(result['resume_allowed'])
+        self.assertEqual(result['reasons'], [])
+        self.assertEqual(self.f.f.state(), before)
+        with self.assertRaises(ValueError): self.engine.retry(self.task_id, 'SYNTHETIC no binding permission')
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_changed_file_and_new_history_cannot_be_projected_away(self):
+        self.confirmed(); path = self.f.f.workspace.project / 'app.py'; original = path.read_bytes()
+        path.write_bytes(original + b'\n# SYNTHETIC after confirmation\n')
+        before = self.f.f.state(); result = self.inspect()
+        self.assertFalse(result['fresh_for_checkpoint_binding'])
+        self.assertIn('native_confirmation_source_changed', result['reasons'])
+        self.assertEqual(self.f.f.state(), before)
+        path.write_bytes(original)
+        self.store.event('SYNTHETIC_extra_history', 'SYNTHETIC unprojected event', self.task_id, self.job_id)
+        before = self.f.f.state(); result = self.inspect()
+        self.assertFalse(result['fresh_for_checkpoint_binding'])
+        self.assertIn('native_confirmation_source_changed', result['reasons'])
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_direct_task_and_proof_corruption_is_rejected(self):
+        self.confirmed(); original = self.store.get(self.task_id)
+        changes = [lambda t: t.update(state_revision=t['state_revision'] + 1),
+            lambda t: t.update(synthetic_unreviewed_field=True),
+            lambda t: t.update(recovery_check_required=True),
+            lambda t: t['recovery_confirmation'].update(event_seq=True),
+            lambda t: t['recovery_confirmation']['native_reconciliation']['source_target'].update(contract_version=True),
+            lambda t: t['recovery_confirmation']['native_reconciliation']['source_fields'].pop('updated_at'),
+            lambda t: t['recovery_confirmation']['native_reconciliation']['source_fields']['updated_at'].update(value=0),
+            lambda t: t['recovery_confirmation']['native_reconciliation'].update(record_digest='0' * 64)]
+        for change in changes:
+            with self.subTest(change=changes.index(change)):
+                corrupted = copy.deepcopy(original); change(corrupted)
+                self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(corrupted), self.task_id))
+                self.store.db.commit()
+                before = self.f.f.state()
+                with self.assertRaises(ValueError): self.store.native_confirmation_basis(self.task_id)
+                self.assertEqual(self.f.f.state(), before)
+                self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(original), self.task_id))
+                self.store.db.commit()
+        self.assertTrue(self.inspect()['fresh_for_checkpoint_binding'])
+
+    def test_canonical_confirmation_event_missing_or_duplicated_is_rejected(self):
+        self.confirmed(); marker = self.store.get(self.task_id)['recovery_confirmation']
+        seq = marker['event_seq']; body = self.store.db.execute('SELECT body FROM events WHERE seq=?', (seq,)).fetchone()[0]
+        self.store.db.execute('DELETE FROM events WHERE seq=?', (seq,)); self.store.db.commit()
+        with self.assertRaisesRegex(ValueError, 'event_invalid'): self.store.native_confirmation_basis(self.task_id)
+        self.store.db.execute('INSERT INTO events(seq,body) VALUES (?,?)', (seq, body)); self.store.db.commit()
+        self.store.db.execute('INSERT INTO events(body) VALUES (?)', (body,)); self.store.db.commit()
+        before = self.f.f.state()
+        with self.assertRaisesRegex(ValueError, 'event_invalid'): self.store.native_confirmation_basis(self.task_id)
+        result = self.inspect(); self.assertFalse(result['fresh_for_checkpoint_binding'])
+        self.assertIsNone(result['confirmed_target']); self.assertEqual(self.f.f.state(), before)
+
+    def test_worker_actor_and_outer_transaction_are_refused(self):
+        self.confirmed(); before = self.f.f.state()
+        with self.assertRaises(ValueError): self.engine.native_confirmed_recovery_assessment(self.task_id)
+        with patch.object(self.store._worker, 'task', self.store.get(self.task_id), create=True):
+            with self.assertRaises(ValueError): self.inspect()
+            with self.assertRaises(ValueError): self.store.native_confirmation_basis(self.task_id)
+        with self.store.atomic():
+            with self.assertRaisesRegex(ValueError, 'unlocked_transaction'): self.inspect()
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_mid_observation_db_or_process_change_invalidates_freshness(self):
+        self.confirmed(); original = self.engine._native_recovery_observation
+        for mutation in ('db', 'roots'):
+            roots = list(self.engine.config['approved_roots'])
+            def changed(*args, **kwargs):
+                result = original(*args, **kwargs)
+                if mutation == 'db': self.store.event('SYNTHETIC_unrelated', 'SYNTHETIC stamp change')
+                else: self.engine.config['approved_roots'] = []
+                return result
+            try:
+                with patch.object(self.engine, '_native_recovery_observation', side_effect=changed):
+                    result = self.inspect()
+                self.assertFalse(result['fresh_for_checkpoint_binding'])
+                self.assertIsNone(result['confirmed_target'])
+                self.assertIn('native_confirmation_observation_changed', result['reasons'])
+            finally:
+                self.engine.config['approved_roots'] = roots
+
+
 class NativeReconciliationStoreGuardTests(unittest.TestCase):
     setUp = NativeConfirmationTests.setUp
     assess = NativeConfirmationTests.assess

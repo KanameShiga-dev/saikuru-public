@@ -6068,7 +6068,33 @@ class Engine:
                 result['reconciliation_recorded'] = False
         return result
 
-    def _native_recovery_observation(self, task_id):
+    def native_confirmed_recovery_assessment(self, task_id, *, actor=None):
+        """Read-only freshness of a confirmed source; binding/dispatch remain closed."""
+        if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
+            raise ValueError('workflow_maintenance_action_required')
+        with self.store.lock:
+            if self.store.depth:
+                raise ValueError('native_observation_requires_unlocked_transaction')
+            stamp = self._native_assessment_stamp()
+        result = {'contract_version': 1, 'fresh_for_checkpoint_binding': False,
+            'reasons': [], 'confirmed_target': None, 'execution_permission': 'none', 'resume_allowed': False}
+        try:
+            observation = self._native_recovery_observation(task_id, confirmed=True)
+            if observation['eligible_for_reconciliation']:
+                result['fresh_for_checkpoint_binding'] = True
+                result['confirmed_target'] = observation['target']
+            else:
+                result['reasons'] = observation['reasons']
+        except (ValueError, KeyError, TypeError):
+            result['reasons'] = ['native_confirmation_basis_unresolved']
+        with self.store.lock:
+            if self._native_assessment_stamp() != stamp or not self._native_maintenance_idle():
+                result['fresh_for_checkpoint_binding'] = False
+                result['confirmed_target'] = None
+                result['reasons'] = sorted(set(result['reasons'] + ['native_confirmation_observation_changed']))
+        return result
+
+    def _native_recovery_observation(self, task_id, *, confirmed=False):
         # Metadata reads take their own short Store locks. Git, file hashing and
         # prior-artifact validation run without an outer Store lock. Any DB write
         # across this interval invalidates the public assessment, even a rollback
@@ -6076,7 +6102,9 @@ class Engine:
         from team_wbs import scope_file_observation
         from team_p0_contract import checkpoint_scope
         from team_harness import workspace_identity
-        task = self.store.get(task_id, 'task'); job = self.store.get(task['job_id'], 'job')
+        basis = self.store.native_confirmation_basis(task_id) if confirmed else None
+        task = basis['source_task'] if basis else self.store.get(task_id, 'task')
+        job = self.store.get(task['job_id'], 'job')
         attempt = task.get('current_attempt') or {}; reasons = []
         try:
             self._recovery_control_inputs(task_id, allow_native_assessment=True)
@@ -6123,6 +6151,8 @@ class Engine:
                 "AND json_extract(body,'$.task_id')=? AND seq>=? "
                 "AND COALESCE(json_extract(body,'$.type'),'')!='recovery_effects_reconciled' ORDER BY seq LIMIT 1001",
                 (job['id'], task_id, start_seq)).fetchall()
+        if basis:
+            rows = [row for row in rows if row[0] != basis['confirmation_event_seq']]
         if len(rows) > 1000: reasons.append('native_attempt_history_unresolved')
         events = [json.loads(body) for _, body in rows]
         closes = [e for e in events if e.get('type') == 'attempt_closed'
@@ -6195,6 +6225,8 @@ class Engine:
             'workspace': workspace, 'scope': scope, 'baseline_record': baseline_record, 'operation_digest': operation_digest,
             'events': rows, 'approvals': approval_records, 'run_records': run_records},
             sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+        if basis and target != basis['source_target']:
+            reasons.append('native_confirmation_source_changed')
         return {'contract_version': 1, 'eligible_for_reconciliation': not reasons, 'reasons': sorted(set(reasons)),
             'target': target, 'summary': summary, 'execution_permission': 'none', 'reconciliation_recorded': False}
 
