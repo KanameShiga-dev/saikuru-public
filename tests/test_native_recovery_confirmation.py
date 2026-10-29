@@ -6,6 +6,27 @@ import unittest
 from unittest.mock import patch
 
 
+class NativeIdentityPredicateTests(unittest.TestCase):
+    def test_current_and_archived_native_identities_share_conservative_predicate(self):
+        from types import SimpleNamespace
+        from team_store import Store
+        task = {'id': 'SYNTHETIC-task', 'job_id': 'SYNTHETIC-job', 'current_attempt': {'id': 'SYNTHETIC-attempt'}}
+        fake = SimpleNamespace(for_job=lambda kind, job: [])
+        def started(value, attempt='SYNTHETIC-attempt'):
+            return Store.native_attempt_started(fake, value, attempt)
+        self.assertFalse(started(task))
+        self.assertTrue(started(dict(task, agent_run={'id': 'SYNTHETIC-run'})))
+        self.assertTrue(started(dict(task, agent_run_id='SYNTHETIC-run')))
+        fake.for_job = lambda kind, job: [{'task_id': 'SYNTHETIC-task', 'attempt_id': 'different'}]
+        self.assertTrue(started(task))
+        fake.for_job = lambda kind, job: [{'task_id': 'different', 'attempt_id': 'SYNTHETIC-attempt'}]
+        self.assertTrue(started(task))
+        fake.for_job = lambda kind, job: [{'task_id': 'different', 'attempt_id': 'different'}]
+        self.assertFalse(started(task))
+        fake.for_job = lambda kind, job: [{'task_id': 'different'}]
+        self.assertTrue(started(task, None))  # malformed historical identity fails closed
+
+
 class LegacyConfirmationWorkerGuardTests(unittest.TestCase):
     def test_non_native_worker_cannot_use_legacy_store_confirmation(self):
         from tests.test_recovery_controls import RecoveryControlTests
@@ -400,6 +421,129 @@ class NativeConfirmedAssessmentTests(unittest.TestCase):
                 self.assertIn('native_confirmation_observation_changed', result['reasons'])
             finally:
                 self.engine.config['approved_roots'] = roots
+
+
+class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
+    setUp = NativeConfirmedAssessmentTests.setUp
+    assess = NativeConfirmedAssessmentTests.assess
+    reconcile = NativeConfirmedAssessmentTests.reconcile
+    confirmation_body = NativeConfirmedAssessmentTests.confirmation_body
+    confirm = NativeConfirmedAssessmentTests.confirm
+    confirmed = NativeConfirmedAssessmentTests.confirmed
+
+    def draft(self):
+        self.confirmed()
+        draft = self.engine.collect_checkpoint(self.task_id, writer_stopped=True)
+        record, _, _, _, refs = self.engine._checkpoint_draft_inputs(draft['id'], True)
+        return record, refs
+
+    def stamp(self):
+        return (self.store.db.total_changes, self.store.db.execute('PRAGMA data_version').fetchone()[0])
+
+    def test_atomic_native_transition_binds_original_pointer_and_unique_events(self):
+        record, refs = self.draft(); before = self.store.get(self.task_id)
+        marker = before['recovery_confirmation']; old_pointer = {'present': 'resume_checkpoint_id' in before,
+            'value': before.get('resume_checkpoint_id')}
+        result = self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        ready, transition = result['checkpoint'], result['transition']
+        self.assertEqual(transition['previous_pointer'], old_pointer)
+        self.assertEqual(transition['confirmation_event_seq'], marker['event_seq'])
+        self.assertEqual(transition['source_target'], marker['native_reconciliation']['source_target'])
+        self.assertEqual(transition['reconciliation_id'], marker['native_reconciliation']['record_id'])
+        self.assertEqual(transition['checkpoint_id'], ready['id'])
+        self.assertEqual(transition['checkpoint_digest'], ready['manifest_digest'])
+        self.assertEqual(transition['before_task_revision'], before['state_revision'])
+        self.assertEqual(transition['after_task_revision'], before['state_revision'] + 1)
+        self.assertLess(marker['event_seq'], ready['ready_binding']['event_seq'])
+        self.assertLess(ready['ready_binding']['event_seq'], result['transition_event_seq'])
+        body = {k:v for k,v in transition.items() if k not in ('record_digest', 'updated_at')}
+        self.assertEqual(transition['record_digest'], hashlib.sha256(json.dumps(body, sort_keys=True,
+            ensure_ascii=False, separators=(',', ':')).encode()).hexdigest())
+        self.assertEqual(self.store.checkpoint_binding(ready['id'])[0], ready)
+        self.assertEqual(result['execution_permission'], 'none'); self.assertFalse(result['resume_allowed'])
+        self.assertFalse(self.engine.checkpoint_persistence(ready['id'])['handoff_synced'])
+        before_replay = self.f.f.state()
+        with self.assertRaises(ValueError):
+            self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        self.assertEqual(self.f.f.state(), before_replay)
+        with self.assertRaises(ValueError): self.engine.retry(self.task_id, 'SYNTHETIC no binding')
+
+    def test_transition_failure_rolls_back_checkpoint_pointer_events_and_guards(self):
+        record, refs = self.draft(); before = self.f.f.state(); emit = self.store.event
+        def fail(kind, *args, **kwargs):
+            if kind == 'native_checkpoint_transition_committed': raise RuntimeError('SYNTHETIC event failure')
+            return emit(kind, *args, **kwargs)
+        with patch.object(self.store, 'event', side_effect=fail):
+            with self.assertRaises(RuntimeError):
+                self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        self.assertEqual(self.f.f.state(), before)
+        self.assertEqual(self.store.get(record['id'])['state'], 'writing')
+        self.assertIsNone(getattr(self.store._worker, 'native_checkpoint_commit', None))
+        self.assertIsNone(getattr(self.store._worker, 'native_transition_commit', None))
+        self.assertEqual(self.store.job_events(self.job_id, 'native_checkpoint_transition_committed'), [])
+
+    def test_concurrent_commits_create_only_one_transition(self):
+        from concurrent.futures import ThreadPoolExecutor
+        record, refs = self.draft(); stamp = self.stamp()
+        def commit(_):
+            try:
+                self.store.commit_native_checkpoint(record, refs, stamp, lambda: None)
+                return 'committed'
+            except ValueError:
+                return 'refused'
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            self.assertEqual(sorted(executor.map(commit, range(2))), ['committed', 'refused'])
+        events = self.store.job_events(self.job_id, 'native_checkpoint_transition_committed')
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(self.store.for_job('native_checkpoint_transition', self.job_id)), 1)
+
+    def test_stale_stamp_process_change_and_worker_cannot_publish(self):
+        record, refs = self.draft(); stale = self.stamp()
+        self.store.event('SYNTHETIC_unrelated', 'SYNTHETIC database change')
+        before = self.f.f.state()
+        with self.assertRaises(ValueError): self.store.commit_native_checkpoint(record, refs, stale, lambda: None)
+        with self.assertRaisesRegex(ValueError, 'SYNTHETIC_process_changed'):
+            self.store.commit_native_checkpoint(record, refs, self.stamp(),
+                lambda: (_ for _ in ()).throw(ValueError('SYNTHETIC_process_changed')))
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_changed'):
+            self.store.commit_native_checkpoint(record, refs, self.stamp(),
+                lambda: self.store.event('SYNTHETIC_callback_write', 'SYNTHETIC should roll back'))
+        with patch.object(self.store._worker, 'task', self.store.get(self.task_id), create=True):
+            with self.assertRaisesRegex(ValueError, 'worker_cannot_commit_native_checkpoint'):
+                self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_post_confirmation_pending_or_invalid_history_blocks_transition(self):
+        record, refs = self.draft()
+        for event_type in ('checkpoint_handoff_pending', 'checkpoint_invalid'):
+            with self.subTest(event_type=event_type):
+                self.store.event(event_type, 'SYNTHETIC retained failure history', self.task_id, self.job_id,
+                    details={'checkpoint_id': record['id']})
+                before = self.f.f.state()
+                with self.assertRaisesRegex(ValueError, 'native_checkpoint_history_changed'):
+                    self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+                self.assertEqual(self.f.f.state(), before)
+                self.assertEqual(self.store.get(record['id'])['state'], 'writing')
+
+    def test_reserved_kind_and_existing_transition_cannot_be_forged(self):
+        record, refs = self.draft(); ident = 'native-checkpoint-transition-SYNTHETIC'
+        before = self.f.f.state()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_id_reserved'):
+            self.store.put('other', {'id': ident})
+        with patch.object(self.store._worker, 'native_reconciliation_commit', ident, create=True):
+            with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_id_reserved'):
+                self.store.put('native_effect_reconciliation', {'id': ident})
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_requires_server_commit'):
+            self.store.put('native_checkpoint_transition', {'id': ident})
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_event_requires_server_commit'):
+            self.store.event('native_checkpoint_transition_committed', 'SYNTHETIC forgery',
+                self.task_id, self.job_id, details={'transition_id': ident})
+        self.assertEqual(self.f.f.state(), before)
+        transition = self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)['transition']
+        before = self.f.f.state()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_requires_server_commit'):
+            self.store.update(transition['id'], synthetic_forgery=True)
+        self.assertEqual(self.f.f.state(), before)
 
 
 class NativeReconciliationStoreGuardTests(unittest.TestCase):

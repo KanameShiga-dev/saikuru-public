@@ -6287,9 +6287,7 @@ class Engine:
         # Native workers can write outside the recorded tool protocol. Absence
         # of operation_* events is not evidence that a launched worker had no effect.
         attempt_id = (task.get('current_attempt') or {}).get('id')
-        if not allow_native_assessment and (task.get('agent_run') or task.get('agent_run_id') or any(
-                run.get('task_id') == task_id or run.get('attempt_id') == attempt_id
-                for run in self.store.for_job('agent_run', job['id']))):
+        if not allow_native_assessment and self.store.native_attempt_started(task, attempt_id):
             raise ValueError('担当プロセスの作用が未照合です。この経路では再開できません。')
         if any(a.get('status') == 'pending' and a.get('kind') in ('tool', 'question', 'context_conflict')
                for a in self.store.for_job('approval', job['id'])):
@@ -6309,9 +6307,7 @@ class Engine:
         if writer_stopped is not True or checked_changes is not True:
             raise ValueError('担当の停止と現在の変更を確認してください。')
         current = self.store.get(task_id, 'task')
-        if current.get('agent_run') or current.get('agent_run_id') or any(
-                run.get('task_id') == task_id or run.get('attempt_id') == attempt_id
-                for run in self.store.for_job('agent_run', current['job_id'])):
+        if self.store.native_attempt_started(current, attempt_id):
             return self._confirm_native_recovery(task_id, task_revision, job_revision, attempt_id,
                 workflow_target=workflow_target, actor=actor)
         with self._checkpoint_project(task_id):

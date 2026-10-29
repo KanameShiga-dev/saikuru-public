@@ -157,11 +157,17 @@ class Store:
         if row and row[0] != kind:
             raise ValueError('保存IDは別の種類で使用されています。')
         previous = json.loads(row[1]) if row else None
+        if obj['id'].startswith('native-checkpoint-transition-') and kind != 'native_checkpoint_transition':
+            raise ValueError('native_checkpoint_transition_id_reserved')
         if obj['id'].startswith('native-reconciliation-') and kind != 'native_effect_reconciliation':
             raise ValueError('native_reconciliation_id_reserved')
         if kind == 'native_effect_reconciliation':
             if previous or getattr(self._worker, 'native_reconciliation_commit', None) != obj['id']:
                 raise ValueError('native_reconciliation_requires_server_commit')
+            return
+        if kind == 'native_checkpoint_transition':
+            if previous or getattr(self._worker, 'native_transition_commit', None) != obj['id']:
+                raise ValueError('native_checkpoint_transition_requires_server_commit')
             return
         if obj['id'].startswith('native-baseline-') and kind != 'native_scope_baseline':
             raise ValueError('native_baseline_id_reserved')
@@ -280,15 +286,19 @@ class Store:
                 raise ValueError('対象が見つかりません。')
             return json.loads(row[1])
 
+    def native_attempt_started(self, task, attempt_id):
+        """Conservative native-run identity shared by confirmation and checkpoint guards."""
+        return bool(task.get('agent_run') or task.get('agent_run_id') or any(
+            run.get('task_id') == task['id'] or run.get('attempt_id') == attempt_id
+            for run in self.for_job('agent_run', task['job_id'])))
+
     def native_checkpoint_requires_transition(self, task):
         """A confirmed native attempt cannot use ordinary checkpoint publication."""
         marker = task.get('recovery_confirmation')
         if not isinstance(marker, dict) or not marker:
             return False
         attempt_id = (task.get('current_attempt') or {}).get('id')
-        return ('native_reconciliation' in marker or bool(task.get('agent_run') or task.get('agent_run_id'))
-            or any(run.get('task_id') == task['id'] or (attempt_id and run.get('attempt_id') == attempt_id)
-                   for run in self.for_job('agent_run', task['job_id'])))
+        return 'native_reconciliation' in marker or self.native_attempt_started(task, attempt_id)
 
     def commit_checkpoint(self, record, references):
         """Internal publisher: caller verifies files outside Store lock first.
@@ -303,7 +313,8 @@ class Store:
                 raise StaleAttempt('Checkpointの下書きが変化しました。')
             task = self.get(record['task_id'], 'task')
             job = self.get(record['job_id'], 'job')
-            if self.native_checkpoint_requires_transition(task):
+            if (self.native_checkpoint_requires_transition(task)
+                    and getattr(self._worker, 'native_checkpoint_commit', None) != record['id']):
                 raise ValueError('native_checkpoint_transition_required')
             validate_draft_record(current, job, task, references)
             if current['resume_preconditions'] != ['checkpoint_not_ready']:
@@ -329,6 +340,79 @@ class Store:
                 return self.put('checkpoint', dict(current, state='ready', ready_binding=dict(binding, event_seq=seq)))
             finally:
                 self._worker.checkpoint_commit = previous
+
+    def commit_native_checkpoint(self, record, references, database_stamp, assert_process):
+        """Internal atomic native transition primitive; never resume/dispatch authority.
+
+        An Engine caller must observe files/authority outside the transaction and
+        provide a current metadata-only process check. This method is not routed.
+        """
+        if getattr(self._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_commit_native_checkpoint')
+        if not callable(assert_process):
+            raise ValueError('native_checkpoint_process_check_required')
+        with self.atomic():
+            if (self.db.total_changes, self.db.execute('PRAGMA data_version').fetchone()[0]) != database_stamp:
+                raise StaleAttempt('native_checkpoint_transition_changed')
+            assert_process()
+            if (self.db.total_changes, self.db.execute('PRAGMA data_version').fetchone()[0]) != database_stamp:
+                raise StaleAttempt('native_checkpoint_transition_changed')
+            task = self.get(record['task_id'], 'task'); job = self.get(task['job_id'], 'job')
+            if not self.native_checkpoint_requires_transition(task):
+                raise ValueError('native_checkpoint_confirmation_required')
+            basis = self.native_confirmation_basis(task['id'])
+            marker = task['recovery_confirmation']; target = basis['source_target']
+            if self.db.execute("SELECT 1 FROM events WHERE seq>? AND json_extract(body,'$.job_id')=? "
+                    "AND json_extract(body,'$.task_id')=? LIMIT 1", (marker['event_seq'], job['id'], task['id'])).fetchone():
+                raise ValueError('native_checkpoint_history_changed')
+            key = hashlib.sha256(json.dumps([job['id'], task['id'], marker['attempt_id'], marker['event_seq']],
+                ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+            ident = 'native-checkpoint-transition-' + key
+            if (self.db.execute('SELECT 1 FROM objects WHERE id=?', (ident,)).fetchone()
+                    or self.db.execute("SELECT 1 FROM events WHERE json_extract(body,'$.type')=? "
+                        "AND json_extract(body,'$.details.confirmation_event_seq')=? LIMIT 1",
+                        ('native_checkpoint_transition_committed', marker['event_seq'])).fetchone()):
+                raise ValueError('native_checkpoint_transition_already_exists')
+            previous_pointer = {'present': 'resume_checkpoint_id' in task, 'value': task.get('resume_checkpoint_id')}
+            if (previous_pointer['value'] is not None and (not isinstance(previous_pointer['value'], str)
+                    or not previous_pointer['value'] or len(previous_pointer['value']) > 128)):
+                raise ValueError('native_checkpoint_previous_pointer_invalid')
+            previous_guard = getattr(self._worker, 'native_checkpoint_commit', None)
+            previous_transition = getattr(self._worker, 'native_transition_commit', None)
+            self._worker.native_checkpoint_commit = record['id']
+            try:
+                ready = self.commit_checkpoint(record, references)
+                seq = ready['ready_binding']['event_seq']
+                if seq <= marker['event_seq']:
+                    raise ValueError('native_checkpoint_event_order_invalid')
+                transition = {'id': ident, 'schema_version': 1, 'job_id': job['id'], 'task_id': task['id'],
+                    'attempt_id': marker['attempt_id'], 'work_package_id': task.get('work_package_id'),
+                    'confirmation_event_seq': marker['event_seq'], 'reconciliation_id': basis['reconciliation_id'],
+                    'reconciliation_digest': marker['native_reconciliation']['record_digest'],
+                    'source_target': copy.deepcopy(target), 'previous_pointer': previous_pointer,
+                    'before_task_revision': marker['task_revision'], 'after_task_revision': ready['ready_binding']['task'],
+                    'checkpoint_id': ready['id'], 'checkpoint_digest': ready['manifest_digest'],
+                    'ready_event_seq': seq, 'job_revision': job['state_revision'],
+                    'work_package_revision': ready['ready_binding']['work_package'],
+                    'requirement_revision': job.get('requirement_revision'),
+                    'requirements_approval_id': job.get('requirements_approval_id'),
+                    'plan_revision': job.get('plan_revision'), 'plan_approval_id': job.get('plan_approval_id')}
+                transition['record_digest'] = hashlib.sha256(json.dumps(transition, sort_keys=True,
+                    ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+                self._worker.native_transition_commit = ident
+                saved = self.put('native_checkpoint_transition', transition)
+                transition_seq = self.event('native_checkpoint_transition_committed',
+                    '保守確認済みCheckpointの移行を記録しました。', task['id'], job['id'],
+                    details={'transition_id': ident, 'record_digest': transition['record_digest'],
+                        'confirmation_event_seq': marker['event_seq'], 'ready_event_seq': seq,
+                        'checkpoint_id': ready['id']})
+                if transition_seq <= seq:
+                    raise ValueError('native_checkpoint_event_order_invalid')
+                return {'checkpoint': ready, 'transition': saved, 'transition_event_seq': transition_seq,
+                    'execution_permission': 'none', 'resume_allowed': False}
+            finally:
+                self._worker.native_checkpoint_commit = previous_guard
+                self._worker.native_transition_commit = previous_transition
 
     def checkpoint_binding(self, checkpoint_id):
         """Persistence candidate only: does not verify files or authorize resume."""
@@ -461,9 +545,7 @@ class Store:
                         or len(proof['reviewed_prior_operations']) != len(proof.get('result_observed') or [])):
                     raise ValueError('操作の作用が未照合です。この経路では再開できません。')
                 operations = {'operations': 'reviewed_prior', 'operation_digest': proof['operation_digest']}
-            native_started = bool(task.get('agent_run') or task.get('agent_run_id') or any(
-                run.get('task_id') == task_id or run.get('attempt_id') == attempt_id
-                for run in self.for_job('agent_run', job['id'])))
+            native_started = self.native_attempt_started(task, attempt_id)
             native = getattr(self._worker, 'native_confirmation_commit', None)
             if native_started and (not isinstance(native, dict) or native.get('source_target', {}).get('task_id') != task_id
                     or native.get('source_target', {}).get('attempt_id') != attempt_id):
@@ -756,6 +838,12 @@ class Store:
 
     def event(self, event_type, message, task_id=None, job_id=None, details=None):
         # Persist summaries, not raw provider protocol messages or environment variables.
+        if event_type == 'native_checkpoint_transition_committed':
+            transition_id = getattr(self._worker, 'native_transition_commit', None)
+            if (getattr(self._worker, 'task', None) is not None or not isinstance(transition_id, str)
+                    or not transition_id.startswith('native-checkpoint-transition-')
+                    or not isinstance(details, dict) or details.get('transition_id') != transition_id):
+                raise ValueError('native_checkpoint_transition_event_requires_server_commit')
         record = dict(type=event_type, message=str(message)[:3000], task_id=task_id,
                       job_id=job_id, at=now())
         if details is not None:
