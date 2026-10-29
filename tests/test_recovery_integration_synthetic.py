@@ -521,6 +521,44 @@ class NativeAssessmentTests(unittest.TestCase):
         self.assertFalse(result['eligible_for_reconciliation'])
         self.assertIn('native_scope_baseline_record_unresolved', result['reasons'])
 
+    def test_recreated_commit_event_changes_the_assessment_target(self):
+        original = self.assess()[1]
+        self.assertTrue(original['eligible_for_reconciliation'], original)
+        record = self.store.native_scope_baseline(self.task_id, self.run['attempt_id'])
+        self.store.db.execute("DELETE FROM events WHERE json_extract(body,'$.type')='native_scope_baseline_committed'")
+        self.store.db.commit()
+        self.store.event('native_scope_baseline_committed', 'SYNTHETIC recreated event', self.task_id, self.job_id,
+            {'attempt_id': self.run['attempt_id'], 'baseline_id': record['id'], 'snapshot_digest': record['snapshot_digest']})
+        after = self.assess()[1]
+        self.assertTrue(after['eligible_for_reconciliation'], after)
+        self.assertNotEqual(original['target']['state_digest'], after['target']['state_digest'])
+
+    def test_snapshot_only_sqlite_tamper_is_not_valid_assessment_evidence(self):
+        import json
+        record = self.store.native_scope_baseline(self.task_id, self.run['attempt_id'])
+        stored = self.store.get(record['id'])
+        stored['snapshot']['files']['app.py'] = '0' * 64
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(stored), record['id']))
+        self.store.db.commit()
+        result = self.assess()[1]
+        self.assertFalse(result['eligible_for_reconciliation'])
+        self.assertIn('native_scope_baseline_record_unresolved', result['reasons'])
+
+    def test_baseline_proof_observation_is_bound_without_other_database_changes(self):
+        from unittest.mock import patch
+        original = self.assess()[1]; before = self.f.f.state()
+        read = self.store.native_scope_baseline
+        def proof_version(*args):
+            record = read(*args)
+            return dict(record, event_seq=record['event_seq'] + 1)
+        # Isolate the proof component from the independently hashed event rows.
+        # The actual event replacement is exercised by the preceding test.
+        with patch.object(self.store, 'native_scope_baseline', side_effect=proof_version):
+            after = self.assess()[1]
+        self.assertTrue(after['eligible_for_reconciliation'], after)
+        self.assertEqual(self.f.f.state(), before)
+        self.assertNotEqual(original['target']['state_digest'], after['target']['state_digest'])
+
 
 class NativeBaselineCaptureTests(unittest.TestCase):
     def setUp(self):
@@ -604,6 +642,49 @@ class NativeBaselineCaptureTests(unittest.TestCase):
         current = self.store.get(self.task['id'])
         self.assertEqual(current['status'], 'failed')
         self.assertEqual(current['current_attempt']['status'], 'closed')
+
+    def assert_workspace_block(self):
+        from unittest.mock import patch
+        with patch('team_engine.Context') as context: self.engine._run(self.task)
+        context.assert_not_called()
+        current = self.store.get(self.task['id'])
+        self.assertEqual(current['failure_code'], 'workspace_boundary')
+        self.assertEqual(current['current_attempt']['status'], 'closed')
+
+    def test_outside_scope_preflight_keeps_workspace_boundary_classification(self):
+        path = self.f.f.workspace.project / 'outside.py'
+        path.write_text('SYNTHETIC user edit\n', encoding='utf-8')
+        self.assert_workspace_block()
+        self.assertEqual(path.read_text(encoding='utf-8'), 'SYNTHETIC user edit\n')
+
+    def test_worktree_identity_preflight_keeps_workspace_boundary_classification(self):
+        workspace = self.f.f.workspace
+        workspace.git(workspace.project, 'checkout', '-b', 'codex/fictional-other-boundary')
+        self.assert_workspace_block()
+
+    def test_source_head_preflight_keeps_workspace_boundary_classification(self):
+        workspace = self.f.f.workspace
+        workspace.git(workspace.source, 'commit', '--allow-empty', '-m', 'SYNTHETIC source movement')
+        self.assert_workspace_block()
+
+    def test_context_rejects_changed_plan_digest_after_baseline_commit(self):
+        from team_engine import Context
+        from team_adapters import ProviderError
+        self.engine.commands = {'codex': ['fictional-never-launched'], 'claude': ['fictional-never-launched']}
+        baseline = self.engine.prepare_native_scope_baseline(self.task)
+        self.store.update(baseline['plan_approval_id'], digest='0' * 64)
+        with self.assertRaises(ProviderError): Context(self.engine, self.task)
+
+    def test_context_rejects_snapshot_only_sqlite_tamper(self):
+        import json
+        from team_engine import Context
+        self.engine.commands = {'codex': ['fictional-never-launched'], 'claude': ['fictional-never-launched']}
+        baseline = self.engine.prepare_native_scope_baseline(self.task)
+        record = self.store.native_scope_baseline(self.task['id'], baseline['attempt_id'])
+        stored = self.store.get(record['id']); stored['snapshot']['files']['app.py'] = '0' * 64
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(stored), record['id']))
+        self.store.db.commit()
+        with self.assertRaisesRegex(ValueError, 'record_invalid'): Context(self.engine, self.task)
 
 
 class NativeBaselineStorageTests(unittest.TestCase):

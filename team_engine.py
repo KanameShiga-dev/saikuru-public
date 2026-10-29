@@ -4704,10 +4704,10 @@ class Engine:
         failure_code = None
 
         try:
-            if preflight_error is not None:
-                raise preflight_error
             self._execution_workspace(task)
             self._assert_workflow_dispatch(task)
+            if preflight_error is not None:
+                raise preflight_error
             ctx = Context(self, task)
 
             with self.store.lock:
