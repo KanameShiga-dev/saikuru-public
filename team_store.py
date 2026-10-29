@@ -446,6 +446,92 @@ class Store:
                 raise ValueError('Checkpointの確定イベントが一致しません。')
             return record, dict(event, seq=binding['event_seq'])
 
+    def native_checkpoint_transition_basis(self, task_id):
+        """Canonical metadata and source projection only; never file or Handoff authority."""
+        if getattr(self._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_read_native_checkpoint_transition')
+        with self.lock:
+            task = self.get(task_id, 'task'); job = self.get(task['job_id'], 'job')
+            marker = task.get('recovery_confirmation'); attempt = task.get('current_attempt') or {}
+            if (not isinstance(marker, dict) or not isinstance(attempt, dict)
+                    or type(marker.get('event_seq')) is not int or marker['event_seq'] < 1
+                    or type(marker.get('task_revision')) is not int or marker['task_revision'] < 1
+                    or not isinstance(marker.get('attempt_id'), str) or not marker['attempt_id']
+                    or attempt.get('id') != marker['attempt_id']):
+                raise ValueError('native_checkpoint_confirmation_invalid')
+            checkpoint, ready_event = self.checkpoint_binding(task.get('resume_checkpoint_id'))
+            ready_seq = ready_event['seq']
+            key = hashlib.sha256(json.dumps([job['id'], task_id, marker['attempt_id'], marker['event_seq']],
+                ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+            ident = 'native-checkpoint-transition-' + key
+            row = self.db.execute('SELECT kind,body FROM objects WHERE id=?', (ident,)).fetchone()
+            if row is None or row[0] != 'native_checkpoint_transition':
+                raise ValueError('native_checkpoint_transition_missing')
+            record = json.loads(row[1])
+            keys = {'id', 'schema_version', 'job_id', 'task_id', 'attempt_id', 'work_package_id',
+                'confirmation_event_seq', 'reconciliation_id', 'reconciliation_digest', 'source_target',
+                'previous_pointer', 'before_task_revision', 'after_task_revision', 'checkpoint_id',
+                'checkpoint_digest', 'ready_event_seq', 'job_revision', 'work_package_revision',
+                'requirement_revision', 'requirements_approval_id', 'plan_revision', 'plan_approval_id',
+                'record_digest', 'updated_at'}
+            if not isinstance(record, dict) or set(record) != keys:
+                raise ValueError('native_checkpoint_transition_record_invalid')
+            body = {k:v for k,v in record.items() if k not in ('record_digest', 'updated_at')}
+            digest = hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False,
+                separators=(',', ':')).encode()).hexdigest()
+            pointer = record['previous_pointer']; proof = marker.get('native_reconciliation')
+            if (record['id'] != ident or type(record['schema_version']) is not int or record['schema_version'] != 1
+                    or record['record_digest'] != digest or not isinstance(pointer, dict)
+                    or set(pointer) != {'present', 'value'} or type(pointer['present']) is not bool
+                    or (not pointer['present'] and pointer['value'] is not None)
+                    or (pointer['value'] is not None and (not isinstance(pointer['value'], str)
+                        or not pointer['value'] or len(pointer['value']) > 128))
+                    or not isinstance(proof, dict)):
+                raise ValueError('native_checkpoint_transition_record_invalid')
+            expected = {'job_id': job['id'], 'task_id': task_id, 'attempt_id': marker['attempt_id'],
+                'work_package_id': task.get('work_package_id'), 'confirmation_event_seq': marker['event_seq'],
+                'reconciliation_id': proof.get('record_id'), 'reconciliation_digest': proof.get('record_digest'),
+                'source_target': proof.get('source_target'), 'before_task_revision': marker['task_revision'],
+                'after_task_revision': marker['task_revision'] + 1, 'checkpoint_id': checkpoint['id'],
+                'checkpoint_digest': checkpoint['manifest_digest'], 'ready_event_seq': ready_seq,
+                'job_revision': job['state_revision'], 'work_package_revision': checkpoint['ready_binding']['work_package'],
+                'requirement_revision': job.get('requirement_revision'), 'requirements_approval_id': job.get('requirements_approval_id'),
+                'plan_revision': job.get('plan_revision'), 'plan_approval_id': job.get('plan_approval_id')}
+            if (any(record.get(k) != v for k,v in expected.items())
+                    or any(type(record.get(k)) is not int for k in ('confirmation_event_seq', 'before_task_revision',
+                        'after_task_revision', 'ready_event_seq', 'job_revision', 'requirement_revision', 'plan_revision'))
+                    or (record['work_package_revision'] is not None and
+                        (type(record['work_package_revision']) is not int or record['work_package_revision'] < 1))
+                    or task['state_revision'] != record['after_task_revision']
+                    or checkpoint['snapshot_revisions'] != {'job': record['job_revision'],
+                        'task': record['before_task_revision'], 'work_package': record['work_package_revision']}
+                    or not marker['event_seq'] < ready_seq):
+                raise ValueError('native_checkpoint_transition_binding_invalid')
+            ready_rows = self.db.execute("SELECT seq FROM events WHERE json_extract(body,'$.type')='checkpoint_ready' "
+                "AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.task_id')=? "
+                "AND json_extract(body,'$.details.checkpoint_id')=? ORDER BY seq LIMIT 2",
+                (job['id'], task_id, checkpoint['id'])).fetchall()
+            rows = self.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.type')=? "
+                "AND json_extract(body,'$.details.confirmation_event_seq')=? ORDER BY seq LIMIT 2",
+                ('native_checkpoint_transition_committed', marker['event_seq'])).fetchall()
+            details = {'transition_id': ident, 'record_digest': digest, 'confirmation_event_seq': marker['event_seq'],
+                'ready_event_seq': ready_seq, 'checkpoint_id': checkpoint['id']}
+            event = json.loads(rows[0][1]) if len(rows) == 1 else {}
+            if (ready_rows != [(ready_seq,)] or len(rows) != 1 or rows[0][0] <= ready_seq
+                    or event.get('type') != 'native_checkpoint_transition_committed' or event.get('job_id') != job['id']
+                    or event.get('task_id') != task_id or event.get('details') != details):
+                raise ValueError('native_checkpoint_transition_event_invalid')
+            confirmed_task = copy.deepcopy(task); confirmed_task['state_revision'] = record['before_task_revision']
+            if pointer['present']: confirmed_task['resume_checkpoint_id'] = copy.deepcopy(pointer['value'])
+            else: confirmed_task.pop('resume_checkpoint_id', None)
+            basis = self._native_confirmation_basis_for_task(confirmed_task, job)
+            if basis['source_target'] != record['source_target']:
+                raise ValueError('native_checkpoint_transition_source_invalid')
+            return {'source_task': basis['source_task'], 'source_target': basis['source_target'],
+                'confirmation_event_seq': marker['event_seq'], 'checkpoint': checkpoint,
+                'checkpoint_ready_event_seq': ready_seq, 'transition': record,
+                'transition_event_seq': rows[0][0], 'execution_permission': 'none', 'resume_allowed': False}
+
     def invalidate_checkpoint(self, checkpoint_id):
         with self.atomic():
             record = self.get(checkpoint_id, 'checkpoint')
@@ -605,68 +691,72 @@ class Store:
             raise ValueError('worker_cannot_read_native_confirmation_basis')
         with self.lock:
             task = self.get(task_id, 'task'); job = self.get(task['job_id'], 'job')
-            marker = task.get('recovery_confirmation'); attempt = task.get('current_attempt') or {}
-            if (not isinstance(attempt, dict) or not isinstance(marker, dict) or set(marker) != {
-                    'attempt_id', 'job_revision', 'task_revision', 'event_seq', 'native_reconciliation'}
-                    or any(type(marker.get(k)) is not int or marker[k] < 1
-                        for k in ('job_revision', 'task_revision', 'event_seq'))
-                    or marker['attempt_id'] != attempt.get('id')
-                    or type(job.get('state_revision')) is not int or type(task.get('state_revision')) is not int
-                    or marker['job_revision'] != job.get('state_revision')
-                    or marker['task_revision'] != task.get('state_revision')
-                    or task.get('recovery_check_required') is not False
-                    or attempt.get('status') not in ('closed', 'fenced')
-                    or task.get('status') not in ('failed', 'blocked', 'interrupted')
-                    or job.get('status') not in ('failed', 'blocked', 'interrupted')):
-                raise ValueError('native_confirmation_transition_invalid')
-            proof = marker['native_reconciliation']
-            fields = {'state_revision', 'updated_at', 'recovery_check_required', 'recovery_confirmation'}
-            if (not isinstance(proof, dict) or set(proof) != {'record_id', 'record_digest', 'record_event_seq',
-                    'source_target', 'source_fields', 'task_invariants_digest'}
-                    or not isinstance(proof['source_fields'], dict) or set(proof['source_fields']) != fields
-                    or any(not isinstance(v, dict) or set(v) != {'present', 'value'} or type(v['present']) is not bool
-                        for v in proof['source_fields'].values())):
-                raise ValueError('native_confirmation_projection_invalid')
-            target = proof['source_target']
-            expected = {'contract_version': 1, 'action': 'reconcile_recovery', 'job_id': job['id'],
-                'task_id': task_id, 'attempt_id': attempt.get('id'), 'job_revision': job['state_revision'],
-                'task_revision': marker['task_revision'] - 1}
-            if (not isinstance(target, dict) or set(target) != set(expected) | {'state_digest'}
-                    or any(target.get(k) != v for k, v in expected.items())
-                    or any(type(target.get(k)) is not int for k in ('contract_version', 'job_revision', 'task_revision'))):
-                raise ValueError('native_confirmation_source_target_invalid')
-            invariants = {k:v for k,v in task.items() if k not in fields}
-            digest = hashlib.sha256(json.dumps(invariants, sort_keys=True, ensure_ascii=False,
-                separators=(',', ':')).encode()).hexdigest()
-            if proof['task_invariants_digest'] != digest:
-                raise ValueError('native_confirmation_invariants_changed')
-            source = copy.deepcopy(task)
-            for key, previous in proof['source_fields'].items():
-                if previous['present']: source[key] = copy.deepcopy(previous['value'])
-                else: source.pop(key, None)
-            if (type(source.get('state_revision')) is not int or source['state_revision'] != target['task_revision']
-                    or source.get('recovery_confirmation') is not None):
-                raise ValueError('native_confirmation_projection_invalid')
-            record = self.native_reconciliation(task_id, target)
-            if (record is None or record['id'] != proof['record_id'] or record['record_digest'] != proof['record_digest']
-                    or type(proof['record_event_seq']) is not int or record['event_seq'] != proof['record_event_seq']
-                    or record['event_seq'] >= marker['event_seq']):
-                raise ValueError('native_confirmation_reconciliation_invalid')
-            operations = {'operations': 'none'}
-            if self.has_operation_history(job['id']):
-                operations = {'operations': 'reviewed_prior',
-                    'operation_digest': self.operation_assessment(job['id'])['operation_digest']}
-            rows = self.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.type')='recovery_confirmed' "
-                "AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.task_id')=? "
-                "AND json_extract(body,'$.details.attempt_id')=? ORDER BY seq LIMIT 2",
-                (job['id'], task_id, marker['attempt_id'])).fetchall()
-            expected_details = {'attempt_id': marker['attempt_id'], 'task_revision': target['task_revision'],
-                'job_revision': marker['job_revision'], **operations, 'native_reconciliation': proof}
-            if (len(rows) != 1 or rows[0][0] != marker['event_seq']
-                    or json.loads(rows[0][1]).get('details') != expected_details):
-                raise ValueError('native_confirmation_event_invalid')
-            return {'source_task': source, 'source_target': copy.deepcopy(target),
-                'confirmation_event_seq': marker['event_seq'], 'reconciliation_id': record['id']}
+            return self._native_confirmation_basis_for_task(task, job)
+
+    def _native_confirmation_basis_for_task(self, task, job):
+        task_id = task['id']
+        marker = task.get('recovery_confirmation'); attempt = task.get('current_attempt') or {}
+        if (not isinstance(attempt, dict) or not isinstance(marker, dict) or set(marker) != {
+                'attempt_id', 'job_revision', 'task_revision', 'event_seq', 'native_reconciliation'}
+                or any(type(marker.get(k)) is not int or marker[k] < 1
+                    for k in ('job_revision', 'task_revision', 'event_seq'))
+                or marker['attempt_id'] != attempt.get('id')
+                or type(job.get('state_revision')) is not int or type(task.get('state_revision')) is not int
+                or marker['job_revision'] != job.get('state_revision')
+                or marker['task_revision'] != task.get('state_revision')
+                or task.get('recovery_check_required') is not False
+                or attempt.get('status') not in ('closed', 'fenced')
+                or task.get('status') not in ('failed', 'blocked', 'interrupted')
+                or job.get('status') not in ('failed', 'blocked', 'interrupted')):
+            raise ValueError('native_confirmation_transition_invalid')
+        proof = marker['native_reconciliation']
+        fields = {'state_revision', 'updated_at', 'recovery_check_required', 'recovery_confirmation'}
+        if (not isinstance(proof, dict) or set(proof) != {'record_id', 'record_digest', 'record_event_seq',
+                'source_target', 'source_fields', 'task_invariants_digest'}
+                or not isinstance(proof['source_fields'], dict) or set(proof['source_fields']) != fields
+                or any(not isinstance(v, dict) or set(v) != {'present', 'value'} or type(v['present']) is not bool
+                    for v in proof['source_fields'].values())):
+            raise ValueError('native_confirmation_projection_invalid')
+        target = proof['source_target']
+        expected = {'contract_version': 1, 'action': 'reconcile_recovery', 'job_id': job['id'],
+            'task_id': task_id, 'attempt_id': attempt.get('id'), 'job_revision': job['state_revision'],
+            'task_revision': marker['task_revision'] - 1}
+        if (not isinstance(target, dict) or set(target) != set(expected) | {'state_digest'}
+                or any(target.get(k) != v for k, v in expected.items())
+                or any(type(target.get(k)) is not int for k in ('contract_version', 'job_revision', 'task_revision'))):
+            raise ValueError('native_confirmation_source_target_invalid')
+        invariants = {k:v for k,v in task.items() if k not in fields}
+        digest = hashlib.sha256(json.dumps(invariants, sort_keys=True, ensure_ascii=False,
+            separators=(',', ':')).encode()).hexdigest()
+        if proof['task_invariants_digest'] != digest:
+            raise ValueError('native_confirmation_invariants_changed')
+        source = copy.deepcopy(task)
+        for key, previous in proof['source_fields'].items():
+            if previous['present']: source[key] = copy.deepcopy(previous['value'])
+            else: source.pop(key, None)
+        if (type(source.get('state_revision')) is not int or source['state_revision'] != target['task_revision']
+                or source.get('recovery_confirmation') is not None):
+            raise ValueError('native_confirmation_projection_invalid')
+        record = self.native_reconciliation(task_id, target)
+        if (record is None or record['id'] != proof['record_id'] or record['record_digest'] != proof['record_digest']
+                or type(proof['record_event_seq']) is not int or record['event_seq'] != proof['record_event_seq']
+                or record['event_seq'] >= marker['event_seq']):
+            raise ValueError('native_confirmation_reconciliation_invalid')
+        operations = {'operations': 'none'}
+        if self.has_operation_history(job['id']):
+            operations = {'operations': 'reviewed_prior',
+                'operation_digest': self.operation_assessment(job['id'])['operation_digest']}
+        rows = self.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.type')='recovery_confirmed' "
+            "AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.task_id')=? "
+            "AND json_extract(body,'$.details.attempt_id')=? ORDER BY seq LIMIT 2",
+            (job['id'], task_id, marker['attempt_id'])).fetchall()
+        expected_details = {'attempt_id': marker['attempt_id'], 'task_revision': target['task_revision'],
+            'job_revision': marker['job_revision'], **operations, 'native_reconciliation': proof}
+        if (len(rows) != 1 or rows[0][0] != marker['event_seq']
+                or json.loads(rows[0][1]).get('details') != expected_details):
+            raise ValueError('native_confirmation_event_invalid')
+        return {'source_task': source, 'source_target': copy.deepcopy(target),
+            'confirmation_event_seq': marker['event_seq'], 'reconciliation_id': record['id']}
 
     def commit_native_scope_baseline(self, task_id, expected_task_revision, expected_job_revision, snapshot):
         """Server-only immutable primitive; the engine supplies pre-provider observations.

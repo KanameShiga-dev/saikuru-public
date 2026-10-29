@@ -545,6 +545,138 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
             self.store.update(transition['id'], synthetic_forgery=True)
         self.assertEqual(self.f.f.state(), before)
 
+    def test_malformed_previous_pointer_is_refused_after_valid_confirmation(self):
+        for value in ([], '', 'x' * 129):
+            with self.subTest(value_type=type(value).__name__, length=len(value)):
+                fixture = NativeCheckpointTransitionPrimitiveTests(); fixture.setUp()
+                try:
+                    task = fixture.store.get(fixture.task_id); task['resume_checkpoint_id'] = value
+                    # Isolated fictional SQLite fault before reconciliation/confirmation.
+                    fixture.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(task), fixture.task_id))
+                    fixture.store.db.commit()
+                    record, refs = fixture.draft(); before = fixture.f.f.state()
+                    with fixture.assertRaisesRegex(ValueError, 'native_checkpoint_previous_pointer_invalid'):
+                        fixture.store.commit_native_checkpoint(record, refs, fixture.stamp(), lambda: None)
+                    fixture.assertEqual(fixture.f.f.state(), before)
+                finally:
+                    fixture.doCleanups()
+
+    def test_transition_reader_reconstructs_exact_source_without_file_or_resume_authority(self):
+        target, source = self.confirmed()
+        draft = self.engine.collect_checkpoint(self.task_id, writer_stopped=True)
+        record, _, _, _, refs = self.engine._checkpoint_draft_inputs(draft['id'], True)
+        committed = self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        before = self.f.f.state(); basis = self.store.native_checkpoint_transition_basis(self.task_id)
+        self.assertEqual(basis['source_task'], source); self.assertEqual(basis['source_target'], target)
+        self.assertEqual(basis['transition']['id'], committed['transition']['id'])
+        self.assertEqual(basis['transition_event_seq'], committed['transition_event_seq'])
+        self.assertEqual(basis['checkpoint_ready_event_seq'], committed['checkpoint']['ready_binding']['event_seq'])
+        self.assertEqual(basis['execution_permission'], 'none'); self.assertFalse(basis['resume_allowed'])
+        self.assertEqual(self.f.f.state(), before)
+        path = self.f.f.workspace.project / 'app.py'; path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC after ready\n')
+        self.assertFalse(self.store.native_checkpoint_transition_basis(self.task_id)['resume_allowed'])
+        with self.assertRaises(ValueError): self.engine.retry(self.task_id, 'SYNTHETIC still requires binding')
+
+    def test_previous_pointer_presence_and_value_round_trip(self):
+        for present, value in ((False, None), (True, None), (True, 'SYNTHETIC-prior-checkpoint')):
+            with self.subTest(present=present, value=value):
+                fixture = NativeCheckpointTransitionPrimitiveTests(); fixture.setUp()
+                try:
+                    task = fixture.store.get(fixture.task_id)
+                    if present: task['resume_checkpoint_id'] = value
+                    else: task.pop('resume_checkpoint_id', None)
+                    fixture.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(task), fixture.task_id))
+                    fixture.store.db.commit()
+                    target, source = fixture.confirmed()
+                    draft = fixture.engine.collect_checkpoint(fixture.task_id, writer_stopped=True)
+                    record, _, _, _, refs = fixture.engine._checkpoint_draft_inputs(draft['id'], True)
+                    result = fixture.store.commit_native_checkpoint(record, refs, fixture.stamp(), lambda: None)
+                    self.assertEqual(result['transition']['previous_pointer'], {'present': present, 'value': value})
+                    basis = fixture.store.native_checkpoint_transition_basis(fixture.task_id)
+                    self.assertEqual(basis['source_task'], source); self.assertEqual(basis['source_target'], target)
+                    self.assertFalse(basis['resume_allowed'])
+                finally:
+                    fixture.doCleanups()
+
+    def test_transition_reader_refuses_corrupt_record_and_missing_or_duplicate_events(self):
+        record, refs = self.draft(); result = self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        ident = result['transition']['id']; seq = result['transition_event_seq']
+        raw = self.store.db.execute('SELECT body FROM objects WHERE id=?', (ident,)).fetchone()[0]
+        corrupted = json.loads(raw); corrupted['previous_pointer']['value'] = 'SYNTHETIC changed'
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(corrupted), ident)); self.store.db.commit()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_record_invalid'):
+            self.store.native_checkpoint_transition_basis(self.task_id)
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (raw, ident)); self.store.db.commit()
+        corrupted = json.loads(raw); corrupted['record_digest'] = '0' * 64
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(corrupted), ident)); self.store.db.commit()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_record_invalid'):
+            self.store.native_checkpoint_transition_basis(self.task_id)
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (raw, ident)); self.store.db.commit()
+        event = self.store.db.execute('SELECT body FROM events WHERE seq=?', (seq,)).fetchone()[0]
+        corrupted_event = json.loads(event); corrupted_event['details']['record_digest'] = '0' * 64
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (json.dumps(corrupted_event), seq)); self.store.db.commit()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_event_invalid'):
+            self.store.native_checkpoint_transition_basis(self.task_id)
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (event, seq)); self.store.db.commit()
+        wrong_type = json.loads(raw)
+        self.assertIs(type(wrong_type['work_package_revision']), int)
+        wrong_type['work_package_revision'] = float(wrong_type['work_package_revision'])
+        body = {k:v for k,v in wrong_type.items() if k not in ('record_digest', 'updated_at')}
+        wrong_type['record_digest'] = hashlib.sha256(json.dumps(body, sort_keys=True,
+            ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+        matching_event = json.loads(event); matching_event['details']['record_digest'] = wrong_type['record_digest']
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(wrong_type), ident))
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (json.dumps(matching_event), seq)); self.store.db.commit()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_binding_invalid'):
+            self.store.native_checkpoint_transition_basis(self.task_id)
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (raw, ident))
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (event, seq)); self.store.db.commit()
+        forged = json.loads(raw); forged['previous_pointer'] = {'present': True, 'value': 'SYNTHETIC-forged-prior'}
+        body = {k:v for k,v in forged.items() if k not in ('record_digest', 'updated_at')}
+        forged['record_digest'] = hashlib.sha256(json.dumps(body, sort_keys=True,
+            ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+        forged_event = json.loads(event); forged_event['details']['record_digest'] = forged['record_digest']
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(forged), ident))
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (json.dumps(forged_event), seq)); self.store.db.commit()
+        with self.assertRaisesRegex(ValueError, 'native_confirmation_invariants_changed'):
+            self.store.native_checkpoint_transition_basis(self.task_id)
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (raw, ident))
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (event, seq)); self.store.db.commit()
+        ready_seq = result['checkpoint']['ready_binding']['event_seq']
+        ready_body = self.store.db.execute('SELECT body FROM events WHERE seq=?', (ready_seq,)).fetchone()[0]
+        duplicate_ready = self.store.db.execute('INSERT INTO events(body) VALUES (?)', (ready_body,)).lastrowid; self.store.db.commit()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_event_invalid'):
+            self.store.native_checkpoint_transition_basis(self.task_id)
+        self.store.db.execute('DELETE FROM events WHERE seq=?', (duplicate_ready,)); self.store.db.commit()
+        self.store.db.execute('DELETE FROM events WHERE seq=?', (seq,)); self.store.db.commit()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_event_invalid'):
+            self.store.native_checkpoint_transition_basis(self.task_id)
+        self.store.db.execute('INSERT INTO events(seq,body) VALUES (?,?)', (seq, event)); self.store.db.commit()
+        self.store.db.execute('INSERT INTO events(body) VALUES (?)', (event,)); self.store.db.commit()
+        before = self.f.f.state()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_event_invalid'):
+            self.store.native_checkpoint_transition_basis(self.task_id)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_legacy_ready_checkpoint_has_no_native_transition_provenance(self):
+        self.confirmed(); draft = self.engine.collect_checkpoint(self.task_id, writer_stopped=True)
+        with patch.object(self.store, 'native_checkpoint_requires_transition', return_value=False):
+            self.engine.finalize_checkpoint(draft['id'], writer_stopped=True)
+        before = self.f.f.state()
+        with self.assertRaisesRegex(ValueError, 'native_checkpoint_transition_missing'):
+            self.store.native_checkpoint_transition_basis(self.task_id)
+        self.assertEqual(self.f.f.state(), before)
+
+    def test_transition_reader_refuses_worker_and_current_version_change(self):
+        record, refs = self.draft(); self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        with patch.object(self.store._worker, 'task', self.store.get(self.task_id), create=True):
+            with self.assertRaisesRegex(ValueError, 'worker_cannot_read_native_checkpoint_transition'):
+                self.store.native_checkpoint_transition_basis(self.task_id)
+        self.store.update(self.task_id, synthetic_after_checkpoint=True)
+        before = self.f.f.state()
+        with self.assertRaises(ValueError): self.store.native_checkpoint_transition_basis(self.task_id)
+        self.assertEqual(self.f.f.state(), before)
+
 
 class NativeReconciliationStoreGuardTests(unittest.TestCase):
     setUp = NativeConfirmationTests.setUp
