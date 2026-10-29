@@ -734,7 +734,8 @@ class Handler(BaseHTTPRequestHandler):
                     if action == 'confirm_recovery':
                         result = workflow_call(lambda:engine.confirm_recovery(task['id'],target['task_revision'],
                             target['job_revision'],target['attempt_id'],writer_stopped=body['writer_stopped'],
-                            checked_changes=body['checked_changes'],workflow_target=target))
+                            checked_changes=body['checked_changes'],workflow_target=target,
+                            actor='authenticated_maintenance_session'))
                     else:
                         if body['checked_changes'] is not True or type(body['handoff_allowed']) is not bool:
                             raise WorkflowRequestError('workflow_control_confirmation_required')

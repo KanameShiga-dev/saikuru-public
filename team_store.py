@@ -426,6 +426,8 @@ class Store:
 
     def confirm_recovery(self, task_id, task_revision, job_revision, attempt_id, *, prior_operation_check=None):
         """Internal CAS for authenticated maintenance service; never queues work."""
+        if getattr(self._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_confirm_recovery')
         with self.atomic():
             task = self.get(task_id, 'task')
             job = self.get(task['job_id'], 'job')
@@ -447,8 +449,18 @@ class Store:
                         or len(proof['reviewed_prior_operations']) != len(proof.get('result_observed') or [])):
                     raise ValueError('操作の作用が未照合です。この経路では再開できません。')
                 operations = {'operations': 'reviewed_prior', 'operation_digest': proof['operation_digest']}
+            native_started = bool(task.get('agent_run') or task.get('agent_run_id') or any(
+                run.get('task_id') == task_id or run.get('attempt_id') == attempt_id
+                for run in self.for_job('agent_run', job['id'])))
+            native = getattr(self._worker, 'native_confirmation_commit', None)
+            if native_started and (not isinstance(native, dict) or native.get('source_target', {}).get('task_id') != task_id
+                    or native.get('source_target', {}).get('attempt_id') != attempt_id):
+                raise ValueError('native_confirmation_requires_verified_reconciliation')
             marker = {'attempt_id': attempt_id, 'job_revision': job_revision,
                       'task_revision': task_revision + 1}
+            if native_started:
+                marker['native_reconciliation'] = copy.deepcopy(native)
+                operations = dict(operations, native_reconciliation=copy.deepcopy(native))
             marker['event_seq'] = self.event('recovery_confirmed', '保守用経路で作業停止の確認を記録しました。',
                 task_id, job['id'], details={'attempt_id': attempt_id, 'task_revision': task_revision,
                                            'job_revision': job_revision, **operations})
@@ -458,6 +470,38 @@ class Store:
                 return self.update(task_id, recovery_check_required=False, recovery_confirmation=marker)
             finally:
                 self._worker.recovery_commit = previous
+
+    def confirm_native_recovery(self, task_id, task_revision, job_revision, attempt_id, target,
+                                database_stamp, assert_process, prior_operation_proof=None):
+        """Server-only native confirmation transition; no retry/session permission."""
+        if getattr(self._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_confirm_native_recovery')
+        with self.atomic():
+            if (self.db.total_changes, self.db.execute('PRAGMA data_version').fetchone()[0]) != database_stamp:
+                raise StaleAttempt('workflow_native_confirmation_changed')
+            assert_process()  # Metadata only; Engine performed file observations outside this txn.
+            task = self.get(task_id, 'task'); job = self.get(task['job_id'], 'job')
+            if (not isinstance(target, dict) or target.get('task_id') != task_id
+                    or target.get('job_id') != job['id'] or target.get('attempt_id') != attempt_id
+                    or target.get('task_revision') != task_revision or target.get('job_revision') != job_revision
+                    or task.get('state_revision') != task_revision or job.get('state_revision') != job_revision
+                    or task.get('recovery_confirmation') is not None):
+                raise StaleAttempt('workflow_native_confirmation_changed')
+            record = self.native_reconciliation(task_id, target)
+            if record is None: raise ValueError('workflow_native_reconciliation_required')
+            fields = ('state_revision', 'updated_at', 'recovery_check_required', 'recovery_confirmation')
+            proof = {'record_id': record['id'], 'record_digest': record['record_digest'],
+                'record_event_seq': record['event_seq'], 'source_target': copy.deepcopy(target),
+                'source_fields': {key: {'present': key in task, 'value': copy.deepcopy(task.get(key))} for key in fields},
+                'task_invariants_digest': hashlib.sha256(json.dumps({k:v for k,v in task.items() if k not in fields},
+                    sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()}
+            previous = getattr(self._worker, 'native_confirmation_commit', None)
+            self._worker.native_confirmation_commit = proof
+            try:
+                return self.confirm_recovery(task_id, task_revision, job_revision, attempt_id,
+                    prior_operation_check=lambda: prior_operation_proof)
+            finally:
+                self._worker.native_confirmation_commit = previous
 
     def commit_native_scope_baseline(self, task_id, expected_task_revision, expected_job_revision, snapshot):
         """Server-only immutable primitive; the engine supplies pre-provider observations.

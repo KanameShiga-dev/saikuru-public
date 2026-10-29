@@ -6262,10 +6262,16 @@ class Engine:
         return task, job, bootstrap
 
     def confirm_recovery(self, task_id, task_revision, job_revision, attempt_id, *, writer_stopped=False, checked_changes=False,
-                         workflow_target=None):
+                         workflow_target=None, actor=None):
         """Authenticated maintenance service only; caller proof is not UI receipt."""
         if writer_stopped is not True or checked_changes is not True:
             raise ValueError('担当の停止と現在の変更を確認してください。')
+        current = self.store.get(task_id, 'task')
+        if current.get('agent_run') or current.get('agent_run_id') or any(
+                run.get('task_id') == task_id or run.get('attempt_id') == attempt_id
+                for run in self.store.for_job('agent_run', current['job_id'])):
+            return self._confirm_native_recovery(task_id, task_revision, job_revision, attempt_id,
+                workflow_target=workflow_target, actor=actor)
         with self._checkpoint_project(task_id):
             with self.store.atomic():
                 if workflow_target is not None:
@@ -6277,6 +6283,39 @@ class Engine:
                         self.store.get(task_id, 'task'), self.store.get(job['id'], 'job')))
             return {'confirmed': True, 'task_id': task_id, 'task_revision': task['state_revision'],
                     'queued': False, 'resume_allowed': False, 'next_action': 'manual_retry_after_checkpoint_verification'}
+
+    def _confirm_native_recovery(self, task_id, task_revision, job_revision, attempt_id, *, workflow_target=None, actor=None):
+        if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
+            raise ValueError('workflow_maintenance_action_required')
+        with self._checkpoint_project(task_id):
+            with self.store.lock:
+                stamp = self._native_assessment_stamp()
+                if workflow_target is not None:
+                    self._validate_workflow_control_target(workflow_target,
+                        self.store.get(task_id, 'task')['job_id'], 'confirm_recovery', task_id)
+            first = self.native_recovery_assessment(task_id, actor=actor)
+            second = self.native_recovery_assessment(task_id, actor=actor)
+            if (not first['eligible_for_reconciliation'] or not second['eligible_for_reconciliation']
+                    or not first['reconciliation_recorded'] or not second['reconciliation_recorded']
+                    or first['target'] != second['target']):
+                raise ValueError('workflow_native_reconciliation_required')
+            task, job, _ = self._recovery_control_inputs(task_id, allow_native_assessment=True)
+            target = second['target']
+            if (type(task_revision) is not int or type(job_revision) is not int
+                    or target['task_revision'] != task_revision or target['job_revision'] != job_revision
+                    or target['attempt_id'] != attempt_id):
+                raise ValueError('workflow_native_confirmation_changed')
+            prior = self._reviewed_operation_basis(task, job) if self.store.has_operation_history(job['id']) else None
+            def validate_process():
+                if self._native_assessment_stamp() != stamp or not self._native_maintenance_idle():
+                    raise ValueError('workflow_native_confirmation_changed')
+                if workflow_target is not None:
+                    self._validate_workflow_control_target(workflow_target, job['id'], 'confirm_recovery', task_id)
+            confirmed = self.store.confirm_native_recovery(task_id, task_revision, job_revision, attempt_id,
+                target, stamp[:2], validate_process, prior)
+        return {'confirmed': True, 'task_id': task_id, 'task_revision': confirmed['state_revision'],
+            'queued': False, 'resume_allowed': False, 'next_action': 'native_checkpoint_binding_required',
+            'native_reconciliation_id': confirmed['recovery_confirmation']['native_reconciliation']['record_id']}
 
     def _recovery_retry_binding(self, task_id):
         task, job, bootstrap = self._recovery_control_inputs(task_id)
