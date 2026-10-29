@@ -6,6 +6,27 @@ import unittest
 from unittest.mock import patch
 
 
+class LegacyConfirmationWorkerGuardTests(unittest.TestCase):
+    def test_non_native_worker_cannot_use_legacy_store_confirmation(self):
+        from tests.test_recovery_controls import RecoveryControlTests
+        fixture = RecoveryControlTests(); self.addCleanup(fixture.doCleanups); fixture.setUp()
+        store = fixture.store; task = store.get(fixture.task['id']); job = store.get(fixture.job['id'])
+        attempt_id = task['current_attempt']['id']
+        self.assertFalse(task.get('agent_run')); self.assertFalse(task.get('agent_run_id'))
+        self.assertEqual(store.for_job('agent_run', job['id']), [])
+        before = store.get(task['id']); events = store.job_events(job['id'], 'recovery_confirmed')
+        with patch.object(store._worker, 'task', task, create=True):
+            with self.assertRaisesRegex(ValueError, '^worker_cannot_confirm_recovery$'):
+                store.confirm_recovery(task['id'], task['state_revision'], job['state_revision'], attempt_id)
+        self.assertEqual(store.get(task['id']), before)
+        self.assertEqual(store.job_events(job['id'], 'recovery_confirmed'), events)
+        # The same valid arguments succeed outside the worker scope, proving
+        # refusal above was not caused by an unrelated fixture precondition.
+        confirmed = store.confirm_recovery(task['id'], task['state_revision'], job['state_revision'], attempt_id)
+        self.assertFalse(confirmed['recovery_check_required'])
+        self.assertEqual(confirmed['state_revision'], task['state_revision'] + 1)
+
+
 class NativeConfirmationTests(unittest.TestCase):
     def setUp(self):
         from tests.test_p0_integration import NativeReconciliationTests
@@ -139,6 +160,39 @@ class NativeConfirmationTests(unittest.TestCase):
         self.assertEqual(self.f.f.state(), before)
         self.assertIsNone(getattr(self.store._worker, 'native_confirmation_commit', None))
         self.assertIsNone(getattr(self.store._worker, 'recovery_commit', None))
+
+    def test_process_only_change_before_confirmation_cas_is_refused(self):
+        from types import SimpleNamespace
+        self.reconcile(); body = self.confirmation_body()
+        confirm = self.store.confirm_native_recovery
+        original_roots = list(self.engine.config['approved_roots'])
+        for change in ('approved_roots', 'active'):
+            with self.subTest(change=change):
+                before = self.f.f.state(); seen = []
+                def changed(*args, **kwargs):
+                    stamp = (self.store.db.total_changes,
+                        self.store.db.execute('PRAGMA data_version').fetchone()[0])
+                    if change == 'approved_roots':
+                        self.engine.config['approved_roots'] = []
+                    else:
+                        self.engine.active['SYNTHETIC-process-only'] = SimpleNamespace(project='SYNTHETIC-project')
+                    self.assertEqual(stamp, (self.store.db.total_changes,
+                        self.store.db.execute('PRAGMA data_version').fetchone()[0]))
+                    seen.append(change)
+                    return confirm(*args, **kwargs)
+                try:
+                    with patch.object(self.store, 'confirm_native_recovery', side_effect=changed):
+                        code, result = self.confirm(body)
+                    self.assertEqual(code, 400, result)
+                    self.assertIn('workflow_native_confirmation_changed', str(result))
+                    self.assertEqual(seen, [change])
+                    self.assertEqual(self.f.f.state(), before)
+                    self.assertTrue(self.store.get(self.task_id)['recovery_check_required'])
+                    self.assertIsNone(self.store.get(self.task_id).get('recovery_confirmation'))
+                    self.assertEqual(self.store.job_events(self.job_id, 'recovery_confirmed'), [])
+                finally:
+                    self.engine.config['approved_roots'] = list(original_roots)
+                    self.engine.active.pop('SYNTHETIC-process-only', None)
 
     def test_replay_cannot_replace_the_confirmed_transition(self):
         self.reconcile(); body = self.confirmation_body(); self.assertEqual(self.confirm(body)[0], 200)
