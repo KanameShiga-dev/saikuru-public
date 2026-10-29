@@ -309,6 +309,36 @@ class NativeConfirmedAssessmentTests(unittest.TestCase):
         result = self.inspect(); self.assertFalse(result['fresh_for_checkpoint_binding'])
         self.assertIsNone(result['confirmed_target']); self.assertEqual(self.f.f.state(), before)
 
+    def test_matched_marker_and_event_cannot_forge_reconciliation_reference(self):
+        self.confirmed(); original = self.store.get(self.task_id)
+        seq = original['recovery_confirmation']['event_seq']
+        event_body = self.store.db.execute('SELECT body FROM events WHERE seq=?', (seq,)).fetchone()[0]
+        event = json.loads(event_body)
+        for field, value in (('record_id', 'native-reconciliation-synthetic-forgery'),
+                             ('record_digest', '0' * 64), ('record_event_seq', 1)):
+            with self.subTest(field=field):
+                task = copy.deepcopy(original); changed_event = copy.deepcopy(event)
+                task['recovery_confirmation']['native_reconciliation'][field] = value
+                changed_event['details']['native_reconciliation'][field] = value
+                # Fault injection in the isolated fictional SQLite only.
+                self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(task), self.task_id))
+                self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (json.dumps(changed_event), seq))
+                self.store.db.commit()
+                try:
+                    before = self.f.f.state()
+                    with self.assertRaisesRegex(ValueError, 'native_confirmation_reconciliation_invalid'):
+                        self.store.native_confirmation_basis(self.task_id)
+                    result = self.inspect()
+                    self.assertFalse(result['fresh_for_checkpoint_binding'])
+                    self.assertIsNone(result['confirmed_target'])
+                    self.assertEqual(result['execution_permission'], 'none')
+                    self.assertEqual(self.f.f.state(), before)
+                finally:
+                    self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(original), self.task_id))
+                    self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (event_body, seq))
+                    self.store.db.commit()
+        self.assertTrue(self.inspect()['fresh_for_checkpoint_binding'])
+
     def test_worker_actor_and_outer_transaction_are_refused(self):
         self.confirmed(); before = self.f.f.state()
         with self.assertRaises(ValueError): self.engine.native_confirmed_recovery_assessment(self.task_id)
