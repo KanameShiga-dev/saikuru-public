@@ -482,6 +482,8 @@ class Store:
             assert_process()  # Metadata only; Engine performed file observations outside this txn.
             task = self.get(task_id, 'task'); job = self.get(task['job_id'], 'job')
             if (not isinstance(target, dict) or target.get('task_id') != task_id
+                    or type(target.get('contract_version')) is not int or target.get('contract_version') != 1
+                    or any(type(target.get(k)) is not int for k in ('task_revision', 'job_revision'))
                     or target.get('job_id') != job['id'] or target.get('attempt_id') != attempt_id
                     or target.get('task_revision') != task_revision or target.get('job_revision') != job_revision
                     or task.get('state_revision') != task_revision or job.get('state_revision') != job_revision

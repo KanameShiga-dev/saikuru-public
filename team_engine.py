@@ -6049,6 +6049,10 @@ class Engine:
                 result['eligible_for_reconciliation'] = False
                 result['reasons'] = sorted(set(result['reasons'] + ['native_maintenance_idle_required']))
                 result['target'] = None
+            if (self.store.get(task_id, 'task').get('recovery_confirmation') or {}).get('native_reconciliation'):
+                result['eligible_for_reconciliation'] = False
+                result['reasons'] = sorted(set(result['reasons'] + ['native_confirmation_binding_required']))
+                result['target'] = None
             if result['eligible_for_reconciliation']:
                 try:
                     result['reconciliation_recorded'] = self.store.native_reconciliation(task_id, result['target']) is not None
@@ -6217,8 +6221,11 @@ class Engine:
             def validate_process():
                 if self._native_assessment_stamp() != stamp or not self._native_maintenance_idle():
                     raise ValueError('workflow_native_reconciliation_changed')
-            record = self.store.commit_native_reconciliation(task_id, target, second['summary'], note.strip(),
-                stamp[:2], validate_process)
+            try:
+                record = self.store.commit_native_reconciliation(task_id, target, second['summary'], note.strip(),
+                    stamp[:2], validate_process)
+            except StaleAttempt:
+                raise ValueError('workflow_native_reconciliation_changed') from None
         return {'recorded': True, 'reconciliation_id': record['id'], 'task_id': task_id,
                 'queued': False, 'resume_allowed': False, 'execution_permission': 'none'}
 
