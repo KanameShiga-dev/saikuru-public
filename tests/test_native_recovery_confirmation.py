@@ -677,6 +677,46 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.store.native_checkpoint_transition_basis(self.task_id)
         self.assertEqual(self.f.f.state(), before)
 
+    def test_transition_reader_rejects_coordinated_record_and_event_forgery(self):
+        record, refs = self.draft()
+        result = self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        ident = result['transition']['id']; seq = result['transition_event_seq']
+        raw = self.store.db.execute('SELECT body FROM objects WHERE id=?', (ident,)).fetchone()[0]
+        event = self.store.db.execute('SELECT body FROM events WHERE seq=?', (seq,)).fetchone()[0]
+        for field, value in (('checkpoint_id', 'SYNTHETIC-forged'), ('ready_event_seq', 999999),
+                             ('job_revision', 999999), ('plan_approval_id', 'SYNTHETIC-forged'),
+                             ('requirement_revision', True), ('extra_field', 'SYNTHETIC')):
+            with self.subTest(field=field):
+                forged = json.loads(raw); forged[field] = value
+                body = {k: v for k, v in forged.items() if k not in ('record_digest', 'updated_at')}
+                forged['record_digest'] = hashlib.sha256(json.dumps(body, sort_keys=True,
+                    ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+                matching = json.loads(event); matching['details']['record_digest'] = forged['record_digest']
+                for key in ('checkpoint_id', 'ready_event_seq'):
+                    matching['details'][key] = forged[key]
+                self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(forged), ident))
+                self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (json.dumps(matching), seq))
+                self.store.db.commit()
+                with self.assertRaises(ValueError):
+                    self.store.native_checkpoint_transition_basis(self.task_id)
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (raw, ident))
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (event, seq)); self.store.db.commit()
+        self.assertFalse(self.store.native_checkpoint_transition_basis(self.task_id)['resume_allowed'])
+
+    def test_native_checkpoint_writer_rejects_invalid_job_revision_types(self):
+        record, refs = self.draft(); job_id = self.store.get(self.task_id)['job_id']
+        raw = self.store.db.execute('SELECT body FROM objects WHERE id=?', (job_id,)).fetchone()[0]
+        for field, value in (('requirement_revision', None), ('requirement_revision', True),
+                             ('plan_revision', None), ('plan_revision', 0), ('plan_revision', 1.0)):
+            with self.subTest(field=field, value=value):
+                job = json.loads(raw); job[field] = value
+                self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(job), job_id)); self.store.db.commit()
+                before = self.f.f.state()
+                with self.assertRaisesRegex(ValueError, 'native_checkpoint_revision_invalid'):
+                    self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+                self.assertEqual(self.f.f.state(), before)
+        self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (raw, job_id)); self.store.db.commit()
+
 
 class NativeReconciliationStoreGuardTests(unittest.TestCase):
     setUp = NativeConfirmationTests.setUp

@@ -360,6 +360,9 @@ class Store:
             task = self.get(record['task_id'], 'task'); job = self.get(task['job_id'], 'job')
             if not self.native_checkpoint_requires_transition(task):
                 raise ValueError('native_checkpoint_confirmation_required')
+            if any(type(job.get(key)) is not int or job[key] < 1
+                   for key in ('requirement_revision', 'plan_revision')):
+                raise ValueError('native_checkpoint_revision_invalid')
             basis = self.native_confirmation_basis(task['id'])
             marker = task['recovery_confirmation']; target = basis['source_target']
             if self.db.execute("SELECT 1 FROM events WHERE seq>? AND json_extract(body,'$.job_id')=? "
