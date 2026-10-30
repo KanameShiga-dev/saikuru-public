@@ -577,6 +577,44 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         self.assertFalse(self.store.native_checkpoint_transition_basis(self.task_id)['resume_allowed'])
         with self.assertRaises(ValueError): self.engine.retry(self.task_id, 'SYNTHETIC still requires binding')
 
+    def test_transition_source_observation_is_fresh_but_grants_no_authority(self):
+        record, refs = self.draft()
+        self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        actor = 'authenticated_maintenance_session'
+        before = self.f.f.state()
+        result = self.engine.native_transition_source_observation(self.task_id, actor=actor)
+        self.assertTrue(result['source_unchanged'], result['reasons'])
+        self.assertEqual(result['execution_permission'], 'none'); self.assertFalse(result['resume_allowed'])
+        self.assertEqual(self.f.f.state(), before)
+        with self.assertRaisesRegex(ValueError, 'workflow_maintenance_action_required'):
+            self.engine.native_transition_source_observation(self.task_id)
+        path = self.f.f.workspace.project / 'app.py'
+        path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC after transition\n')
+        changed = self.engine.native_transition_source_observation(self.task_id, actor=actor)
+        self.assertFalse(changed['source_unchanged']); self.assertFalse(changed['resume_allowed'])
+
+    def test_transition_source_observation_denies_extra_history_and_races(self):
+        record, refs = self.draft()
+        self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        actor = 'authenticated_maintenance_session'
+        with patch.object(self.engine, '_native_maintenance_idle', return_value=False):
+            result = self.engine.native_transition_source_observation(self.task_id, actor=actor)
+        self.assertFalse(result['source_unchanged'])
+        self.assertIn('native_transition_observation_changed', result['reasons'])
+        observe = self.engine._native_recovery_observation
+        def concurrent_write(*args, **kwargs):
+            result = observe(*args, **kwargs)
+            self.store.event('checkpoint_handoff_pending', 'SYNTHETIC race and pending receipt', self.task_id, self.job_id,
+                             details={'checkpoint_id': record['id']})
+            return result
+        with patch.object(self.engine, '_native_recovery_observation', side_effect=concurrent_write):
+            result = self.engine.native_transition_source_observation(self.task_id, actor=actor)
+        self.assertFalse(result['source_unchanged'])
+        self.assertIn('native_transition_observation_changed', result['reasons'])
+        result = self.engine.native_transition_source_observation(self.task_id, actor=actor)
+        self.assertFalse(result['source_unchanged']); self.assertFalse(result['resume_allowed'])
+        self.assertIn('native_confirmation_source_changed', result['reasons'])
+
     def test_previous_pointer_presence_and_value_round_trip(self):
         for present, value in ((False, None), (True, None), (True, 'SYNTHETIC-prior-checkpoint')):
             with self.subTest(present=present, value=value):
@@ -697,7 +735,9 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
                 self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (json.dumps(forged), ident))
                 self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (json.dumps(matching), seq))
                 self.store.db.commit()
-                with self.assertRaises(ValueError):
+                reason = ('native_checkpoint_transition_record_invalid' if field == 'extra_field'
+                          else 'native_checkpoint_transition_binding_invalid')
+                with self.assertRaisesRegex(ValueError, reason):
                     self.store.native_checkpoint_transition_basis(self.task_id)
         self.store.db.execute('UPDATE objects SET body=? WHERE id=?', (raw, ident))
         self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (event, seq)); self.store.db.commit()

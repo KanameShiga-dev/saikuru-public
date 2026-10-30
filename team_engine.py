@@ -6097,7 +6097,29 @@ class Engine:
                 result['reasons'] = sorted(set(result['reasons'] + ['native_confirmation_observation_changed']))
         return result
 
-    def _native_recovery_observation(self, task_id, *, confirmed=False):
+    def native_transition_source_observation(self, task_id, *, actor=None):
+        """Observe source freshness after a canonical transition; no resume authority."""
+        if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
+            raise ValueError('workflow_maintenance_action_required')
+        with self.store.lock:
+            if self.store.depth:
+                raise ValueError('native_observation_requires_unlocked_transaction')
+            stamp = self._native_assessment_stamp()
+        result = {'contract_version': 1, 'source_unchanged': False, 'reasons': [],
+                  'execution_permission': 'none', 'resume_allowed': False}
+        try:
+            observation = self._native_recovery_observation(task_id, transition=True)
+            result['source_unchanged'] = observation['eligible_for_reconciliation']
+            result['reasons'] = observation['reasons']
+        except (ValueError, KeyError, TypeError):
+            result['reasons'] = ['native_transition_basis_unresolved']
+        with self.store.lock:
+            if self._native_assessment_stamp() != stamp or not self._native_maintenance_idle():
+                result['source_unchanged'] = False
+                result['reasons'] = sorted(set(result['reasons'] + ['native_transition_observation_changed']))
+        return result
+
+    def _native_recovery_observation(self, task_id, *, confirmed=False, transition=False):
         # Metadata reads take their own short Store locks. Git, file hashing and
         # prior-artifact validation run without an outer Store lock. Any DB write
         # across this interval invalidates the public assessment, even a rollback
@@ -6105,7 +6127,10 @@ class Engine:
         from team_wbs import scope_file_observation
         from team_p0_contract import checkpoint_scope
         from team_harness import workspace_identity
-        basis = self.store.native_confirmation_basis(task_id) if confirmed else None
+        if confirmed and transition:
+            raise ValueError('native_observation_basis_ambiguous')
+        basis = (self.store.native_checkpoint_transition_basis(task_id) if transition else
+                 self.store.native_confirmation_basis(task_id) if confirmed else None)
         task = basis['source_task'] if basis else self.store.get(task_id, 'task')
         job = self.store.get(task['job_id'], 'job')
         attempt = task.get('current_attempt') or {}; reasons = []
@@ -6155,7 +6180,10 @@ class Engine:
                 "AND COALESCE(json_extract(body,'$.type'),'')!='recovery_effects_reconciled' ORDER BY seq LIMIT 1001",
                 (job['id'], task_id, start_seq)).fetchall()
         if basis:
-            rows = [row for row in rows if row[0] != basis['confirmation_event_seq']]
+            excluded = {basis['confirmation_event_seq']}
+            if transition:
+                excluded.update((basis['checkpoint_ready_event_seq'], basis['transition_event_seq']))
+            rows = [row for row in rows if row[0] not in excluded]
         if len(rows) > 1000: reasons.append('native_attempt_history_unresolved')
         events = [json.loads(body) for _, body in rows]
         closes = [e for e in events if e.get('type') == 'attempt_closed'
