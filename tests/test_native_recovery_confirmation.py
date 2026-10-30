@@ -588,6 +588,12 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         self.assertEqual(self.f.f.state(), before)
         with self.assertRaisesRegex(ValueError, 'workflow_maintenance_action_required'):
             self.engine.native_transition_source_observation(self.task_id)
+        with patch.object(self.store._worker, 'task', self.store.get(self.task_id), create=True):
+            with self.assertRaisesRegex(ValueError, 'workflow_maintenance_action_required'):
+                self.engine.native_transition_source_observation(self.task_id, actor=actor)
+        with self.store.atomic():
+            with self.assertRaisesRegex(ValueError, 'native_observation_requires_unlocked_transaction'):
+                self.engine.native_transition_source_observation(self.task_id, actor=actor)
         path = self.f.f.workspace.project / 'app.py'
         path.write_bytes(path.read_bytes() + b'\n# SYNTHETIC after transition\n')
         changed = self.engine.native_transition_source_observation(self.task_id, actor=actor)
@@ -614,6 +620,56 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         result = self.engine.native_transition_source_observation(self.task_id, actor=actor)
         self.assertFalse(result['source_unchanged']); self.assertFalse(result['resume_allowed'])
         self.assertIn('native_confirmation_source_changed', result['reasons'])
+
+    def test_transition_handoff_observation_requires_exact_receipt_and_clean_history(self):
+        record, refs = self.draft()
+        self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        actor = 'authenticated_maintenance_session'
+        before = self.f.f.state()
+        missing = self.engine.native_transition_handoff_observation(self.task_id, actor=actor)
+        self.assertFalse(missing['receipt_verified']); self.assertFalse(missing['resume_allowed'])
+        self.assertEqual(self.f.f.state(), before)
+        with self.assertRaisesRegex(ValueError, 'workflow_maintenance_action_required'):
+            self.engine.native_transition_handoff_observation(self.task_id)
+        with patch.object(self.store._worker, 'task', self.store.get(self.task_id), create=True):
+            with self.assertRaisesRegex(ValueError, 'workflow_maintenance_action_required'):
+                self.engine.native_transition_handoff_observation(self.task_id, actor=actor)
+        with self.store.atomic():
+            with self.assertRaisesRegex(ValueError, 'native_observation_requires_unlocked_transaction'):
+                self.engine.native_transition_handoff_observation(self.task_id, actor=actor)
+        self.assertTrue(self.engine.resync_checkpoint(record['id'])['handoff_synced'])
+        before = self.f.f.state()
+        valid = self.engine.native_transition_handoff_observation(self.task_id, actor=actor)
+        self.assertTrue(valid['receipt_verified'], valid['reasons'])
+        self.assertEqual(valid['execution_permission'], 'none'); self.assertFalse(valid['resume_allowed'])
+        self.assertEqual(self.f.f.state(), before)
+        read_receipt = self.engine.handoff.checkpoint_receipt
+        def concurrent_receipt_write(*args, **kwargs):
+            found = read_receipt(*args, **kwargs)
+            self.engine.handoff.db.execute("UPDATE records SET payload=payload WHERE kind='checkpoint_ready'")
+            self.engine.handoff.db.commit()
+            return found
+        with patch.object(self.engine.handoff, 'checkpoint_receipt', side_effect=concurrent_receipt_write):
+            raced = self.engine.native_transition_handoff_observation(self.task_id, actor=actor)
+        self.assertFalse(raced['receipt_verified'])
+        self.assertIn('native_handoff_observation_changed', raced['reasons'])
+        receipt = self.engine.handoff.db.execute("SELECT source_id,payload FROM records WHERE kind='checkpoint_ready'").fetchone()
+        forged = json.loads(receipt[1]); forged['manifest_digest'] = '0' * 64
+        self.engine.handoff.db.execute('UPDATE records SET payload=? WHERE source_id=?', (json.dumps(forged), receipt[0]))
+        self.engine.handoff.db.commit()
+        self.assertFalse(self.engine.native_transition_handoff_observation(self.task_id, actor=actor)['receipt_verified'])
+        self.engine.handoff.db.execute('UPDATE records SET payload=? WHERE source_id=?', (receipt[1], receipt[0]))
+        self.engine.handoff.db.commit()
+        synced = self.store.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.type')='checkpoint_handoff_synced' AND json_extract(body,'$.task_id')=?", (self.task_id,)).fetchone()
+        forged_event = json.loads(synced[1]); forged_event['details']['ready_event_seq'] += 1
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (json.dumps(forged_event), synced[0])); self.store.db.commit()
+        self.assertFalse(self.engine.native_transition_handoff_observation(self.task_id, actor=actor)['receipt_verified'])
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (synced[1], synced[0])); self.store.db.commit()
+        with patch.object(self.engine, '_native_maintenance_idle', return_value=False):
+            self.assertFalse(self.engine.native_transition_handoff_observation(self.task_id, actor=actor)['receipt_verified'])
+        self.store.event('checkpoint_handoff_pending', 'SYNTHETIC retained failure', self.task_id, self.job_id,
+                         details={'checkpoint_id': record['id']})
+        self.assertFalse(self.engine.native_transition_handoff_observation(self.task_id, actor=actor)['receipt_verified'])
 
     def test_previous_pointer_presence_and_value_round_trip(self):
         for present, value in ((False, None), (True, None), (True, 'SYNTHETIC-prior-checkpoint')):

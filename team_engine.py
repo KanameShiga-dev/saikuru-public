@@ -6097,6 +6097,42 @@ class Engine:
                 result['reasons'] = sorted(set(result['reasons'] + ['native_confirmation_observation_changed']))
         return result
 
+    def native_transition_handoff_observation(self, task_id, *, actor=None):
+        """Read a canonical derived receipt and its exact event; never authorize resume."""
+        if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
+            raise ValueError('workflow_maintenance_action_required')
+        result = {'contract_version': 1, 'receipt_verified': False, 'reasons': [],
+                  'execution_permission': 'none', 'resume_allowed': False}
+        with self.store.lock, self.handoff.lock:
+            if self.store.depth or self.handoff.db.in_transaction:
+                raise ValueError('native_observation_requires_unlocked_transaction')
+            store_stamp = self._native_assessment_stamp()
+            handoff_stamp = (self.handoff.db.total_changes,
+                self.handoff.db.execute('PRAGMA data_version').fetchone()[0])
+            try:
+                basis = self.store.native_checkpoint_transition_basis(task_id)
+                record, ready_event = self.store.checkpoint_binding(basis['checkpoint']['id'])
+                job = self.store.get(record['job_id'], 'job')
+                receipt = self.handoff.checkpoint_receipt(job['project'], record, ready_event)
+                rows = self.store.db.execute("SELECT seq,body FROM events WHERE seq>? "
+                    "AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.task_id')=? "
+                    "ORDER BY seq LIMIT 2", (basis['transition_event_seq'], job['id'], task_id)).fetchall()
+                event = json.loads(rows[0][1]) if len(rows) == 1 else {}
+                expected = {'checkpoint_id': record['id'], 'ready_event_seq': ready_event['seq']}
+                if (receipt and len(rows) == 1 and event.get('type') == 'checkpoint_handoff_synced'
+                        and event.get('job_id') == job['id'] and event.get('task_id') == task_id
+                        and event.get('details') == expected):
+                    result['receipt_verified'] = True
+                else:
+                    result['reasons'] = ['native_handoff_receipt_or_history_unresolved']
+            except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
+                result['reasons'] = ['native_handoff_receipt_or_history_unresolved']
+            if (self._native_assessment_stamp() != store_stamp or not self._native_maintenance_idle()
+                    or (self.handoff.db.total_changes, self.handoff.db.execute('PRAGMA data_version').fetchone()[0]) != handoff_stamp):
+                result['receipt_verified'] = False
+                result['reasons'] = sorted(set(result['reasons'] + ['native_handoff_observation_changed']))
+        return result
+
     def native_transition_source_observation(self, task_id, *, actor=None):
         """Observe source freshness after a canonical transition; no resume authority."""
         if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
