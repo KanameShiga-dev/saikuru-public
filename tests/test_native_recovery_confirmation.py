@@ -782,6 +782,21 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
             finally:
                 self.engine.handoff.db.rollback()
 
+    def test_transition_observation_only_excludes_canonical_reconciliation_event(self):
+        record, refs = self.draft()
+        self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        actor = 'authenticated_maintenance_session'
+        self.assertTrue(self.engine.native_transition_source_observation(self.task_id, actor=actor)['source_unchanged'])
+        proof = self.store.get(self.task_id)['recovery_confirmation']['native_reconciliation']
+        raw = self.store.db.execute('SELECT body FROM events WHERE seq=?', (proof['record_event_seq'],)).fetchone()[0]
+        extra = json.loads(raw); extra['details']['reconciliation_id'] = 'SYNTHETIC-other-generation'
+        self.store.db.execute('INSERT INTO events(body) VALUES (?)', (json.dumps(extra),)); self.store.db.commit()
+        before = self.f.f.state()
+        result = self.engine.native_transition_source_observation(self.task_id, actor=actor)
+        self.assertFalse(result['source_unchanged']); self.assertFalse(result['resume_allowed'])
+        self.assertIn('native_confirmation_source_changed', result['reasons'])
+        self.assertEqual(self.f.f.state(), before)
+
     def test_previous_pointer_presence_and_value_round_trip(self):
         for present, value in ((False, None), (True, None), (True, 'SYNTHETIC-prior-checkpoint')):
             with self.subTest(present=present, value=value):

@@ -6255,11 +6255,16 @@ class Engine:
         with self.store.lock:
             rows = self.store.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.job_id')=? "
                 "AND json_extract(body,'$.task_id')=? AND seq>=? "
-                "AND COALESCE(json_extract(body,'$.type'),'')!='recovery_effects_reconciled' ORDER BY seq LIMIT 1001",
-                (job['id'], task_id, start_seq)).fetchall()
+                "AND (?=1 OR COALESCE(json_extract(body,'$.type'),'')!='recovery_effects_reconciled') ORDER BY seq LIMIT 1001",
+                (job['id'], task_id, start_seq, int(transition))).fetchall()
         if basis:
             excluded = {basis['confirmation_event_seq']}
             if transition:
+                current = self.store.get(task_id, 'task')
+                proof = (current.get('recovery_confirmation') or {}).get('native_reconciliation') or {}
+                if proof.get('record_id') != basis['transition']['reconciliation_id'] or type(proof.get('record_event_seq')) is not int:
+                    raise ValueError('native_reconciliation_event_unresolved')
+                excluded.add(proof['record_event_seq'])
                 excluded.update((basis['checkpoint_ready_event_seq'], basis['transition_event_seq']))
                 if transition_with_handoff:
                     handoff = self.native_transition_handoff_observation(task_id, actor='authenticated_maintenance_session')
