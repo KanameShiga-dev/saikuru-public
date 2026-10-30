@@ -744,6 +744,44 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         self.store.event('checkpoint_handoff_pending', 'SYNTHETIC prior failure', self.task_id, self.job_id,
                          details={'checkpoint_id': record['id']})
         self.assertFalse(self.engine.native_transition_combined_observation(self.task_id, actor=actor)['observations_match'])
+    def test_combined_observation_independent_source_and_checkpoint_guards(self):
+        from team_checkpoint import digest
+        import team_checkpoint
+        record, refs = self.draft()
+        self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        self.assertTrue(self.engine.resync_checkpoint(record['id'])['handoff_synced'])
+        actor = 'authenticated_maintenance_session'
+        stable = self.engine._native_recovery_observation(self.task_id, transition=True, transition_with_handoff=True)
+        self.assertTrue(stable['eligible_for_reconciliation'])
+        manifest = self.store.directory / 'checkpoints' / record['collection_ref']['id'] / 'manifest.json'
+        original_manifest = manifest.read_bytes()
+        forged = json.loads(original_manifest); forged['git_snapshot']['head'] = '0' * len(forged['git_snapshot']['head'])
+        forged['manifest_digest'] = digest({k:v for k,v in forged.items() if k != 'manifest_digest'})
+        manifest.write_text(json.dumps(forged), encoding='utf-8')
+        with patch.object(team_checkpoint, 'verify_collection', wraps=team_checkpoint.verify_collection) as verify:
+            result = self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+        self.assertFalse(result['observations_match']); self.assertEqual(verify.call_count, 0)
+        manifest.write_bytes(original_manifest)
+        path = self.f.f.workspace.project / 'app.py'; original = path.read_bytes()
+        path.write_bytes(original + b'\n# SYNTHETIC after source observation\n')
+        with patch.object(self.engine, '_native_recovery_observation', return_value=stable):
+            result = self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+        self.assertFalse(result['observations_match']); path.write_bytes(original)
+        run = copy.deepcopy(self.store.get(self.task_id)['agent_run'])
+        run['id'] = 'SYNTHETIC-independent-agent-run'; run['job_id'] = self.job_id
+        run['task_id'] = self.task_id; run['tool_calls'] = {'Read': 999}
+        self.store.put('agent_run', run)
+        with patch.object(team_checkpoint, 'verify_collection', wraps=team_checkpoint.verify_collection) as verify:
+            result = self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+        self.assertFalse(result['observations_match']); self.assertEqual(verify.call_count, 0)
+        with self.engine.handoff.lock:
+            self.engine.handoff.db.execute('BEGIN')
+            try:
+                with self.assertRaisesRegex(ValueError, 'native_observation_requires_unlocked_transaction'):
+                    self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+            finally:
+                self.engine.handoff.db.rollback()
+
     def test_previous_pointer_presence_and_value_round_trip(self):
         for present, value in ((False, None), (True, None), (True, 'SYNTHETIC-prior-checkpoint')):
             with self.subTest(present=present, value=value):
