@@ -647,6 +647,7 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         self.engine.handoff.db.execute('DELETE FROM records WHERE source_id=?', (saved_receipt[5],))
         self.engine.handoff.db.commit()
         self.assertFalse(self.engine.native_transition_handoff_observation(self.task_id, actor=actor)['receipt_verified'])
+
         self.engine.handoff.db.execute('INSERT INTO records(seq,project,job_id,task_id,kind,source_id,happened_at,payload) VALUES (?,?,?,?,?,?,?,?)', saved_receipt)
         self.engine.handoff.db.commit()
         read_receipt = self.engine.handoff.checkpoint_receipt
@@ -689,6 +690,60 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
                          details={'checkpoint_id': record['id']})
         self.assertFalse(self.engine.native_transition_handoff_observation(self.task_id, actor=actor)['receipt_verified'])
 
+    def test_transition_combined_observation_uses_only_validated_receipt_event(self):
+        record, refs = self.draft()
+        self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        actor = 'authenticated_maintenance_session'
+        self.assertFalse(self.engine.native_transition_combined_observation(self.task_id, actor=actor)['observations_match'])
+        self.assertTrue(self.engine.resync_checkpoint(record['id'])['handoff_synced'])
+        before = self.f.f.state()
+        valid = self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+        self.assertTrue(valid['observations_match'], valid['reasons'])
+        self.assertFalse(valid['resume_allowed']); self.assertEqual(valid['execution_permission'], 'none')
+        self.assertEqual(self.f.f.state(), before)
+        manifest = self.store.directory / 'checkpoints' / record['collection_ref']['id'] / 'manifest.json'
+        original_manifest = manifest.read_bytes()
+        manifest.write_bytes(original_manifest + b'\nSYNTHETIC-invalid')
+        self.assertFalse(self.engine.native_transition_combined_observation(self.task_id, actor=actor)['observations_match'])
+        manifest.write_bytes(original_manifest)
+        blob = next((manifest.parent / 'blobs').glob('*.blob'))
+        original_blob = blob.read_bytes(); blob.write_bytes(original_blob + b'SYNTHETIC-invalid')
+        self.assertFalse(self.engine.native_transition_combined_observation(self.task_id, actor=actor)['observations_match'])
+        blob.write_bytes(original_blob)
+        with self.assertRaisesRegex(ValueError, 'workflow_maintenance_action_required'):
+            self.engine.native_transition_combined_observation(self.task_id)
+        with patch.object(self.store._worker, 'task', self.store.get(self.task_id), create=True):
+            with self.assertRaisesRegex(ValueError, 'workflow_maintenance_action_required'):
+                self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+        with self.store.atomic():
+            with self.assertRaisesRegex(ValueError, 'native_observation_requires_unlocked_transaction'):
+                self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+        observe = self.engine._native_recovery_observation
+        def race(*args, **kwargs):
+            answer = observe(*args, **kwargs)
+            self.engine.handoff.db.execute("UPDATE records SET payload=payload WHERE kind='checkpoint_ready'")
+            self.engine.handoff.db.commit()
+            return answer
+        with patch.object(self.engine, '_native_recovery_observation', side_effect=race):
+            changed = self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+        self.assertFalse(changed['observations_match'])
+        self.assertIn('native_combined_observation_changed', changed['reasons'])
+        def store_race(*args, **kwargs):
+            answer = observe(*args, **kwargs)
+            self.store.event('SYNTHETIC_other_task', 'SYNTHETIC combined Store race')
+            return answer
+        with patch.object(self.engine, '_native_recovery_observation', side_effect=store_race):
+            changed = self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+        self.assertFalse(changed['observations_match'])
+        self.assertIn('native_combined_observation_changed', changed['reasons'])
+        path = self.f.f.workspace.project / 'app.py'
+        original = path.read_bytes(); path.write_bytes(original + b'\n# SYNTHETIC combined race\n')
+        changed = self.engine.native_transition_combined_observation(self.task_id, actor=actor)
+        self.assertFalse(changed['observations_match']); self.assertFalse(changed['resume_allowed'])
+        path.write_bytes(original)
+        self.store.event('checkpoint_handoff_pending', 'SYNTHETIC prior failure', self.task_id, self.job_id,
+                         details={'checkpoint_id': record['id']})
+        self.assertFalse(self.engine.native_transition_combined_observation(self.task_id, actor=actor)['observations_match'])
     def test_previous_pointer_presence_and_value_round_trip(self):
         for present, value in ((False, None), (True, None), (True, 'SYNTHETIC-prior-checkpoint')):
             with self.subTest(present=present, value=value):

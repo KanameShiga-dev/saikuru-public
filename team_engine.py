@@ -6101,7 +6101,7 @@ class Engine:
         """Read a canonical derived receipt and its exact event; never authorize resume."""
         if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
             raise ValueError('workflow_maintenance_action_required')
-        result = {'contract_version': 1, 'receipt_verified': False, 'reasons': [],
+        result = {'contract_version': 1, 'receipt_verified': False, 'sync_event_seq': None, 'reasons': [],
                   'execution_permission': 'none', 'resume_allowed': False}
         with self.store.lock, self.handoff.lock:
             if self.store.depth or self.handoff.db.in_transaction:
@@ -6123,6 +6123,7 @@ class Engine:
                         and event.get('job_id') == job['id'] and event.get('task_id') == task_id
                         and event.get('details') == expected):
                     result['receipt_verified'] = True
+                    result['sync_event_seq'] = rows[0][0]
                 else:
                     result['reasons'] = ['native_handoff_receipt_or_history_unresolved']
             except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
@@ -6130,7 +6131,46 @@ class Engine:
             if (self._native_assessment_stamp() != store_stamp or not self._native_maintenance_idle()
                     or (self.handoff.db.total_changes, self.handoff.db.execute('PRAGMA data_version').fetchone()[0]) != handoff_stamp):
                 result['receipt_verified'] = False
+                result['sync_event_seq'] = None
                 result['reasons'] = sorted(set(result['reasons'] + ['native_handoff_observation_changed']))
+        return result
+
+    def native_transition_combined_observation(self, task_id, *, actor=None):
+        """Observe source plus derived receipt at a stable interval, never resume authority."""
+        if actor != 'authenticated_maintenance_session' or getattr(self.store._worker, 'task', None) is not None:
+            raise ValueError('workflow_maintenance_action_required')
+        with self.store.lock, self.handoff.lock:
+            if self.store.depth or self.handoff.db.in_transaction:
+                raise ValueError('native_observation_requires_unlocked_transaction')
+            stamp = self._native_assessment_stamp()
+            handoff_stamp = (self.handoff.db.total_changes,
+                self.handoff.db.execute('PRAGMA data_version').fetchone()[0])
+        result = {'contract_version': 1, 'observations_match': False, 'reasons': [],
+                  'execution_permission': 'none', 'resume_allowed': False}
+        try:
+            observation = self._native_recovery_observation(task_id, transition=True, transition_with_handoff=True)
+            result['observations_match'] = observation['eligible_for_reconciliation']
+            result['reasons'] = observation['reasons']
+            if result['observations_match']:
+                from team_checkpoint import load_collection, verify_collection
+                from team_p0_contract import checkpoint_scope
+                with self.store.lock:
+                    basis = self.store.native_checkpoint_transition_basis(task_id)
+                    checkpoint = basis['checkpoint']; job = self.store.get(checkpoint['job_id'], 'job')
+                    paths = checkpoint_scope(job, self.store.get(job['plan_approval_id'], 'approval'))
+                directory = self.store.directory / 'checkpoints'
+                collection = load_collection(job['project'], directory, checkpoint['collection_ref']['id'])
+                if collection['manifest_digest'] != checkpoint['collection_ref']['digest']:
+                    raise ValueError('native_checkpoint_collection_changed')
+                verify_collection(job['project'], directory, collection, paths)
+        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
+            result['observations_match'] = False
+            result['reasons'] = ['native_combined_observation_unresolved']
+        with self.store.lock, self.handoff.lock:
+            if (self._native_assessment_stamp() != stamp or not self._native_maintenance_idle()
+                    or (self.handoff.db.total_changes, self.handoff.db.execute('PRAGMA data_version').fetchone()[0]) != handoff_stamp):
+                result['observations_match'] = False
+                result['reasons'] = sorted(set(result['reasons'] + ['native_combined_observation_changed']))
         return result
 
     def native_transition_source_observation(self, task_id, *, actor=None):
@@ -6155,7 +6195,7 @@ class Engine:
                 result['reasons'] = sorted(set(result['reasons'] + ['native_transition_observation_changed']))
         return result
 
-    def _native_recovery_observation(self, task_id, *, confirmed=False, transition=False):
+    def _native_recovery_observation(self, task_id, *, confirmed=False, transition=False, transition_with_handoff=False):
         # Metadata reads take their own short Store locks. Git, file hashing and
         # prior-artifact validation run without an outer Store lock. Any DB write
         # across this interval invalidates the public assessment, even a rollback
@@ -6164,6 +6204,8 @@ class Engine:
         from team_p0_contract import checkpoint_scope
         from team_harness import workspace_identity
         if confirmed and transition:
+            raise ValueError('native_observation_basis_ambiguous')
+        if transition_with_handoff and not transition:
             raise ValueError('native_observation_basis_ambiguous')
         basis = (self.store.native_checkpoint_transition_basis(task_id) if transition else
                  self.store.native_confirmation_basis(task_id) if confirmed else None)
@@ -6219,6 +6261,11 @@ class Engine:
             excluded = {basis['confirmation_event_seq']}
             if transition:
                 excluded.update((basis['checkpoint_ready_event_seq'], basis['transition_event_seq']))
+                if transition_with_handoff:
+                    handoff = self.native_transition_handoff_observation(task_id, actor='authenticated_maintenance_session')
+                    if not handoff['receipt_verified'] or type(handoff['sync_event_seq']) is not int:
+                        raise ValueError('native_handoff_receipt_or_history_unresolved')
+                    excluded.add(handoff['sync_event_seq'])
             rows = [row for row in rows if row[0] not in excluded]
         if len(rows) > 1000: reasons.append('native_attempt_history_unresolved')
         events = [json.loads(body) for _, body in rows]
