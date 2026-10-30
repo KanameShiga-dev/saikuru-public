@@ -643,6 +643,12 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         self.assertTrue(valid['receipt_verified'], valid['reasons'])
         self.assertEqual(valid['execution_permission'], 'none'); self.assertFalse(valid['resume_allowed'])
         self.assertEqual(self.f.f.state(), before)
+        saved_receipt = self.engine.handoff.db.execute("SELECT seq,project,job_id,task_id,kind,source_id,happened_at,payload FROM records WHERE kind='checkpoint_ready'").fetchone()
+        self.engine.handoff.db.execute('DELETE FROM records WHERE source_id=?', (saved_receipt[5],))
+        self.engine.handoff.db.commit()
+        self.assertFalse(self.engine.native_transition_handoff_observation(self.task_id, actor=actor)['receipt_verified'])
+        self.engine.handoff.db.execute('INSERT INTO records(seq,project,job_id,task_id,kind,source_id,happened_at,payload) VALUES (?,?,?,?,?,?,?,?)', saved_receipt)
+        self.engine.handoff.db.commit()
         read_receipt = self.engine.handoff.checkpoint_receipt
         def concurrent_receipt_write(*args, **kwargs):
             found = read_receipt(*args, **kwargs)
@@ -650,6 +656,14 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
             self.engine.handoff.db.commit()
             return found
         with patch.object(self.engine.handoff, 'checkpoint_receipt', side_effect=concurrent_receipt_write):
+            raced = self.engine.native_transition_handoff_observation(self.task_id, actor=actor)
+        self.assertFalse(raced['receipt_verified'])
+        self.assertIn('native_handoff_observation_changed', raced['reasons'])
+        def concurrent_store_write(*args, **kwargs):
+            found = read_receipt(*args, **kwargs)
+            self.store.event('SYNTHETIC_other_task', 'SYNTHETIC Store stamp race')
+            return found
+        with patch.object(self.engine.handoff, 'checkpoint_receipt', side_effect=concurrent_store_write):
             raced = self.engine.native_transition_handoff_observation(self.task_id, actor=actor)
         self.assertFalse(raced['receipt_verified'])
         self.assertIn('native_handoff_observation_changed', raced['reasons'])
@@ -662,6 +676,10 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         self.engine.handoff.db.commit()
         synced = self.store.db.execute("SELECT seq,body FROM events WHERE json_extract(body,'$.type')='checkpoint_handoff_synced' AND json_extract(body,'$.task_id')=?", (self.task_id,)).fetchone()
         forged_event = json.loads(synced[1]); forged_event['details']['ready_event_seq'] += 1
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (json.dumps(forged_event), synced[0])); self.store.db.commit()
+        self.assertFalse(self.engine.native_transition_handoff_observation(self.task_id, actor=actor)['receipt_verified'])
+        self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (synced[1], synced[0])); self.store.db.commit()
+        forged_event = json.loads(synced[1]); forged_event['type'] = 'checkpoint_handoff_pending'
         self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (json.dumps(forged_event), synced[0])); self.store.db.commit()
         self.assertFalse(self.engine.native_transition_handoff_observation(self.task_id, actor=actor)['receipt_verified'])
         self.store.db.execute('UPDATE events SET body=? WHERE seq=?', (synced[1], synced[0])); self.store.db.commit()
