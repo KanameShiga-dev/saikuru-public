@@ -915,7 +915,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/jobs/rework':
                 if self.app.store.get(str(body.get('id','')),'job').get('workflow_contract_version') == 1:
                     raise WorkflowRequestError('workflow_feature_target_required')
-                result = engine.rework_from_rejection(str(body.get('id', '')), body.get('note', ''))
+                result = engine.rework_from_rejection(str(body.get('id', '')), body.get('note', ''),
+                    pending_item_indices=body.get('pending_item_indices'),
+                    review_finding_indices=body.get('review_finding_indices'))
             elif path == '/api/jobs/plan-revision':
                 if set(body) != {'id', 'plan', 'job_revision'}:
                     raise ValueError('改訂計画・依頼ID・表示した依頼版だけを指定してください。')
@@ -958,7 +960,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/completion/evidence':
                 result = engine.record_completion_evidence(
                     str(body.get('approval_id', '')), body.get('item_index'),
-                    body.get('check_index'), body.get('evidence'), body.get('confirmed'))
+                    body.get('check_index'), body.get('evidence'), body.get('confirmed'),
+                    entries=body.get('entries'))
             elif path == '/api/jobs/accept-without-fix':
                 if body.get('confirmed') is not True:
                     raise ValueError('修正せずに受け入れへ進めることを確認してください。')

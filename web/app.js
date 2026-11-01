@@ -971,37 +971,48 @@ function foldDetailSections(body,task){
 }
 function reportText(result){
   let text=result.summary||'';
-  if(result.stage_checks?.length)text+='\n\n各担当の検証報告（未実施の項目を含みます。合格の保証ではありません）:\n'+result.stage_checks.map(item=>`${item.title}（担当報告: ${item.reported_status||'不明'}）\n${(item.checks||[]).join('\n')}${item.pending_checks?.length?'\n担当時点で未確認と報告された項目:\n'+item.pending_checks.map(c=>'・'+c).join('\n'):''}`).join('\n\n');
+  if(result.stage_checks?.length)text+='\n\n各担当の検証報告（未実施の項目を含みます。合格の保証ではありません）:\n'+result.stage_checks.map(item=>`${item.title}（担当報告: ${item.reported_status||'不明'}）\n${(item.checks||[]).join('\n')}${item.pending_checks?.length?'\n担当時点で未確認と報告された項目:\n'+item.pending_checks.map(c=>'・'+c).join('\n'):''}${item.pending_check_details?.length?'\n条件の出典・担当・実施可否:\n'+item.pending_check_details.map(d=>`・${d.check} / ${d.source_type}: ${d.source_excerpt} / ${d.owner==='ai'?'AI':d.owner==='user'?'利用者':'未特定'} / ${d.feasibility==='feasible'?'実施可能':d.feasibility==='infeasible'?'実施困難':'未確認'}`).join('\n'):''}`).join('\n\n');
   if(result.tasks)text+='\n\n'+result.tasks.map((t,i)=>`${i+1}. ${t.title}（${roles[t.role]||t.role}）\n${t.instruction}`).join('\n\n');
   if(result.code_test_plan){const p=result.code_test_plan;text+='\n\nコードテスト計画: '+(p.required?'実施する':'対象外（'+(p.reason||'理由未記載')+'）');if(p.required)text+='\n既存テスト: '+(p.existing_tests?.length?p.existing_tests.join('、'):'なし')+'\n確認する条件:\n'+(p.cases||[]).map(c=>'・'+c).join('\n')+'\n実行予定: '+p.command+'\n※計画のコマンドは自動承認されません。実行時に既存の安全確認を通します。';}
   if(result.test_files?.length)text+='\n\n今回使用したテストファイル: '+result.test_files.join('、')+(result.test_change_reason?'\nテスト変更の理由: '+result.test_change_reason:'');
   if(result.security_review_required===true)text+='\n\n通常レビューの後、common-security-reviewerを独立セッションで起動します。';
   if(result.checks?.length)text+='\n\n報告された検証:\n'+result.checks.map(c=>'・'+c).join('\n');
-  if(result.pending_checks?.length)text+='\n\n未確認の必須検証（依頼全体の達成は未確認）:\n'+result.pending_checks.map(c=>'・'+c).join('\n');
+  if(result.pending_checks?.length)text+='\n\n担当が未確認と報告した項目（必須条件との対応は別途照合）:\n'+result.pending_checks.map(c=>'・'+c).join('\n');
   if(result.question)text+='\n\n確認したいこと:\n'+result.question;
   if(result.note)text+='\n\n'+result.note;
   if(result.review_findings?.length)text+='\n\nレビュー指摘（未修正。受け入れるか差し戻すかを決めてください）:\n'+result.review_findings.map(f=>`・${f.reviewer}：${f.summary}`).join('\n');
-  if(result.pending_items?.length)text+='\n\n未完了として残す項目（合格・全体完了ではありません）:\n'+result.pending_items.map(item=>`${item.title}\n${item.note}\n${item.checks.join('\n')}`).join('\n\n');
+  if(result.pending_items?.length)text+='\n\n未完了として残す必須項目（条件付き受領の対象）:\n'+result.pending_items.map(item=>`${item.title}\n${item.note}\n出典: ${item.sources?.join(' / ')||item.source||'明示的な引き継ぎ'}\n担当: ${item.owner==='ai'?'AI':item.owner==='user'?'利用者':item.owner==='unassigned'?'未特定':item.owner||'未特定'} · 実施可否: ${item.feasibility==='feasible'?'実施可能':item.feasibility||'未確認'}\n${item.checks.join('\n')}`).join('\n\n');
+  if(result.reference_items?.length)text+='\n\n参考：未確認（必須条件との出典・担当・実施可否が確認できず、受け入れ状態には数えません）:\n'+result.reference_items.map(item=>`${item.title}\n${item.note}\n担当: ${item.owner==='ai'?'AI':item.owner==='user'?'利用者':item.owner==='unassigned'?'未特定':item.owner||'未特定'} · 実施可否: ${item.feasibility==='feasible'?'実施可能':item.feasibility==='infeasible'?'実施困難':item.feasibility||'未確認'}\n${(item.checks||[]).join('\n')}`).join('\n\n');
   if(result.resolved_checks?.length)text+='\n\n利用者が後から確認した検証（AIの再検証ではありません）:\n'+result.resolved_checks.map(item=>`${item.title}\n${item.check}\n根拠: ${item.evidence}\n確認日時: ${date(item.confirmed_at)}`).join('\n\n');
+  if(result.acknowledged_findings?.length)text+='\n\n利用者が確認し、根拠を記録したレビュー指摘:\n'+result.acknowledged_findings.map(item=>`${item.reviewer||'レビュー担当'}：${item.summary}\n根拠: ${item.evidence}\n確認日時: ${date(item.confirmed_at)}`).join('\n\n');
   return text;
 }
 function completionEvidenceForm(approval){
   const choices=[];
-  (approval.payload.pending_items||[]).forEach((item,itemIndex)=>(item.checks||[]).forEach((check,checkIndex)=>choices.push({itemIndex,checkIndex,label:`${item.title}：${check}`})));
+  (approval.payload.pending_items||[]).forEach((item,itemIndex)=>(item.checks||[]).forEach((check,checkIndex)=>choices.push({kind:'pending_check',itemIndex,checkIndex,label:`${item.title}：${check}`})));
+  (approval.payload.review_findings||[]).forEach((finding,findingIndex)=>choices.push({kind:'review_finding',findingIndex,label:`レビュー指摘（${finding.reviewer||'担当'}）：${finding.summary}`}));
   if(!choices.length)return null;
-  const form=el('form',undefined,'detail-section'),select=el('select'),evidence=el('textarea'),confirmed=el('input'),message=el('p','','hint');
-  choices.forEach((choice,index)=>{const option=el('option',choice.label);option.value=String(index);select.append(option);});
-  evidence.required=true;evidence.maxLength=2000;evidence.rows=3;evidence.id='evidence-'+approval.id;
-  evidence.placeholder='実施日時、対象、方法、結果、確認できる場所など。秘密情報は入力しないでください。';
-  confirmed.type='checkbox';confirmed.required=true;confirmed.id='evidence-confirm-'+approval.id;
-  const targetLabel=el('label','根拠を追加する未確認項目');targetLabel.append(select);
-  const evidenceLabel=el('label','人が確認した検証根拠');evidenceLabel.append(evidence);
-  const confirmLabel=el('label',undefined,'check');confirmLabel.append(confirmed,document.createTextNode('この検証を実施し、結果と根拠を確認しました。'));
-  const submit=el('button','根拠を記録して受領判断を更新','primary');submit.type='submit';message.setAttribute('role','status');
-  form.append(el('h4','後から確認した検証を記録'),el('p','項目ごとに記録します。記録後も成果は自動で通常受領にならず、更新された内容を改めて受領します。AIの再検証ではありません。','hint'),targetLabel,evidenceLabel,confirmLabel,message,submit);
+  const form=el('form',undefined,'detail-section'),message=el('p','','hint'),rows=[];
+  choices.forEach((choice,index)=>{
+    const row=el('div',undefined,'evidence-entry'),selected=el('input'),evidence=el('textarea');
+    selected.type='checkbox';selected.id=`evidence-select-${approval.id}-${index}`;
+    evidence.maxLength=2000;evidence.rows=2;evidence.disabled=true;
+    evidence.placeholder='実施日時、対象、方法、結果、確認できる場所など。秘密情報は入力しないでください。';
+    selected.addEventListener('change',()=>{evidence.disabled=!selected.checked;evidence.required=selected.checked;});
+    const target=el('label',undefined,'check');target.htmlFor=selected.id;target.append(selected,document.createTextNode(' '+choice.label));
+    const evidenceLabel=el('label','人が確認した根拠');evidenceLabel.append(evidence);
+    row.append(target,evidenceLabel);form.append(row);rows.push({choice,selected,evidence});
+  });
+  const confirmed=el('input');confirmed.type='checkbox';confirmed.required=true;confirmed.id='evidence-confirm-'+approval.id;
+  const confirmLabel=el('label',undefined,'check');confirmLabel.append(confirmed,document.createTextNode('選択した各項目について、確認を実施し、結果と根拠を確認しました。'));
+  const submit=el('button','選択項目の根拠をまとめて記録','primary');submit.type='submit';message.setAttribute('role','status');
+  form.prepend(el('h4','確認済みの根拠をまとめて記録'),el('p','選択した複数項目を一度に記録します。記録後は更新内容を一度だけ改めて受領します。レビュー指摘の確認は、未修正の指摘を条件付きで受領する記録です。','hint'));
+  form.append(confirmLabel,message,submit);
   form.addEventListener('submit',async event=>{event.preventDefault();if(submit.disabled)return;submit.disabled=true;
-    const choice=choices[Number(select.value)];
-    try{await api('/api/completion/evidence',{approval_id:approval.id,item_index:choice.itemIndex,check_index:choice.checkIndex,evidence:evidence.value,confirmed:confirmed.checked});await refresh();}
+    const entries=rows.filter(row=>row.selected.checked).map(({choice,evidence})=>({...choice,evidence:evidence.value}));
+    if(!entries.length){message.textContent='根拠を記録する項目を選んでください。';submit.disabled=false;return;}
+    if(entries.some(entry=>!entry.evidence.trim())){message.textContent='選択した各項目に確認根拠を入力してください。';submit.disabled=false;return;}
+    try{await api('/api/completion/evidence',{approval_id:approval.id,entries,confirmed:confirmed.checked});await refresh();}
     catch(error){message.textContent=error.message;}finally{submit.disabled=false;}});
   return form;
 }
@@ -1520,6 +1531,13 @@ function renderDetail(task,version) {
     const latest=state.approvals.filter(a=>a.job_id===job.id&&a.kind==='completion').at(-1);
     if(latest?.task_id===task.id&&latest.status==='approved'){
       const evidenceForm=completionEvidenceForm(latest);if(evidenceForm)body.append(evidenceForm);
+      const canRework=(latest.payload.pending_items?.length||latest.payload.review_findings?.length);
+      if(canRework)body.append(button('未完了項目をまとめて修正に戻す',async()=>{
+        await api('/api/jobs/rework',{id:job.id,note:'',
+          pending_item_indices:(latest.payload.pending_items||[]).map((_,i)=>i),
+          review_finding_indices:(latest.payload.review_findings||[]).map((_,i)=>i)});
+        await refresh();
+      },'danger'));
     }
   }
   if(task.handoff_note)body.append(section('引き継ぎ範囲・未完了項目',task.handoff_note));
@@ -1568,6 +1586,12 @@ function renderDetail(task,version) {
     const hasPending=a.payload.pending_items?.length||a.payload.review_findings?.length;
     actions.append(button(a.kind==='completion'?'差し戻す':'拒否する',()=>api('/api/decide',{id:a.id,allow:false,note:input.value}),'danger'));
     if(a.kind==='completion'){
+      if(hasPending)actions.append(button('未完了項目をまとめて修正に戻す',async()=>{
+        await api('/api/jobs/rework',{id:job.id,note:input.value,
+          pending_item_indices:(a.payload.pending_items||[]).map((_,i)=>i),
+          review_finding_indices:(a.payload.review_findings||[]).map((_,i)=>i)});
+        await refresh();
+      },'secondary'));
       if(!a.review_acknowledgement){
         actions.append(button('レビュー結果を確認（受領待ちを維持）',()=>api('/api/jobs/review-confirmation',
           {approval_id:a.id,confirmed:true}),'primary'));

@@ -14,6 +14,7 @@ import threading
 
 import time
 import sys
+import unicodedata
 from dataclasses import replace
 from functools import wraps
 from contextlib import contextmanager
@@ -71,6 +72,11 @@ QUESTIONS = {'type': 'array', 'maxItems': 8, 'items': object_schema({
 
 RESULT_SCHEMA = object_schema({'status': {'type': 'string', 'enum': ['done', 'blocked', 'needs_changes', 'handoff']},
     'pending_checks': {'type': 'array', 'items': STR},
+    'pending_check_details': {'type': 'array', 'maxItems': 40, 'items': object_schema({
+        'check': STR, 'source_type': {'type': 'string', 'enum': ['request', 'approved_plan']},
+        'source_excerpt': STR, 'required': {'type': 'boolean'},
+        'owner': {'type': 'string', 'enum': ['ai', 'user', 'unassigned']},
+        'feasibility': {'type': 'string', 'enum': ['feasible', 'infeasible', 'unknown']}})},
 
     'summary': STR, 'checks': {'type': 'array', 'items': STR}, 'question': STR,
 
@@ -141,7 +147,9 @@ STAGE_COMPLETION_RULE = (
     'この担当が実施する検証・後続担当または利用者が実施する検証を区別する。'
     'AIが作った計画だけで利用者の必須条件を省略・後回しにしない。'
     '利用者が後続や独立計測側へ明示的に割り当てた検証は、その出典・担当・未実施をchecksに記録する。'
-    '計画以外の報告では、依頼全体の必須条件で未確認のものをpending_checksにも列挙し、確認済みだけなら空配列にする。'
+    '計画以外の報告では、依頼全体の必須条件で未確認のものだけをpending_checksへ列挙する。'
+    '各pending_checksにはpending_check_detailsを1件対応させ、requestまたはapproved_planの原文引用、required=true、実施できる担当（ai/user）、feasibility=feasibleを記録する。'
+    '目安・任意・参考・依頼条件で禁止/実施不能・担当不明の項目はpending_checksに入れず、checksまたはwarningsへ「参考：未確認」として記録する。'
     'それだけを理由に今回の完了した工程をblocked/needs_changesにしたり、権限のない担当へ再実行を要求したりしない。'
     '今回の担当範囲が完了した場合のdoneは工程の完了であり、未検証の合格や依頼全体の完了ではない。'
     '担当範囲に不足があれば具体的な修正を示す。必須検証の担当や許可が不明なら、根拠と必要な判断をquestionsで確認する。'
@@ -156,7 +164,7 @@ REVIEW_STATUS_RULE = ('修正が必要なとき、または作業担当が実行
                       '(3) 依頼された使い方で実害が起きる具体的なセキュリティの問題がある（認証情報の露出、外部への送信、データの破壊、権限の扱い）、のどれかのときだけ。'
                       '依頼にない機能・制限・堅牢化の提案（入力の上限、パスの制限、想定外の入力への備えなど）は checks に「参考：」として書き、それだけではneeds_changesにしない。'
                       '采来が記録した実行結果で確かめられる検証を、別の形で再実行させない。この環境で実行できない検証を求めない。'
-                      '各担当のpending_checksを最新成果物の証拠と照合する。解消した項目は、根拠をchecksに記録し、根拠がない必須項目は自分のpending_checksへ引き継ぐ。')
+    '各担当のpending_checksを最新成果物の証拠と照合する。解消した項目は、根拠をchecksに記録し、根拠がない必須項目だけをpending_check_detailsとともに自分のpending_checksへ引き継ぐ。')
 # Facts about this PC that every assignee needs, so nobody plans, demands or asks for what cannot run here.
 ENVIRONMENT_RULE = ('\n実行環境：Windows・PowerShell、管理者権限なし。シンボリックリンクの作成はできない。'
                     'Developer Mode・レジストリ・実行ポリシー・ファイアウォール・サービスなど、OSやセキュリティの設定は変更しない（変更のコマンドは利用者の承認が必要）。'
@@ -1878,17 +1886,47 @@ class Engine:
                               'attempt': attempt})
             return True
 
-    def record_completion_evidence(self, approval_id, item_index, check_index, evidence, confirmed):
-        """Record a user's verification and require a fresh completion decision."""
-        if type(item_index) is not int or type(check_index) is not int:
-            raise ValueError('確認項目の指定が不正です。')
+    def record_completion_evidence(self, approval_id, item_index=None, check_index=None,
+                                   evidence=None, confirmed=False, entries=None):
+        """Record one batch of user checks and issue one fresh completion decision."""
         if confirmed is not True:
             raise ValueError('検証を実施して結果を確認した場合だけ記録してください。')
-        if not isinstance(evidence, str) or not 1 <= len(evidence.strip()) <= 2000:
-            raise ValueError('確認した根拠を1〜2000文字で記入してください。')
+        if entries is None:
+            entries = [{'kind': 'pending_check', 'item_index': item_index,
+                        'check_index': check_index, 'evidence': evidence}]
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 40:
+            raise ValueError('確認する項目を1〜40件選んでください。')
+        normalized_entries = []
+        seen = set()
         from team_dlp import scan_input
-        if any(scan_input(evidence).values()):
-            raise ValueError('検証根拠には認証情報・個人情報・機密名を記録せず、確認できる場所や結果だけを書いてください。')
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError('確認項目の指定が不正です。')
+            kind = entry.get('kind')
+            evidence_text = entry.get('evidence')
+            if not isinstance(evidence_text, str) or not 1 <= len(evidence_text.strip()) <= 2000:
+                raise ValueError('各項目の確認根拠を1〜2000文字で記入してください。')
+            if any(scan_input(evidence_text).values()):
+                raise ValueError('検証根拠には認証情報・個人情報・機密名を記録せず、確認できる場所や結果だけを書いてください。')
+            if kind == 'pending_check':
+                i, j = entry.get('item_index'), entry.get('check_index')
+                if type(i) is not int or type(j) is not int or i < 0 or j < 0:
+                    raise ValueError('確認項目の指定が不正です。')
+                key = (kind, i, j)
+                normalized_entries.append({'kind': kind, 'item_index': i, 'check_index': j,
+                                           'evidence': evidence_text.strip()})
+            elif kind == 'review_finding':
+                i = entry.get('finding_index')
+                if type(i) is not int or i < 0:
+                    raise ValueError('レビュー指摘の指定が不正です。')
+                key = (kind, i)
+                normalized_entries.append({'kind': kind, 'finding_index': i,
+                                           'evidence': evidence_text.strip()})
+            else:
+                raise ValueError('確認項目の種類が不正です。')
+            if key in seen:
+                raise ValueError('同じ項目が重複して選択されています。')
+            seen.add(key)
         with self.store.atomic():
             approval = self.store.get(approval_id, 'approval')
             if approval['kind'] != 'completion':
@@ -1909,22 +1947,48 @@ class Engine:
                    for t in self.store.all('task')):
                 raise ValueError('実行中の担当が終わってから証拠を追加してください。')
             payload = copy.deepcopy(approval['payload'])
-            items = payload.get('pending_items') or []
-            if not 0 <= item_index < len(items):
-                raise ValueError('確認項目が見つかりません。')
-            checks = items[item_index].get('checks') or []
-            if not 0 <= check_index < len(checks):
-                raise ValueError('確認項目が見つかりません。')
-            check = checks.pop(check_index)
-            title = items[item_index].get('title', '')
-            if not checks:
-                items.pop(item_index)
+            items = copy.deepcopy(payload.get('pending_items') or [])
+            findings = copy.deepcopy(payload.get('review_findings') or [])
+            for entry in normalized_entries:
+                if entry['kind'] == 'pending_check':
+                    i, j = entry['item_index'], entry['check_index']
+                    if i >= len(items) or j >= len(items[i].get('checks') or []):
+                        raise ValueError('確認項目が見つかりません。')
+                elif entry['finding_index'] >= len(findings):
+                    raise ValueError('レビュー指摘が見つかりません。')
+            removed_checks = {(e['item_index'], e['check_index']): e for e in normalized_entries
+                              if e['kind'] == 'pending_check'}
+            for item_index in reversed(range(len(items))):
+                old_checks = items[item_index].get('checks') or []
+                kept = []
+                for check_index, check in enumerate(old_checks):
+                    entry = removed_checks.get((item_index, check_index))
+                    if entry:
+                        payload.setdefault('resolved_checks', []).append({
+                            'title': items[item_index].get('title', ''), 'check': check,
+                            'evidence': entry['evidence'], 'authority': 'user_confirmed',
+                            'confirmed_at': now(), 'source_approval_id': approval_id,
+                        })
+                    else:
+                        kept.append(check)
+                if kept:
+                    items[item_index]['checks'] = kept
+                else:
+                    items.pop(item_index)
             payload['pending_items'] = items
-            payload.setdefault('resolved_checks', []).append({
-                'title': title, 'check': check, 'evidence': evidence.strip(),
-                'authority': 'user_confirmed', 'confirmed_at': now(),
-                'source_approval_id': approval_id,
-            })
+            selected_findings = {e['finding_index']: e for e in normalized_entries
+                                 if e['kind'] == 'review_finding'}
+            kept_findings = []
+            for finding_index, finding in enumerate(findings):
+                entry = selected_findings.get(finding_index)
+                if entry:
+                    payload.setdefault('acknowledged_findings', []).append({
+                        **finding, 'evidence': entry['evidence'], 'authority': 'user_confirmed',
+                        'confirmed_at': now(), 'source_approval_id': approval_id,
+                    })
+                else:
+                    kept_findings.append(finding)
+            payload['review_findings'] = kept_findings
             payload['note'] = (payload.get('note', '') + ' 後から提出された検証根拠があります。'
                                '確認済み項目と残る未確認事項を見て、成果を改めて受領してください。')
             if approval['status'] == 'pending':
@@ -1933,7 +1997,7 @@ class Engine:
             self.store.update(job['id'], status='awaiting_acceptance')
             replacement = self.new_approval(task, 'completion', payload)
             self.store.event('completion_evidence_recorded',
-                             '利用者が未確認項目の検証根拠を記録しました。成果の再受領を待っています。',
+                             '利用者が複数の未確認項目・レビュー指摘の根拠を記録しました。成果の再受領を待っています。',
                              task['id'], job['id'])
             return {'ok': True, 'approval_id': replacement['id']}
 
@@ -2094,7 +2158,10 @@ class Engine:
 
                     if str(note or '').strip():
                         # A rejection with a reason is a change request, not the end of the job.
-                        self.rework_from_rejection(job['id'], note, approval['task_id'])
+                        payload = approval.get('payload') or {}
+                        self.rework_from_rejection(job['id'], note, approval['task_id'],
+                            list(range(len(payload.get('pending_items') or []))),
+                            list(range(len(payload.get('review_findings') or []))))
                     elif not allow:
                         self.store.update(job['id'], status='blocked')
 
@@ -2472,11 +2539,21 @@ class Engine:
 
 
 
-    def rework_from_rejection(self, job_id, note, after=None):
+    def rework_from_rejection(self, job_id, note, after=None, pending_item_indices=None,
+                              review_finding_indices=None):
         """Turn the user's rejection reason into a builder task followed by the normal and security reviews."""
         note = str(note or '').strip()
-        if not note or len(note) > 4000:
-            raise ValueError('差し戻しの理由・指摘を1〜4000文字で入力してください。')
+        if len(note) > 4000:
+            raise ValueError('差し戻しの理由・指摘は4000文字以内で入力してください。')
+        pending_item_indices = [] if pending_item_indices is None else pending_item_indices
+        review_finding_indices = [] if review_finding_indices is None else review_finding_indices
+        if (not isinstance(pending_item_indices, list) or not isinstance(review_finding_indices, list)
+                or any(type(i) is not int or i < 0 for i in pending_item_indices + review_finding_indices)):
+            raise ValueError('未完了項目の指定が不正です。')
+        if len(set(pending_item_indices)) != len(pending_item_indices) or len(set(review_finding_indices)) != len(review_finding_indices):
+            raise ValueError('同じ未完了項目が重複して選択されています。')
+        if not note and not pending_item_indices and not review_finding_indices:
+            raise ValueError('差し戻し理由またはやり直す未完了項目を指定してください。')
         with self.store.atomic():
             job = self.store.get(job_id, 'job')
             tasks = [t for t in self.store.all('task') if t['job_id'] == job_id]
@@ -2486,6 +2563,28 @@ class Engine:
                 raise ValueError('中止した依頼は差し戻せません。新しい依頼として出してください。')
             if job['status'] not in ('awaiting_acceptance','blocked','accepted','accepted_with_pending_checks'):
                 raise ValueError('成果確認待ち・停止・受領済みの依頼を選択してください。')
+            completion_approvals = [a for a in self.store.for_job('approval', job_id)
+                                    if a.get('kind') == 'completion']
+            latest_payload = (completion_approvals[-1].get('payload') or {}) if completion_approvals else {}
+            pending_items = latest_payload.get('pending_items') or []
+            review_findings = latest_payload.get('review_findings') or []
+            if any(i >= len(pending_items) for i in pending_item_indices):
+                raise ValueError('選択した未完了項目が最新の受領内容にありません。')
+            if any(i >= len(review_findings) for i in review_finding_indices):
+                raise ValueError('選択したレビュー指摘が最新の受領内容にありません。')
+            selected_lines = []
+            for index in pending_item_indices:
+                item = pending_items[index]
+                selected_lines.append('・' + str(item.get('title') or '未完了項目') + '\n'
+                                      + str(item.get('note') or '') + '\n'
+                                      + '\n'.join(str(x) for x in item.get('checks') or []))
+            for index in review_finding_indices:
+                finding = review_findings[index]
+                selected_lines.append('・レビュー指摘（' + str(finding.get('reviewer') or '担当') + '）：'
+                                      + str(finding.get('summary') or ''))
+            scoped_note = note
+            if selected_lines:
+                scoped_note = (note + '\n\n' if note else '') + '未完了項目から修正対象として選択された内容:\n' + '\n'.join(selected_lines)
             # G2-managed requests may only rework an approved implementation plan.
             # Store order is receipt creation order; an older approval cannot
             # override a later rejected, pending or superseded plan.
@@ -2507,7 +2606,7 @@ class Engine:
                 after = max(done, key=lambda t: t.get('finished_at') or t.get('updated_at') or 0)['id']
             count = int(job.get('rework_count', 0)) + 1
             instruction = ('利用者が成果物の受け入れを拒否しました（差し戻し' + str(count) + '回目）。次の理由・指摘をすべて反映して成果物を修正してください。\n'
-                           '【利用者の指摘】\n' + note + '\n'
+                           '【利用者の指摘と選択した未完了項目】\n' + scoped_note + '\n'
                            '元の依頼の許可範囲で修正してください。指摘が範囲外の変更・外部送信・公開・実行を要する場合は先に質問し、許可範囲を広げないでください。'
                            '指摘のうち対応できないものは、勝手に省かず、理由と代替案を報告してください。'
                            + ('既存の成果物は上書きできないため、修正版は新しい名前（例：-v2）で保存し、どれが最新版かを報告に明記してください。'
@@ -4366,26 +4465,111 @@ class Engine:
 
 
 
-    def _pending_acceptance_items(self, job_id, reviews):
-        """Use the current review cycle's explicit pending checks.
+    @staticmethod
+    def _acceptance_check_key(value):
+        text = unicodedata.normalize('NFKC', str(value or '')).casefold()
+        return re.sub(r'[\s、。,.：:;；!?！？]+', '', text)
 
-        Original stage reports remain visible in stage_checks; they must not
-        keep a resolved check pending forever after a new review of evidence.
-        User-approved handoffs remain pending independently of review prose.
+    def _pending_acceptance_items(self, job_id, reviews):
+        """Keep only cited, required and feasible checks in the acceptance gate.
+
+        Unqualified legacy/model assertions remain visible as reference items,
+        but cannot turn a satisfied deliverable into conditional acceptance.
+        Explicit user-approved handoffs remain pending.
         """
-        items = []
-        for task in self.store.all('task'):
-            if task['job_id'] != job_id or task['status'] != 'handed_off':
+        job = self.store.get(job_id, 'job')
+        tasks = self.store.for_job('task', job_id)
+        request_text = str(job.get('goal') or '')
+        approved_plan_texts = []
+        plans = [a for a in self.store.for_job('approval', job_id)
+                 if a.get('kind') == 'plan' and a.get('status') == 'approved']
+        if plans:
+            try:
+                planner = self.store.get(plans[-1]['task_id'], 'task')
+                for spec in (planner.get('result') or {}).get('tasks') or []:
+                    if isinstance(spec, dict):
+                        approved_plan_texts.extend(str(spec.get(k) or '') for k in ('title', 'instruction'))
+                        approved_plan_texts.extend(x for x in spec.get('goal_links', []) if isinstance(x, str))
+                approved_contract = (planner.get('result') or {}).get('goal_contract') or {}
+                approved_plan_texts.extend(x for x in approved_contract.get('acceptance_criteria', []) if isinstance(x, str))
+            except (ValueError, AttributeError, TypeError):
+                approved_plan_texts = []
+
+        items_by_check = {}
+        references_by_check = {}
+        optional_marker = re.compile(r'目安|任意|参考|できれば|可能なら|望まし|optional|not required|nice.to.have', re.I)
+        impossible_marker = re.compile(r'禁止|許可されない|実施できない|実行できない|使用できない|利用できない|環境.{0,12}制約|not allowed|must not|prohibited|forbidden|cannot|unable|unavailable', re.I)
+
+        def add(target, check, row):
+            check = str(check or '').strip()
+            key = self._acceptance_check_key(check)
+            if not key:
+                return
+            if key in target:
+                previous = target[key]
+                sources = previous.setdefault('sources', [])
+                source = row.get('source')
+                if source and source not in sources:
+                    sources.append(source)
+                return
+            target[key] = dict(row, checks=[check], sources=[row['source']] if row.get('source') else [])
+
+        def detail_reason(detail, check):
+            if not isinstance(detail, dict) or self._acceptance_check_key(detail.get('check')) != self._acceptance_check_key(check):
+                return '完了条件との対応根拠がありません。'
+            if detail.get('required') is not True:
+                return '依頼または承認済み計画の必須条件として確認できません。'
+            if detail.get('owner') not in ('ai', 'user'):
+                return '実施担当が決まっていません。'
+            if detail.get('feasibility') != 'feasible':
+                return 'この条件では実施可能と確認できません。'
+            source_type = detail.get('source_type')
+            excerpt = str(detail.get('source_excerpt') or '').strip()
+            source_texts = [request_text] if source_type == 'request' else approved_plan_texts if source_type == 'approved_plan' else []
+            source_text = next((s for s in source_texts if excerpt and excerpt in s), None)
+            if source_text is None:
+                return '依頼または承認済み計画の原文引用を照合できません。'
+            at = source_text.find(excerpt)
+            context = source_text[max(0, at - 60):min(len(source_text), at + len(excerpt) + 60)]
+            if optional_marker.search(context):
+                return '出典に目安・任意・参考の表現があります。'
+            if impossible_marker.search(context):
+                return '出典に禁止または実施不能の条件があります。'
+            return None
+
+        for task in tasks:
+            if task.get('status') != 'handed_off':
                 continue
             result = task.get('result') or {}
-            items.append({'title': task['title'], 'note': task.get('handoff_note', ''),
-                          'checks': result.get('pending_checks') or result.get('checks', [])})
+            checks = [x for x in result.get('pending_checks', []) if isinstance(x, str) and x.strip()]
+            if not checks and task.get('handoff_note'):
+                checks = [task['handoff_note']]
+            for check in checks:
+                add(items_by_check, check, {'title': task['title'], 'note': task.get('handoff_note', ''),
+                    'source': '利用者が承認した引き継ぎ', 'owner': 'user', 'feasibility': '未実施として引き継ぎ',
+                    'source_type': 'user_approved_handoff'})
+
         for review in reviews:
-            pending = review['result'].get('pending_checks') or []
-            if pending:
-                items.append({'title': review['title'], 'note': '今回のレビューで未確認と報告された必須項目です。',
-                              'checks': pending})
-        return items
+            result = review.get('result') or {}
+            pending = result.get('pending_checks') or []
+            details = result.get('pending_check_details') or []
+            for check in pending:
+                if not isinstance(check, str) or not check.strip():
+                    continue
+                detail = next((d for d in details if isinstance(d, dict)
+                               and self._acceptance_check_key(d.get('check')) == self._acceptance_check_key(check)), None)
+                reason = detail_reason(detail, check)
+                if reason:
+                    add(references_by_check, check, {'title': review['title'], 'note': reason,
+                        'source': (detail or {}).get('source_excerpt', ''), 'owner': (detail or {}).get('owner', '未特定'),
+                        'feasibility': (detail or {}).get('feasibility', '未確認'), 'source_type': 'reference_only'})
+                else:
+                    add(items_by_check, check, {'title': review['title'], 'note': '依頼または承認済み計画に対応する必須条件です。',
+                        'source': detail['source_excerpt'], 'owner': detail['owner'], 'feasibility': detail['feasibility'],
+                        'source_type': detail['source_type']})
+        for key in items_by_check:
+            references_by_check.pop(key, None)
+        return list(items_by_check.values()), list(references_by_check.values())
 
     def _repair_handed_off(self, review):
         """True when the repair this review checks was reported as not fixable by its assignee (status handoff)."""
@@ -4665,14 +4849,18 @@ class Engine:
 
                     findings = [{'reviewer': t.get('agent_name', 'reviewer'), 'summary': t['result']['summary']}
                                 for t in reviews if t['result'].get('status') == 'needs_changes']
-                    pending_items = self._pending_acceptance_items(job['id'], reviews)
+                    pending_items, reference_items = self._pending_acceptance_items(job['id'], reviews)
                     if job.get('p0_contract_version') == 1:
                         criteria = (job.get('goal_contract') or {}).get('acceptance_criteria') or []
                         pending_items.append({'title': '完成物の起動と操作',
                                               'note': '実際の完成物を起動・操作して確認してください。',
+                                              'source': '受入時の必須確認', 'owner': 'user',
+                                              'feasibility': 'feasible', 'source_type': 'user_acceptance',
                                               'checks': ['完成物が起動し、操作できる']})
                         pending_items.append({'title': '依頼した機能',
                                               'note': '実際の完成物で受入条件を確認してください。',
+                                              'source': '承認済み受入条件', 'owner': 'user',
+                                              'feasibility': 'feasible', 'source_type': 'user_acceptance',
                                               'checks': list(criteria)})
                         contract = dict(job['goal_contract'], completion_status='awaiting_user_acceptance')
                         self.store.update(job['id'], goal_contract=contract)
@@ -4681,7 +4869,8 @@ class Engine:
                         'stage_checks': [{'task_id': t['id'], 'title': t['title'],
                                           'reported_status': t['result'].get('status'),
                                           'checks': t['result'].get('checks', []),
-                                          'pending_checks': t['result'].get('pending_checks', [])}
+                                          'pending_checks': t['result'].get('pending_checks', []),
+                                          'pending_check_details': t['result'].get('pending_check_details', [])}
                                          for t in self.store.all('task')
                                          if t['job_id'] == job['id'] and t['role'] in ('builder', 'researcher')
                                          and t['status'] in ('succeeded', 'handed_off')
@@ -4692,7 +4881,8 @@ class Engine:
 
                         'review_findings': findings,
 
-                        'pending_items': pending_items})
+                        'pending_items': pending_items,
+                        'reference_items': reference_items})
 
             elif result['status'] == 'needs_changes':
                 # Keep confirmation read-only; insert a builder and re-confirmation
@@ -5555,12 +5745,12 @@ class Engine:
             latest = [t for t in reviews if (t.get('review_cycle') or 0) == cycle]
             findings = [{'reviewer': t.get('agent_name', 'reviewer'), 'summary': t['result']['summary']}
                         for t in latest if t['result'].get('status') == 'needs_changes']
-            pending_items = self._pending_acceptance_items(job_id, latest)
+            pending_items, reference_items = self._pending_acceptance_items(job_id, latest)
             pending_checks = {
-                check.strip().casefold()
-                for item in pending_items
+                self._acceptance_check_key(check)
+                for item in pending_items + reference_items
                 for check in (item.get('checks') or [])
-                if isinstance(check, str) and check.strip()
+                if isinstance(check, str) and self._acceptance_check_key(check)
             }
             for task in tasks:
                 if (task['role'] not in ('builder', 'researcher')
@@ -5572,14 +5762,15 @@ class Engine:
                     continue
                 checks = [check for check in reported_pending
                           if isinstance(check, str) and check.strip()
-                          and check.strip().casefold() not in pending_checks]
+                          and self._acceptance_check_key(check) not in pending_checks]
                 if checks:
-                    pending_items.append({
+                    reference_items.append({
                         'title': task['title'],
-                        'note': '修正せず受領へ進む前に、停止した担当が未確認と報告した項目です。',
+                        'note': '根拠付きの必須条件として確認できないため、参考情報として残します。',
                         'checks': checks,
+                        'owner': '未特定', 'feasibility': '未確認', 'source_type': 'reference_only',
                     })
-                    pending_checks.update(check.strip().casefold() for check in checks)
+                    pending_checks.update(self._acceptance_check_key(check) for check in checks)
             self.store.update(job_id, status='awaiting_acceptance')
             self._record_document_quality(self.store.get(job_id, 'job'))
             self.new_approval(latest[-1], 'completion', {
@@ -5589,10 +5780,12 @@ class Engine:
                 'accept_without_fix': True,
                 'review_findings': findings,
                 'pending_items': pending_items,
+                'reference_items': reference_items,
                 'stage_checks': [{'task_id': t['id'], 'title': t['title'],
                                   'reported_status': t['result'].get('status'),
                                   'checks': t['result'].get('checks', []),
-                                  'pending_checks': t['result'].get('pending_checks', [])}
+                                  'pending_checks': t['result'].get('pending_checks', []),
+                                  'pending_check_details': t['result'].get('pending_check_details', [])}
                                  for t in tasks if t['role'] in ('builder', 'researcher')
                                  and t['status'] in ('succeeded', 'handed_off', 'blocked', 'failed', 'interrupted')
                                  and isinstance(t.get('result'), dict)]})
