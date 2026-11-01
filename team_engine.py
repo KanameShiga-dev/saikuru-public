@@ -108,10 +108,25 @@ PLAN_SCHEMA = object_schema({'summary': STR, 'tasks': {'type': 'array', 'items':
 PLAN_SCHEMA['properties']['warnings'] = {'type': 'array', 'maxItems': 20, 'items': STR}
 PLAN_SCHEMA['required'] = list(PLAN_SCHEMA['properties'])
 
-PLAN_SCHEMA_TESTS = object_schema(dict(PLAN_SCHEMA['properties'], code_test_plan=object_schema({
+_CODE_TEST_PLAN_SCHEMA = object_schema({
     'required': {'type': 'boolean'}, 'reason': STR,
     'cases': {'type': 'array', 'maxItems': 20, 'items': STR}, 'command': STR,
-    'existing_tests': {'type': 'array', 'maxItems': 20, 'items': STR}})))
+    'existing_tests': {'type': 'array', 'maxItems': 20, 'items': STR},
+    'test_methods': {'type': 'array', 'maxItems': 5,
+                     'items': {'type': 'string', 'enum': ['unit', 'integration', 'api', 'ui']}},
+    'preconditions': {'type': 'array', 'maxItems': 20, 'items': STR},
+    'setup_steps': {'type': 'array', 'maxItems': 20, 'items': STR},
+    'synthetic_accounts': {'type': 'array', 'maxItems': 10, 'items': object_schema({
+        'purpose': STR, 'fixture_method': STR, 'reset_method': STR})},
+    'ui_test_required': {'type': 'boolean'},
+    'ui_test_tool': {'type': 'string', 'enum': ['playwright', 'manual_fallback', 'not_applicable']},
+    'ui_test_reason': STR, 'ui_test_command': STR,
+    'cleanup_steps': {'type': 'array', 'maxItems': 20, 'items': STR}})
+# Keep the schema tolerant of historical planner fixtures while requiring the
+# planner gate to insist on the new execution details for every new code plan.
+_CODE_TEST_PLAN_SCHEMA['required'] = [
+    'required', 'reason', 'cases', 'command', 'existing_tests']
+PLAN_SCHEMA_TESTS = object_schema(dict(PLAN_SCHEMA['properties'], code_test_plan=_CODE_TEST_PLAN_SCHEMA))
 
 P0_CONTRACT_SCHEMA = object_schema({
     'primary_goal': STR,
@@ -168,8 +183,9 @@ REVIEW_STATUS_RULE = ('修正が必要なとき、または作業担当が実行
 # Facts about this PC that every assignee needs, so nobody plans, demands or asks for what cannot run here.
 ENVIRONMENT_RULE = ('\n実行環境：Windows・PowerShell、管理者権限なし。シンボリックリンクの作成はできない。'
                     'Developer Mode・レジストリ・実行ポリシー・ファイアウォール・サービスなど、OSやセキュリティの設定は変更しない（変更のコマンドは利用者の承認が必要）。'
-                    'これらが必要な検証は追加しない。依頼にない検証が環境の制約で実行できないときは、その検証を除くか、checks に「未実施（環境の制約）：」と書き、作業を止めない。'
-                    '依頼そのものが求めている場合を除き、OS設定の変更や別の実行環境の用意を利用者に求める質問をしない。')
+                    'OS設定や管理者権限が必要な検証は追加しない。依頼・承認済み計画で必要な検証は省略せず、プロジェクト内の隔離環境・架空データで実施できる方法を計画する。'
+                    '新しい依存パッケージの導入、外部アカウント、外部サービス、OS設定変更が必要なら勝手に準備せず、必要な範囲と費用を計画時に質問して承認を待つ。'
+                    '依頼にない検証を環境制約だけで追加しない。必須の検証が実行できない場合は、開始前に理由と代替案を利用者へ確認する。')
 REPAIR_RULE = ('\n\n【統括からの指示】指摘を修正したあと、元の依頼と計画にある検証を、この担当が使える道具で現行版に対してやり直し'
                '（開発ならテスト・実行確認、資料なら作り直した資料の read_document での読み取りなど）、'
                '実行した内容と結果をchecksに記録する。修正前の検証結果を現行版の証拠として流用しない。'
@@ -190,6 +206,11 @@ CODE_TEST_REUSE_RULE = (
     '期待値を実装の誤動作に合わせて書き換えず、変更する場合は仕様の根拠をchecksに示す。'
     '各修正後の現行版でテストを実行し、コマンド・結果・未実施理由をchecksに記録する。'
     '依頼または計画に指定された検証コマンドは対象プロジェクトを作業フォルダとして単独で実行する。'
+    'テストコマンドを実行する前に、承認済みcode_test_planのpreconditionsを確認し、setup_stepsどおりに分離環境・架空データ・架空テストアカウントを準備して、準備完了を確認する。'
+    '準備が完了する前にテストコマンドを開始しない。現行DB・実在アカウント・実データをテストへ流用しない。'
+    'Web画面の受入条件はAPIやDOMの静的確認だけで代替せず、計画にあるPlaywrightコマンドで実際のブラウザー操作と画面上の結果を確認する。'
+    'Playwrightやブラウザーが不足する場合、計画で承認済みのmanual_fallbackがあればそれに従う。それ以外はインストール・ダウンロード・手動代替へ勝手に切り替えず、理由と必要な判断を質問する。'
+    'テスト後はcleanup_stepsを実行し、テスト環境と架空アカウントを初期状態へ戻す。'
     '出力を短くするためのパイプ、リダイレクト、echo、cdなどを同じコマンド文字列に付け足さない。'
     '採否は采来に記録されたコマンド文字列の完全一致と終了状態で判定する。'
     'コマンドの実行には既存の承認と安全確認が必要であり、未許可なら質問して待つ。'
@@ -200,8 +221,19 @@ CODE_TEST_PLAN_RULE = (
     '既存テストを確認して再利用するファイルの相対パスをexisting_testsに列挙し、'
     '見つからなければ空配列にする。追加する受入条件と回帰ケースをcasesに書き、'
     '作業担当が実行する単独のテストコマンドをcommandに指定する。'
+    'test_methodsにはunit/integration/api/uiの該当方式を指定し、preconditionsには必要なランタイム・依存物・許可・ファイルを列挙する。'
+    'setup_stepsとcleanup_stepsにはテスト環境、隔離したDB・サーバー、テストデータの準備と後片付けを書く。'
+    '認証機能を試す場合はsynthetic_accountsに架空ロール、fixture_method、reset_methodを記し、実在アカウント・認証情報は作らない。'
+    '画面を持つWebシステムではui_test_required=true、test_methodsにuiを含める。利用可能な場合はui_test_tool=playwrightとし、ui_test_commandにも実行コマンドを指定する。'
+    'Playwrightが利用できない場合はmanual_fallbackと具体的な理由を記し、依存の導入・ブラウザ取得は別途許可がない限り行わない。'
+    'UIのない機能はui_test_required=false、ui_test_tool=not_applicable、ui_test_command=""にする。'
+    '采来は計画承認後、Providerを起動する前にプロジェクト内の.local/test-tmpを安全に準備・検査する。'
+    'この準備はProvider起動前の決定的なゲートであり、準備できなければ担当を起動しない。'
+    'Playwrightの有無は采来が環境を読み取り専用で確認する。ほかに利用者の操作・インストール・設定変更が必要なら、計画承認の前に質問する。'
     'このコマンドは計画の提案であり、自動承認ではない。実行時は従来の操作承認を受ける。'
-    'コード変更がない場合はrequired=false、理由をreasonに書き、cases=[]、command=""、existing_tests=[]にする。'
+    'コード変更がない場合はrequired=false、理由をreasonに書き、cases=[]、command=""、existing_tests=[]、'
+    'test_methods=[]、preconditions=[]、setup_steps=[]、synthetic_accounts=[]、ui_test_required=false、'
+    'ui_test_tool=not_applicable、ui_test_reason=""、ui_test_command=""、cleanup_steps=[]にする。'
     'コード変更のbuilder工程にはテスト作成・既存テスト再利用・現行版での実行を含める。')
 
 
@@ -3326,6 +3358,24 @@ class Engine:
         from team_code_test_contract import snapshot_files, validate_plan
         test_plan = validate_plan(result['code_test_plan']) if job.get('code_test_contract_version') else None
         existing = snapshot_files(job['project'], test_plan['existing_tests']) if test_plan and test_plan['existing_tests'] else {}
+        builder_profile_id = self.config.get('roles', {}).get('builder')
+        builder_profile = (job.get('role_overrides', {}).get('builder')
+                           or self.config.get('profiles', {}).get(builder_profile_id) or {})
+        has_builder = any(isinstance(spec, dict) and spec.get('role') == 'builder'
+                          for spec in result.get('tasks') or [])
+        needs_scoped_temp = bool(test_plan and test_plan['required']) or (
+            has_builder and builder_profile.get('adapter') == 'claude')
+        if needs_scoped_temp:
+            from team_test_environment import prepare_project_test_temp
+            _, test_temp_created = prepare_project_test_temp(job['project'])
+            self.store.event('test_environment_prepared',
+                             '担当を作成する前に、承認済みプロジェクト内の一時領域を確認・準備しました。',
+                             task['id'], job['id'],
+                             {'relative_path': '.local/test-tmp', 'created': test_temp_created})
+        if test_plan and test_plan.get('ui_test_required') and test_plan.get('ui_test_tool') == 'playwright':
+            from team_test_environment import playwright_status
+            if not playwright_status(job['project'])['available']:
+                raise ValueError('Playwright本体またはブラウザーが未準備です。テスト担当を作成する前に、準備方法を計画し直してください。')
         job = self.store.update(job['id'], security_review_required=result.get('security_review_required', False),
                                 **({'code_test_plan': test_plan, 'test_assets': existing} if test_plan is not None else {}))
 
@@ -4737,9 +4787,17 @@ class Engine:
             elif task['role'] == 'planner':
                 from team_plan_check import issues as plan_issues, repair_note, MAX_REPAIRS
                 found = plan_issues(result, bool(job.get('document_source')))
-                if found:
+                from team_code_test_contract import planning_issues as test_plan_issues
+                test_issues = test_plan_issues(result, job)
+                if found or test_issues:
                     repairs = task.get('plan_check_repairs', 0)
-                    note = repair_note(found, bool(job.get('document_source')))
+                    note = repair_note(found, bool(job.get('document_source'))) if found else (
+                        'コードテストの準備計画を承認前に具体化してください。')
+                    if test_issues:
+                        note += '\n\n【テスト準備・実行前提の不足】\n' + '\n'.join('・' + issue for issue in test_issues)
+                        note += ('\n環境・架空アカウント・データの作成/初期化・後片付けまで具体化してください。'
+                                 'Web画面はPlaywrightが利用可能ならPlaywrightを使い、利用できない場合だけ理由つきで代替手段を示してください。'
+                                 '依存の導入や外部アカウントの作成は勝手に行わず、必要なら質問してください。')
                     if repairs < MAX_REPAIRS:
                         # The planner can fix a role/tool mismatch itself: send the plan back instead of failing later.
                         instruction = compact_instruction(task['instruction'], note)

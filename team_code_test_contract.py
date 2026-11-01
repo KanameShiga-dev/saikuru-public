@@ -5,13 +5,18 @@ the existing command-approval path; only current, recorded results count.
 """
 
 import hashlib
+import re
 from pathlib import Path
 
 from team_validation_gate import findings, validate_commands
 
 
 def validate_plan(value):
-    if not isinstance(value, dict) or set(value) != {'required', 'reason', 'cases', 'command', 'existing_tests'}:
+    required_keys = {'required', 'reason', 'cases', 'command', 'existing_tests'}
+    optional_keys = {'test_methods', 'preconditions', 'setup_steps', 'synthetic_accounts',
+                     'ui_test_required', 'ui_test_tool', 'ui_test_reason', 'ui_test_command', 'cleanup_steps'}
+    if (not isinstance(value, dict) or not required_keys <= set(value)
+            or set(value) - required_keys - optional_keys):
         raise ValueError('計画にコードのテスト方針を指定してください。')
     required, reason, cases, command, existing = (
         value[key] for key in ('required', 'reason', 'cases', 'command', 'existing_tests'))
@@ -25,17 +30,141 @@ def validate_plan(value):
     if (not isinstance(existing, list) or len(existing) > 20 or
             any(not isinstance(name, str) or not name.strip() for name in existing)):
         raise ValueError('既存テストファイルの一覧が不正です。')
+    def text_list(key, maximum=20):
+        items = value.get(key, [])
+        if (not isinstance(items, list) or len(items) > maximum
+                or any(not isinstance(item, str) or not item.strip() or len(item) > 500 for item in items)):
+            raise ValueError('テスト環境の準備項目が不正です。')
+        return [item.strip() for item in items]
+
+    methods = value.get('test_methods', [])
+    if (not isinstance(methods, list) or len(methods) > 5
+            or any(item not in ('unit', 'integration', 'api', 'ui') for item in methods)
+            or len(methods) != len(set(methods))):
+        raise ValueError('テスト方式の指定が不正です。')
+    preconditions = text_list('preconditions')
+    setup_steps = text_list('setup_steps')
+    cleanup_steps = text_list('cleanup_steps')
+    accounts = value.get('synthetic_accounts', [])
+    if (not isinstance(accounts, list) or len(accounts) > 10
+            or any(not isinstance(row, dict) or set(row) != {'purpose', 'fixture_method', 'reset_method'}
+                   or any(not isinstance(row[key], str) or not row[key].strip() or len(row[key]) > 500
+                          for key in ('purpose', 'fixture_method', 'reset_method')) for row in accounts)):
+        raise ValueError('架空テストアカウントの準備・初期化方法が不正です。')
+    ui_required = value.get('ui_test_required', False)
+    ui_tool = value.get('ui_test_tool', 'not_applicable')
+    ui_reason = value.get('ui_test_reason', '')
+    ui_command = value.get('ui_test_command', '')
+    if (type(ui_required) is not bool or ui_tool not in ('playwright', 'manual_fallback', 'not_applicable')
+            or not isinstance(ui_reason, str) or len(ui_reason) > 500
+            or not isinstance(ui_command, str)):
+        raise ValueError('画面テストの計画が不正です。')
+    if ui_required:
+        if ui_tool == 'not_applicable' or 'ui' not in methods:
+            raise ValueError('画面が必要なテストには画面テスト方式を指定してください。')
+        if ui_tool == 'playwright':
+            if not ui_command.strip():
+                raise ValueError('Playwrightの画面テストコマンドがありません。')
+            validate_commands([ui_command])
+        elif not ui_reason.strip():
+            raise ValueError('手動画面テストへ切り替える理由を記録してください。')
+    elif ui_tool != 'not_applicable' or ui_command.strip():
+        raise ValueError('画面テストが不要な計画に画面テストのコマンドが指定されています。')
     if required:
         if not cases:
             raise ValueError('コード変更の計画にはテストする条件が必要です。')
+        if 'test_methods' in value and not methods:
+            raise ValueError('コード変更の計画には実施するテスト方式が必要です。')
+        if 'preconditions' in value and not preconditions:
+            raise ValueError('追加の実行前提がない場合も、その旨を明記してください。')
+        if 'setup_steps' in value and not setup_steps:
+            raise ValueError('追加準備がない場合も、その旨を明記してください。')
         validate_commands([command])
         from team_dlp import require_clean_input
         require_clean_input(command, False, '計画のテストコマンド')
-    elif not reason.strip() or cases or command or existing:
+        if ui_command.strip():
+            require_clean_input(ui_command, False, '計画の画面テストコマンド')
+        for account in accounts:
+            for field in account.values():
+                require_clean_input(field, False, '架空テストアカウントの説明')
+    elif not reason.strip() or cases or command or existing or methods or preconditions or setup_steps \
+            or accounts or ui_required or ui_tool != 'not_applicable' or ui_command or cleanup_steps:
         raise ValueError('テスト対象外の計画には理由だけを指定してください。')
     return {'required': required, 'reason': reason.strip(),
             'cases': [case.strip() for case in cases], 'command': command.strip(),
-            'existing_tests': existing}
+            'existing_tests': existing, 'test_methods': methods,
+            'preconditions': preconditions, 'setup_steps': setup_steps,
+            'synthetic_accounts': accounts, 'ui_test_required': ui_required,
+            'ui_test_tool': ui_tool, 'ui_test_reason': ui_reason.strip(),
+            'ui_test_command': ui_command.strip(), 'cleanup_steps': cleanup_steps}
+
+
+def planning_issues(result, job):
+    """Catch test setup omissions before presenting a plan for approval."""
+    # This contract was added after existing jobs had already been stored.
+    # Do not retroactively impose its planner schema on those jobs.
+    if not job.get('code_test_contract_version'):
+        return []
+    plan = result.get('code_test_plan') or {}
+    scope_text = ' '.join([str(job.get('goal') or ''), str(result.get('summary') or '')]
+                          + [str(x) for key in ('deliverables', 'acceptance_criteria')
+                             for x in (result.get('goal_contract') or job.get('goal_contract') or {}).get(key, [])]
+                          + [str(t.get('title') or '') + ' ' + str(t.get('instruction') or '')
+                             for t in result.get('tasks') or [] if isinstance(t, dict)])
+    ui_required = bool(re.search(r'(?i)\b(web|website|browser|html|frontend|front-end|user interface|ui)\b'
+                                 r'|webシステム|webアプリ|ブラウザ|画面|画面操作|ユーザーインターフェース',
+                                 scope_text))
+    auth_required = bool(re.search(r'(?i)\b(authentication|authorization|login|sign.?in|account|role-based)\b'
+                                   r'|認証|ログイン|権限|テストアカウント', scope_text))
+    if not plan.get('required'):
+        if (job.get('code_test_contract_version') and ui_required
+                and any(isinstance(t, dict) and t.get('role') == 'builder' for t in result.get('tasks') or [])):
+            return ['画面を持つシステムを変更する計画ですが、テスト対象外になっています。コード/APIと画面操作の検証を計画してください。']
+        return []
+    issues = []
+    required_fields = ('test_methods', 'preconditions', 'setup_steps', 'synthetic_accounts',
+                       'ui_test_required', 'ui_test_tool', 'ui_test_reason', 'ui_test_command', 'cleanup_steps')
+    missing = [key for key in required_fields if key not in plan]
+    if missing:
+        return ['テスト計画に実行方式・環境前提・準備/後片付け・架空アカウント・画面確認の判断がありません。']
+    if not plan['test_methods'] or not any(mode in plan['test_methods'] for mode in ('unit', 'integration', 'api')):
+        issues.append('コード機能のテストコードを含む unit / integration / api の方式がありません。')
+    if not plan['preconditions']:
+        issues.append('ランタイム、依存物、権限、必要ファイルなどの実行前提が明記されていません。')
+    if not any('.local/test-tmp' in value.replace('\\', '/').casefold()
+               for value in plan['preconditions']):
+        issues.append('采来が準備するプロジェクト内の .local/test-tmp が実行前提に記録されていません。')
+    if not plan['setup_steps']:
+        issues.append('テスト環境、分離DB/サーバー、テストデータをどう準備するかが明記されていません。')
+    if not plan['cleanup_steps']:
+        issues.append('テスト環境や架空データをどう初期化・後片付けするかが明記されていません。')
+    if auth_required and not plan['synthetic_accounts']:
+        issues.append('認証/権限を試す架空アカウントの役割、作成方法、初期化方法がありません。')
+    if ui_required and not plan['ui_test_required']:
+        issues.append('画面を持つシステムですが、画面操作テストを計画していません。')
+    if ui_required and plan['ui_test_required']:
+        if 'ui' not in plan['test_methods']:
+            issues.append('画面操作テストの方式uiがtest_methodsにありません。')
+        if plan['ui_test_tool'] == 'playwright':
+            from team_test_environment import playwright_status
+            if not plan['ui_test_command']:
+                issues.append('Playwrightの実行コマンドがありません。')
+            elif not playwright_status(job['project'])['available']:
+                issues.append('Playwrightの実行環境が未準備です。手動へ黙って切り替えず、理由を明示してください。')
+        elif plan['ui_test_tool'] != 'manual_fallback' or not plan['ui_test_reason'].strip():
+            issues.append('Playwrightが使えない場合の代替方法と理由が明記されていません。')
+        else:
+            from team_test_environment import playwright_status
+            if playwright_status(job['project'])['available']:
+                issues.append('Playwrightが利用可能です。手動代替ではなく、Playwrightによる画面操作テストを計画してください。')
+    elif plan['ui_test_required']:
+        if plan['ui_test_tool'] == 'playwright' and not plan['ui_test_command']:
+            issues.append('Playwrightの実行コマンドがありません。')
+        if plan['ui_test_tool'] == 'playwright':
+            from team_test_environment import playwright_status
+            if not playwright_status(job['project'])['available']:
+                issues.append('Playwrightの実行環境が未準備です。')
+    return issues
 
 
 def commands(job):
@@ -44,6 +173,9 @@ def commands(job):
     command = plan.get('command') if plan.get('required') else None
     if command and command not in result:
         result.append(command)
+    ui_command = plan.get('ui_test_command') if plan.get('ui_test_required') else None
+    if ui_command and ui_command not in result:
+        result.append(ui_command)
     return result
 
 

@@ -10,8 +10,8 @@ import time
 def validate_commands(value):
     if value in (None, []):
         return []
-    if not isinstance(value, list) or not 1 <= len(value) <= 3:
-        raise ValueError('検証コマンドは1〜3件の配列で指定してください。')
+    if not isinstance(value, list) or not 1 <= len(value) <= 5:
+        raise ValueError('検証コマンドは1〜5件の配列で指定してください。')
     commands = []
     for item in value:
         if not isinstance(item, str) or not item.strip() or len(item) > 500 \

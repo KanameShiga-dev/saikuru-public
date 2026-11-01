@@ -973,7 +973,24 @@ function reportText(result){
   let text=result.summary||'';
   if(result.stage_checks?.length)text+='\n\n各担当の検証報告（未実施の項目を含みます。合格の保証ではありません）:\n'+result.stage_checks.map(item=>`${item.title}（担当報告: ${item.reported_status||'不明'}）\n${(item.checks||[]).join('\n')}${item.pending_checks?.length?'\n担当時点で未確認と報告された項目:\n'+item.pending_checks.map(c=>'・'+c).join('\n'):''}${item.pending_check_details?.length?'\n条件の出典・担当・実施可否:\n'+item.pending_check_details.map(d=>`・${d.check} / ${d.source_type}: ${d.source_excerpt} / ${d.owner==='ai'?'AI':d.owner==='user'?'利用者':'未特定'} / ${d.feasibility==='feasible'?'実施可能':d.feasibility==='infeasible'?'実施困難':'未確認'}`).join('\n'):''}`).join('\n\n');
   if(result.tasks)text+='\n\n'+result.tasks.map((t,i)=>`${i+1}. ${t.title}（${roles[t.role]||t.role}）\n${t.instruction}`).join('\n\n');
-  if(result.code_test_plan){const p=result.code_test_plan;text+='\n\nコードテスト計画: '+(p.required?'実施する':'対象外（'+(p.reason||'理由未記載')+'）');if(p.required)text+='\n既存テスト: '+(p.existing_tests?.length?p.existing_tests.join('、'):'なし')+'\n確認する条件:\n'+(p.cases||[]).map(c=>'・'+c).join('\n')+'\n実行予定: '+p.command+'\n※計画のコマンドは自動承認されません。実行時に既存の安全確認を通します。';}
+  if(result.code_test_plan){
+    const p=result.code_test_plan,methodNames={unit:'単体',integration:'結合',api:'API',ui:'画面操作'};
+    text+='\n\nコードテスト計画: '+(p.required?'実施する':'対象外（'+(p.reason||'理由未記載')+'）');
+    if(p.required){
+      text+='\n方式: '+(p.test_methods||[]).map(x=>methodNames[x]||x).join('、')
+        +'\n既存テスト: '+(p.existing_tests?.length?p.existing_tests.join('、'):'なし')
+        +'\n確認する条件:\n'+(p.cases||[]).map(c=>'・'+c).join('\n')
+        +'\n実行前提:\n'+(p.preconditions||[]).map(c=>'・'+c).join('\n')
+        +'\n環境・データ準備:\n'+(p.setup_steps||[]).map(c=>'・'+c).join('\n')
+        +'\n架空テストアカウント:\n'+((p.synthetic_accounts||[]).length?p.synthetic_accounts.map(a=>`・${a.purpose}: ${a.fixture_method} / 初期化: ${a.reset_method}`).join('\n'):'認証アカウントは使用しない')
+        +'\n画面テスト: '+(p.ui_test_required?(p.ui_test_tool==='playwright'?'Playwright':p.ui_test_tool==='manual_fallback'?'手動（代替）':'方式未指定'):'対象外')
+        +(p.ui_test_required&&p.ui_test_reason?'\n理由: '+p.ui_test_reason:'')
+        +(p.ui_test_command?'\n画面テストコマンド: '+p.ui_test_command:'')
+        +'\n後片付け:\n'+(p.cleanup_steps||[]).map(c=>'・'+c).join('\n')
+        +'\n采来は承認後、担当/Providerの起動前にプロジェクト内の .local/test-tmp を安全確認して準備します。'
+        +'\n※記載されたテストコマンドは自動実行されません。実行時に既存の安全確認を通します。';
+    }
+  }
   if(result.test_files?.length)text+='\n\n今回使用したテストファイル: '+result.test_files.join('、')+(result.test_change_reason?'\nテスト変更の理由: '+result.test_change_reason:'');
   if(result.security_review_required===true)text+='\n\n通常レビューの後、common-security-reviewerを独立セッションで起動します。';
   if(result.checks?.length)text+='\n\n報告された検証:\n'+result.checks.map(c=>'・'+c).join('\n');
