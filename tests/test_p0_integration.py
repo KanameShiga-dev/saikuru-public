@@ -101,6 +101,170 @@ class P0IntegrationTests(unittest.TestCase):
 class WorkflowApiIntegrationTests(unittest.TestCase):
     """Synthetic worker results and synthetic user actions, never real receipt."""
 
+    def test_four_fictional_work_packages_run_in_order_to_synthetic_receipt(self):
+        import json
+        import shutil
+        from pathlib import Path
+        from tests import test_workflow_api as fixtures
+        from unittest.mock import patch
+        def four_packages(two=False):
+            case = Path(__file__).resolve().parents[3] / 'Work' / 'ai-driven-development-plan-20261026' / 'runs' / 'W06.02' / 'claude' / 'case.json'
+            value = json.loads(case.read_text(encoding='utf-8'))['plan_payload']
+            value['checkpoint_paths'] = ['app.py', 'w101.py', 'w102.py', 'w103.py', 'w104.py',
+                                         'tests/test_equipment.py']
+            return value
+        with patch('tests.test_plan_revision.proposal', side_effect=four_packages):
+            f = fixtures.WorkflowApiTests(); self.addCleanup(f.doCleanups); f.setUp()
+        engine, store, job_id = f.engine, f.store, f.f.job_id
+        case_dir = Path(__file__).resolve().parents[3] / 'Work' / 'ai-driven-development-plan-20261026' / 'runs' / 'W06.03' / 'codex'
+        shutil.copyfile(case_dir / 'equipment_fixture.py', f.f.workspace.project / 'app.py')
+        shutil.copyfile(case_dir / 'test_equipment_fixture.py', f.f.workspace.project / 'tests' / 'test_equipment.py')
+        for index in range(1, 5):
+            (f.f.workspace.project / ('w10%d.py' % index)).write_text('# SYNTHETIC package artifact\n', encoding='utf-8')
+        original_finish = engine._finish
+        def finish_with_package_artifact(task, result):
+            if task.get('role') == 'builder' and task.get('work_package_id'):
+                wp = store.get(task['work_package_id'], 'work_package')
+                artifacts = [wp['wbs_id'].replace('.', '').lower() + '.py']
+                if wp['wbs_id'] == 'W1.01': artifacts.append('app.py')
+                result = dict(result, artifacts=artifacts)
+            return original_finish(task, result)
+        finish_bridge = patch.object(engine, '_finish', side_effect=finish_with_package_artifact)
+        finish_bridge.start(); self.addCleanup(finish_bridge.stop)
+        original_result = Context.command_result
+        def correlated_result(context, command, exit_code, output, timed_out=False):
+            operation_id = 'synthetic-' + str(len(store.job_events(job_id, 'operation_result')))
+            context.command_started(command, operation_id)
+            return original_result(context, command, exit_code, output, timed_out, operation_id=operation_id)
+        operation_bridge = patch.object(Context, 'command_result', new=correlated_result)
+        operation_bridge.start(); self.addCleanup(operation_bridge.stop)
+        packages = store.for_job('work_package', job_id)
+        self.assertEqual(len(packages), 4)
+        decisions = []
+        for index in range(4):
+            builder = next(t for t in f.f.tasks() if t.get('plan_task_index') == index)
+            if index == 1:
+                first = next(t for t in f.f.tasks() if t.get('plan_task_index') == 0)
+                first_before = store.get(first['id'], 'task')
+                running = engine._reserve_workflow_attempt(builder, engine.workflow_dispatch_view(job_id))
+                previous_attempt = running['current_attempt']['id']
+                baseline = engine.prepare_native_scope_baseline(running)
+                store.update(builder['id'], agent_run={'id': 'fictional-s6-native',
+                    'provider': running['profile']['adapter'], 'model': running['profile']['model'],
+                    'effort': running['profile']['effort'], 'attempt_id': previous_attempt,
+                    'started_at': running['current_attempt']['started_at'],
+                    'measurement_ids': {'job_id': job_id, 'task_id': builder['id'], 'attempt_id': previous_attempt},
+                    'tool_observation_version': 1, 'tool_calls': {'fileChange': 1}, 'scope_baseline': baseline})
+                path = f.f.workspace.project / 'w102.py'
+                path.write_bytes(path.read_bytes() + b'# SYNTHETIC S6 edit before any command\n')
+                # A new isolated Engine and SQLite connections exercise the
+                # persisted restart/fencing path without touching the running App.
+                from http.server import ThreadingHTTPServer
+                import threading
+                from server import Handler
+                f.http.shutdown(); f.thread.join(5); f.http.server_close()
+                from team_store import Store
+                from team_engine import Engine
+                restarted_store = Store(store.directory)
+                self.addCleanup(restarted_store.db.close)
+                restarted_engine = Engine(restarted_store, engine.config, engine.commands, engine.endpoint)
+                restarted_engine.paused = True
+                self.addCleanup(restarted_engine.handoff.close)
+                finish_bridge.stop()
+                engine, store = restarted_engine, restarted_store
+                f.engine = f.f.engine = f.app.engine = engine
+                f.store = f.f.store = f.app.store = store
+                f.http = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+                f.http.app = f.app
+                f.app.port = f.http.server_port; f.app.origin = 'http://127.0.0.1:' + str(f.app.port)
+                f.thread = threading.Thread(target=f.http.serve_forever, daemon=True); f.thread.start()
+                original_finish = engine._finish
+                finish_bridge = patch.object(engine, '_finish', side_effect=finish_with_package_artifact)
+                finish_bridge.start(); self.addCleanup(finish_bridge.stop)
+                self.assertIn(store.get(builder['id'])['current_attempt']['status'], ('closed', 'fenced'))
+                code, assessed = f.request('/api/workflow/recovery/assess', {
+                    'action': 'assess_recovery', 'job_id': job_id, 'task_id': builder['id']}, maintenance=True)
+                if not assessed.get('eligible_for_reconciliation'):
+                    engine._recovery_control_inputs(builder['id'], allow_native_assessment=True)
+                self.assertEqual(code, 200, assessed); self.assertTrue(assessed['eligible_for_reconciliation'], assessed)
+                code, reconciled = f.request('/api/workflow/recovery/reconcile', {
+                    'action': 'reconcile_recovery', 'job_id': job_id, 'task_id': builder['id'],
+                    'target': assessed['target'], 'writer_stopped': True, 'checked_changes': True,
+                    'external_effects': 'none_confirmed', 'note': 'SYNTHETIC file-only S6 observation'}, maintenance=True)
+                self.assertEqual(code, 200, reconciled)
+                code, confirmed = f.request('/api/workflow/control', {
+                    'action': 'confirm_recovery', 'job_id': job_id, 'task_id': builder['id'],
+                    'target': engine.workflow_control_target(job_id, 'confirm_recovery', builder['id']),
+                    'writer_stopped': True, 'checked_changes': True}, maintenance=True)
+                self.assertEqual(code, 200, confirmed); self.assertFalse(confirmed['queued'])
+                code, retried = f.request('/api/workflow/control', {
+                    'action': 'retry_task', 'job_id': job_id, 'task_id': builder['id'],
+                    'target': engine.workflow_control_target(job_id, 'retry_task', builder['id']),
+                    'checked_changes': True, 'note': 'SYNTHETIC S6 retry', 'handoff_allowed': False}, maintenance=True)
+                self.assertEqual(code, 200, retried); self.assertTrue(retried['queued'])
+                self.assertEqual(store.get(first['id'], 'task'), first_before)
+                original_reserve = engine._reserve_workflow_attempt
+                def verify_fresh_session(candidate, view):
+                    from types import SimpleNamespace
+                    reserved = original_reserve(candidate, view)
+                    if reserved['id'] == builder['id']:
+                        self.assertNotEqual(reserved['current_attempt']['id'], previous_attempt)
+                        inherited = json.loads(engine._checkpoint_session_context(SimpleNamespace(task=reserved, agent_run={})))
+                        self.assertFalse(inherited['checkpoint_reference']['native_resume'])
+                    return reserved
+                reserve_guard = patch.object(engine, '_reserve_workflow_attempt', side_effect=verify_fresh_session)
+                reserve_guard.start()
+                try:
+                    f.f.finish_next(summary='SYNTHETIC resumed W1.02')
+                finally:
+                    reserve_guard.stop()
+                self.assertEqual(store.get(first['id'], 'task'), first_before)
+                for _ in range(2):
+                    f.f.finish_next(summary='SYNTHETIC offline package review')
+            else:
+                for _ in range(3):
+                    f.f.finish_next(summary='SYNTHETIC offline package result')
+            package = store.get(builder['work_package_id'], 'work_package')
+            code, review = f.request('/api/workflow/feature-review/prepare', {
+                'job_id': job_id, 'work_package_id': package['id'],
+                'work_package_revision': package['state_revision'], 'action': 'request_feature_review'})
+            self.assertEqual(code, 200, review)
+            if index == 2:
+                earlier = [store.get(ident, 'approval') for ident in decisions]
+                code, rejection = f.request('/api/workflow/feature-review/decide', f.decision_body(review, False))
+                self.assertEqual(code, 200, rejection)
+                self.assertEqual([store.get(ident, 'approval') for ident in decisions], earlier)
+                self.assertEqual(set(rejection['affected_ids']), {package['id'], packages[3]['id']},
+                    [(w.get('wbs_id'), w.get('id')) for w in store.for_job('work_package', job_id)])
+                for _ in range(3):
+                    f.f.finish_next(summary='SYNTHETIC bounded repair and review')
+                package = store.get(builder['work_package_id'], 'work_package')
+                code, review = f.request('/api/workflow/feature-review/prepare', {
+                    'job_id': job_id, 'work_package_id': package['id'],
+                    'work_package_revision': package['state_revision'], 'action': 'request_feature_review'})
+                self.assertEqual(code, 200, review)
+            code, decision = f.request('/api/workflow/feature-review/decide', f.decision_body(review))
+            self.assertEqual(code, 200, decision); self.assertFalse(decision['formal_receipt'])
+            decisions.append(review['approval_id'])
+        for _ in [t for t in f.f.tasks() if t.get('workflow_job_task') and t.get('status') == 'queued']:
+            f.f.finish_next(summary='SYNTHETIC integration review')
+        self.assertEqual(f.f.job()['status'], 'awaiting_acceptance')
+        completion = next(a for a in store.for_job('approval', job_id)
+                          if a['kind'] == 'completion' and a['status'] == 'pending')
+        for _ in range(12):
+            if not completion['payload'].get('pending_items'): break
+            code, result = f.request('/api/completion/evidence', {'approval_id': completion['id'],
+                'item_index': 0, 'check_index': 0, 'evidence': 'SYNTHETIC local inspection', 'confirmed': True})
+            self.assertEqual(code, 200, result)
+            completion = store.get(result['approval_id'], 'approval')
+        self.assertFalse(completion['payload'].get('pending_items'))
+        self.assertEqual(f.request('/api/jobs/review-confirmation',
+            {'approval_id': completion['id'], 'confirmed': True})[0], 200)
+        code, result = f.request('/api/jobs/formal-acceptance', {'approval_id': completion['id'],
+            'confirmation': '正式受領', 'note': 'SYNTHETIC ONLY'})
+        self.assertEqual(code, 200, result); self.assertEqual(result['status'], 'accepted')
+        self.assertEqual(len(decisions), 4)
+
     def test_serial_features_to_global_review_and_explicit_synthetic_receipt(self):
         from tests import test_workflow_api as fixtures
         f = fixtures.WorkflowApiTests(); self.addCleanup(f.doCleanups); f.setUp()
