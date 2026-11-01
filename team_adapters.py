@@ -35,13 +35,12 @@ def _set_scoped_test_temp(ctx, env):
     job = ctx.engine.store.get(ctx.task['job_id'], 'job')
     if ctx.task.get('role') != 'builder':
         return
-    project_root = Path(ctx.project).resolve()
-    test_temp = project_root / '.local' / 'test-tmp'
-    is_junction = getattr(test_temp, 'is_junction', lambda: False)
-    if (test_temp.is_symlink() or is_junction() or not test_temp.is_dir()
-            or not test_temp.resolve().is_relative_to(project_root)):
+    from team_test_environment import TestEnvironmentError, prepare_project_test_temp
+    try:
+        test_temp, _ = prepare_project_test_temp(ctx.project)
+    except TestEnvironmentError:
         raise ProviderError('指定テストの一時領域が許可範囲内にありません。テストは開始していません。',
-                            'test_temp_scope')
+                            'test_temp_scope', model_call_state='not_started') from None
     # Scope TEMP/TMP to the registered project for this Claude builder process and
     # its test child process. This does not change the Windows or user environment.
     env['TEMP'] = str(test_temp.resolve())

@@ -336,10 +336,12 @@ class App:
         exposed['tasks'] = [
             ({'id': task['id'], 'job_id': task['job_id'], 'status': task['status'],
               'role': task.get('role'), 'after': task.get('after'),
-              'title': '保守対応待ち', 'attempt': task.get('attempt', 0),
+              'title': ('担当工程' if task.get('status') in ('queued', 'running', 'awaiting_approval', 'succeeded') else '保守対応待ち'),
+              'attempt': task.get('attempt', 0),
               'instruction': '', 'result': None, 'agent_name': None, 'common_agents': [],
               'profile': {'adapter': '', 'model': '', 'effort': ''},
-              'summary': '開発エンジンの確認が必要です。途中成果は保存されています。'}
+              'summary': ('' if task.get('status') in ('queued', 'running', 'awaiting_approval', 'succeeded')
+                          else '開発エンジンの確認が必要です。途中成果は保存されています。')}
              if task['id'] in maintenance_tasks else task)
             for task in state['tasks']]
         exposed['jobs'] = []
@@ -347,13 +349,21 @@ class App:
             stop = job.get('p0_interruption')
             if job.get('p0_contract_version') == 1 and isinstance(stop, dict):
                 public_stop = {k: v for k, v in stop.items()
-                               if k not in ('failure_signature', 'interruption_reason', 'public_reason')}
+                               if k not in ('failure_signature', 'interruption_reason', 'public_reason', 'failure_category')}
                 if stop.get('recovery_status') == 'maintenance_required':
                     reason = {'test_temp_scope': 'test_temp_unavailable',
                               'codex_sandbox': 'execution_environment',
                               'format': 'report_format',
                               'task_timeout': 'time_limit', 'timeout': 'time_limit',
+                              'claude_auth': 'authentication', 'codex_auth': 'authentication',
+                              'copilot_auth': 'authentication', 'authentication': 'authentication',
+                              'usage_limit': 'provider_limit', 'usage_limit_wait': 'provider_limit',
+                              'rate_limit': 'provider_limit', 'quota_exceeded': 'provider_limit',
                               'provider': 'provider_failure'}.get(stop.get('interruption_reason'))
+                    category = stop.get('failure_category')
+                    if category in ('authentication', 'provider_limit', 'timeout', 'sandbox_setup'):
+                        reason = {'authentication': 'authentication', 'provider_limit': 'provider_limit',
+                                  'timeout': 'time_limit', 'sandbox_setup': 'execution_environment'}[category]
                     if reason:
                         public_stop['public_reason'] = reason
                 exposed['jobs'].append(dict(job, p0_interruption=public_stop))
@@ -487,6 +497,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
                 return self.send(200, self.app.public_state())
+            if path == '/api/recovery/user-target':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                return self.send(200, self.app.engine.user_recovery_target(
+                    (query.get('job_id') or [''])[0], (query.get('task_id') or [None])[0]))
             if path == '/api/maintenance/state':
                 if not self.maintenance_authorized():
                     raise PermissionError('保守担当の認証が必要です。')
@@ -700,7 +716,24 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized() or self.headers.get('X-Agent-Team-UI') != '1':
                 raise PermissionError('ブラウザからの認証済み操作が必要です。')
             engine = self.app.engine
-            if path == '/api/workflow/recovery/assess':
+            if path == '/api/recovery/user-question':
+                if set(body) != {'job_id', 'target'}:
+                    raise ValueError('確認事項の指定が不正です。')
+                result = engine.user_recovery_question(body['job_id'], body['target'])
+            elif path == '/api/recovery/user-answer':
+                if set(body) != {'job_id', 'target', 'answers', 'confirmed'}:
+                    raise ValueError('確認事項への回答が不正です。')
+                result = engine.user_recovery_answer(body['job_id'], body['target'], body['answers'], body['confirmed'])
+            elif path == '/api/recovery/user-request':
+                if not {'job_id', 'target', 'confirmed'} <= set(body) or set(body) - {'job_id', 'target', 'confirmed', 'include_diagnostic'}:
+                    raise ValueError('復旧調査の指定が不正です。')
+                result = engine.user_recovery_request(body['job_id'], body['target'], body['confirmed'],
+                                                      body.get('include_diagnostic', False))
+            elif path == '/api/recovery/user-retry':
+                if set(body) != {'job_id', 'target', 'confirmed'}:
+                    raise ValueError('復旧操作の指定が不正です。')
+                result = engine.user_recovery_retry(body['job_id'], body['target'], body['confirmed'])
+            elif path == '/api/workflow/recovery/assess':
                 if not self.maintenance_authorized():
                     raise PermissionError('保守担当の認証が必要です。')
                 workflow_body(body, ('action', 'job_id', 'task_id'), 'assess_recovery')

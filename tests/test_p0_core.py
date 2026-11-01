@@ -265,6 +265,27 @@ class P0ApiTests(unittest.TestCase):
         self.assertNotIn('interruption_reason', stop)
         self.assertNotIn('failure_signature', stop)
 
+    def test_known_recovery_categories_are_explained_without_raw_diagnostics(self):
+        store = self.server.app.store
+        job = store.all('job')[0]
+        task = store.for_job('task', job['id'])[0]
+        for category, expected in [('authentication', 'authentication'),
+                                   ('provider_limit', 'provider_limit'),
+                                   ('timeout', 'time_limit'),
+                                   ('sandbox_setup', 'execution_environment'),
+                                   ('fictional-private-data', None)]:
+            with self.subTest(category=category):
+                store.update(job['id'], p0_contract_version=1, goal_contract=initial(job['goal']),
+                             p0_interruption={'interrupted_task_id': task['id'],
+                                              'recovery_status': 'maintenance_required',
+                                              'interruption_reason': 'unknown',
+                                              'failure_category': category})
+                _, public = self.request('/api/state')
+                stop = next(item for item in public['jobs'] if item['id'] == job['id'])['p0_interruption']
+                self.assertEqual(stop.get('public_reason'), expected)
+                self.assertNotIn('interruption_reason', stop)
+                self.assertNotIn('failure_category', stop)
+
     def test_unrelated_optimization_becomes_nonblocking_backlog(self):
         store = self.server.app.store
         job = store.all('job')[0]
