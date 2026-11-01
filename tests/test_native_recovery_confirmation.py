@@ -621,6 +621,137 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         self.assertFalse(result['source_unchanged']); self.assertFalse(result['resume_allowed'])
         self.assertIn('native_confirmation_source_changed', result['reasons'])
 
+    def test_finalize_native_checkpoint_checks_source_and_publishes_receipt(self):
+        record, refs = self.draft()
+        actor = 'authenticated_maintenance_session'
+        with self.assertRaises(ValueError):
+            self.engine.finalize_native_checkpoint(record['id'], writer_stopped=True)
+        path = self.f.f.workspace.project / 'app.py'
+        original = path.read_bytes()
+        try:
+            path.write_bytes(original + b'\n# SYNTHETIC changed\n')
+            with self.assertRaises(ValueError):
+                self.engine.finalize_native_checkpoint(record['id'], writer_stopped=True, actor=actor)
+            self.assertEqual(self.store.get(record['id'], 'checkpoint')['state'], 'writing')
+        finally:
+            path.write_bytes(original)
+        result = self.engine.finalize_native_checkpoint(record['id'], writer_stopped=True, actor=actor)
+        self.assertTrue(result['store_ready'])
+        self.assertTrue(result['handoff_synced'])
+        self.assertFalse(result['resume_allowed'])
+
+    def test_native_retry_from_user_target_queues_fresh_session(self):
+        self.confirmed()
+        target = self.engine.workflow_control_target(self.job_id, 'retry_task', self.task_id)
+        before = self.store.get(self.task_id, 'task')
+        with self.assertRaises(ValueError):
+            self.engine.retry(self.task_id, '', workflow_target=target)
+        with patch.object(self.engine, '_checkpoint_work_package_dispatch_valid', return_value=True):
+            result = self.engine.retry(self.task_id, '', workflow_target=target,
+                actor='authenticated_maintenance_session')
+        task = self.store.get(self.task_id, 'task')
+        self.assertTrue(result['queued'])
+        self.assertEqual(task['checkpoint_session_binding']['source_attempt_id'], before['current_attempt']['id'])
+        self.assertEqual(self.engine._validate_native_queued_session(self.task_id), task['checkpoint_session_binding'])
+
+    def test_native_retry_scheduler_reserves_new_attempt_without_provider(self):
+        self.confirmed()
+        target = self.engine.workflow_control_target(self.job_id, 'retry_task', self.task_id)
+        old = self.store.get(self.task_id, 'task')['current_attempt']['id']
+        self.engine.retry(self.task_id, '', workflow_target=target, actor='authenticated_maintenance_session')
+        self.engine.paused = False
+        with patch.object(self.engine, '_start_task_thread') as start:
+            self.engine.tick()
+        self.assertEqual(start.call_count, 1)
+        reserved = self.store.get(self.task_id, 'task')
+        self.assertEqual(reserved['status'], 'running')
+        self.assertNotEqual(reserved['current_attempt']['id'], old)
+        from types import SimpleNamespace
+        context = SimpleNamespace(task=reserved, agent_run={})
+        inherited = json.loads(self.engine._checkpoint_session_context(context))
+        self.assertEqual(inherited['checkpoint_reference']['attempt_id'], reserved['current_attempt']['id'])
+
+    def test_native_retry_queues_binding_only_after_final_check(self):
+        record, refs = self.draft()
+        self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        self.assertTrue(self.engine.resync_checkpoint(record['id'])['handoff_synced'])
+        actor = 'authenticated_maintenance_session'
+        before = self.store.get(self.task_id, 'task')
+        with self.assertRaises(ValueError):
+            self.engine._queue_native_checkpoint_retry(self.task_id, {}, actor=None)
+        with patch.object(self.engine, '_validate_workflow_control_target'), \
+             patch.object(self.engine, '_checkpoint_work_package_dispatch_valid', return_value=True):
+            path = self.f.f.workspace.project / 'app.py'
+            original = path.read_bytes()
+            try:
+                path.write_bytes(original + b'\n# SYNTHETIC changed\n')
+                with self.assertRaises(ValueError):
+                    self.engine._queue_native_checkpoint_retry(self.task_id, {}, actor=actor)
+                self.assertEqual(self.store.get(self.task_id, 'task'), before)
+            finally:
+                path.write_bytes(original)
+            queued = self.engine._queue_native_checkpoint_retry(self.task_id, {}, actor=actor)
+        task = self.store.get(self.task_id, 'task')
+        self.assertTrue(queued['queued']); self.assertEqual(queued['execution_permission'], 'none')
+        self.assertEqual(task['status'], 'queued')
+        self.assertEqual(task['checkpoint_session_binding']['source_task_id'], self.task_id)
+        self.assertEqual(task['checkpoint_session_binding']['target_task_id'], self.task_id)
+        self.assertEqual(task['checkpoint_session_binding']['source_attempt_id'], before['current_attempt']['id'])
+        self.assertEqual(task['recovery_history'][-1]['recovery_confirmation'], before['recovery_confirmation'])
+        self.assertEqual(self.engine._validate_native_queued_session(self.task_id), task['checkpoint_session_binding'])
+        changed_profile = dict(task['profile'], model='fictional-changed-model')
+        self.store.update(self.task_id, profile=changed_profile)
+        with self.assertRaises(ValueError):
+            self.engine._validate_native_queued_session(self.task_id)
+        task = self.store.update(self.task_id, profile=task['profile'])
+        reserved = self.store.reserve_attempt(self.task_id, task['state_revision'])
+        self.assertNotEqual(reserved['current_attempt']['id'], before['current_attempt']['id'])
+        self.assertEqual(self.engine._validate_native_queued_session(self.task_id, running=True),
+                         task['checkpoint_session_binding'])
+        from types import SimpleNamespace
+        context = SimpleNamespace(task=reserved, agent_run={})
+        inherited = json.loads(self.engine._checkpoint_session_context(context))
+        self.assertEqual(inherited['checkpoint_reference']['checkpoint_id'], task['resume_checkpoint_id'])
+        self.assertEqual(inherited['checkpoint_reference']['attempt_id'], reserved['current_attempt']['id'])
+        self.assertFalse(inherited['checkpoint_reference']['native_resume'])
+
+    def test_native_final_basis_checks_receipt_and_files_in_transactions(self):
+        record, refs = self.draft()
+        self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
+        self.assertTrue(self.engine.resync_checkpoint(record['id'])['handoff_synced'])
+        with self.assertRaisesRegex(ValueError, 'native_final_transaction_required'):
+            self.engine._native_final_recovery_basis(self.task_id)
+        def inspect():
+            with self.store.atomic(), self.engine.handoff.lock:
+                self.engine.handoff.db.execute('BEGIN IMMEDIATE')
+                try:
+                    return self.engine._native_final_recovery_basis(self.task_id)
+                finally:
+                    self.engine.handoff.db.rollback()
+        with patch.object(self.engine, '_checkpoint_work_package_dispatch_valid', return_value=True):
+            basis = inspect()
+            self.assertEqual(basis['checkpoint_id'], record['id'])
+            with self.store.atomic(), self.engine.handoff.lock:
+                self.engine.handoff.db.execute('BEGIN IMMEDIATE')
+                try:
+                    binding = self.engine._native_same_task_session_binding(self.task_id)
+                finally:
+                    self.engine.handoff.db.rollback()
+            self.assertEqual(binding['source_task_id'], self.task_id)
+            self.assertEqual(binding['target_task_id'], self.task_id)
+            self.assertEqual(binding['source_attempt_id'], basis['attempt_id'])
+            self.assertFalse(binding['native_resume'])
+            self.assertEqual(binding['execution_permission'], 'none')
+            path = self.f.f.workspace.project / 'app.py'
+            original = path.read_bytes()
+            try:
+                path.write_bytes(original + b'\n# SYNTHETIC changed\n')
+                with self.assertRaises(ValueError): inspect()
+            finally:
+                path.write_bytes(original)
+            with patch.object(self.engine.handoff, 'checkpoint_receipt', return_value=False):
+                with self.assertRaises(ValueError): inspect()
+
     def test_transition_handoff_observation_requires_exact_receipt_and_clean_history(self):
         record, refs = self.draft()
         self.store.commit_native_checkpoint(record, refs, self.stamp(), lambda: None)
@@ -788,6 +919,8 @@ class NativeCheckpointTransitionPrimitiveTests(unittest.TestCase):
         actor = 'authenticated_maintenance_session'
         self.assertTrue(self.engine.native_transition_source_observation(self.task_id, actor=actor)['source_unchanged'])
         proof = self.store.get(self.task_id)['recovery_confirmation']['native_reconciliation']
+        basis = self.store.native_checkpoint_transition_basis(self.task_id)
+        self.assertEqual(basis['reconciliation_event_seq'], proof['record_event_seq'])
         raw = self.store.db.execute('SELECT body FROM events WHERE seq=?', (proof['record_event_seq'],)).fetchone()[0]
         extra = json.loads(raw); extra['details']['reconciliation_id'] = 'SYNTHETIC-other-generation'
         self.store.db.execute('INSERT INTO events(body) VALUES (?)', (json.dumps(extra),)); self.store.db.commit()

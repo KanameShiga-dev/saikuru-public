@@ -258,6 +258,13 @@ class Store:
                 raise ValueError('Checkpoint参照は専用の確定手続きで設定してください。')
             if kind == 'task':
                 recovery_writer = getattr(self._worker, 'recovery_commit', None) == obj['id']
+                old_session = (previous or {}).get('checkpoint_session_binding')
+                new_session = obj.get('checkpoint_session_binding')
+                if (new_session != old_session and
+                        ((isinstance(new_session, dict) and new_session.get('mode') == 'fresh_native_checkpoint')
+                         or (isinstance(old_session, dict) and old_session.get('mode') == 'fresh_native_checkpoint'))
+                        and getattr(self._worker, 'native_session_commit', None) != obj['id']):
+                    raise ValueError('native_session_binding_requires_server_commit')
                 if (previous and previous.get('recovery_check_required') and not obj.get('recovery_check_required')
                         and not recovery_writer):
                     raise ValueError('停止確認は専用の保守手続きで記録してください。')
@@ -531,7 +538,7 @@ class Store:
             if basis['source_target'] != record['source_target']:
                 raise ValueError('native_checkpoint_transition_source_invalid')
             return {'source_task': basis['source_task'], 'source_target': basis['source_target'],
-                'confirmation_event_seq': marker['event_seq'], 'checkpoint': checkpoint,
+                'confirmation_event_seq': marker['event_seq'], 'reconciliation_event_seq': proof['record_event_seq'], 'checkpoint': checkpoint,
                 'checkpoint_ready_event_seq': ready_seq, 'transition': record,
                 'transition_event_seq': rows[0][0], 'execution_permission': 'none', 'resume_allowed': False}
 

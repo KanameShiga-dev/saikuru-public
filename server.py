@@ -743,7 +743,8 @@ class Handler(BaseHTTPRequestHandler):
                             raise WorkflowRequestError('workflow_request_invalid')
                         from team_dlp import require_clean_input
                         workflow_call(lambda:require_clean_input(body['note'],False,'再試行の補足'))
-                        workflow_call(lambda:engine.retry(task['id'],body['note'],body['handoff_allowed'],workflow_target=target))
+                        workflow_call(lambda:engine.retry(task['id'],body['note'],body['handoff_allowed'],workflow_target=target,
+                            actor='authenticated_maintenance_session' if maintenance else None))
                         with self.app.store.lock:
                             latest = self.app.store.get(task['id'],'task')
                             pending = any(a['status'] == 'pending' for a in self.app.store.for_job('approval',job['id']))

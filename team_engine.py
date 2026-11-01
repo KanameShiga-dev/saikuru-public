@@ -3406,6 +3406,19 @@ class Engine:
             with self.store.lock:
                 self._checkpoint_projects.discard(project)
 
+    @contextmanager
+    def _native_store_handoff_transaction(self):
+        """Hold the Handoff writer reservation until the Store commit finishes."""
+        with self.store.lock, self.handoff.lock:
+            if self.store.depth or self.handoff.db.in_transaction:
+                raise ValueError('native_session_transaction_required')
+            self.handoff.db.execute('BEGIN IMMEDIATE')
+            try:
+                with self.store.atomic():
+                    yield
+            finally:
+                self.handoff.db.rollback()
+
     def collect_checkpoint(self, task_id, *, writer_stopped=False):
         """Internal draft collection only. No public route, ready pointer or resume."""
         from team_checkpoint import collect_project, checkpoint_digest, draft_preconditions
@@ -3490,6 +3503,36 @@ class Engine:
                 raise ValueError('Checkpointは確定できません。参照と停止状態を確認してください。') from error
             # Commit is already durable. Handoff failure must never undo/report
             # rollback of Store or rewrite its immutable ready/event binding.
+            return self.resync_checkpoint(checkpoint_id)
+
+    def finalize_native_checkpoint(self, checkpoint_id, *, writer_stopped=False, actor=None):
+        """Publish a confirmed native checkpoint; this does not queue or start work."""
+        from team_checkpoint import verify_draft_files
+        if (actor != 'authenticated_maintenance_session' or writer_stopped is not True
+                or getattr(self.store._worker, 'task', None) is not None):
+            raise ValueError('workflow_maintenance_action_required')
+        with self.store.lock:
+            task_id = self.store.get(checkpoint_id, 'checkpoint')['task_id']
+        with self._checkpoint_project(task_id):
+            with self.store.lock, self.handoff.lock:
+                if self.store.depth or self.handoff.db.in_transaction:
+                    raise ValueError('native_checkpoint_transaction_required')
+                stamp = self._native_assessment_stamp()
+                inputs = self._checkpoint_draft_inputs(checkpoint_id, True)
+            record, job, task, paths, refs = inputs
+            if record['resume_preconditions'] != ['checkpoint_not_ready']:
+                raise ValueError('native_checkpoint_preconditions_unresolved')
+            def final_check():
+                if self._native_assessment_stamp() != stamp or not self._native_maintenance_idle():
+                    raise ValueError('native_checkpoint_transition_changed')
+                if self._checkpoint_draft_inputs(checkpoint_id, True) != inputs:
+                    raise ValueError('native_checkpoint_transition_changed')
+                observed = self._native_recovery_observation(task_id, confirmed=True)
+                if not observed['eligible_for_reconciliation']:
+                    raise ValueError('native_checkpoint_source_changed')
+                verify_draft_files(record, job, paths, refs, self.store.directory / 'checkpoints')
+            with self._native_store_handoff_transaction():
+                self.store.commit_native_checkpoint(record, refs, stamp[:2], final_check)
             return self.resync_checkpoint(checkpoint_id)
 
     def resync_checkpoint(self, checkpoint_id):
@@ -3754,6 +3797,36 @@ class Engine:
         """Final read-only check immediately before a fresh Provider call."""
         from team_checkpoint import ready_candidate, reference_snapshot, load_collection, inspect_collection
         from team_session_policy import continuation_reference_digest, validate_fresh_session, _digest
+        if (ctx.task.get('checkpoint_session_binding') or {}).get('mode') == 'fresh_native_checkpoint':
+            with self.store.lock, self.handoff.lock:
+                self.store.assert_attempt(ctx.task)
+                binding = self._validate_native_queued_session(ctx.task['id'], running=True)
+                task = self.store.get(ctx.task['id'], 'task'); job = self.store.get(task['job_id'], 'job')
+                if (self.project_blocked(job['project']) or ctx.task.get('profile') != task.get('profile')
+                        or any(a.get('status') == 'pending' for a in self.store.for_job('approval', job['id']))):
+                    raise ValueError('native_session_authority_changed')
+                for other in self.store.all('task'):
+                    if other['id'] != task['id'] and (other.get('status') == 'running'
+                            or (other.get('current_attempt') or {}).get('status') == 'running'):
+                        parent = self.store.get(other['job_id'], 'job')
+                        if canonical(parent['project']) == canonical(job['project']):
+                            raise ValueError('checkpoint_session_other_writer_active')
+                manifest = self.handoff.versioned_context(self.store, task['id'],
+                    approved_roots=self.config['approved_roots'], expected_job_revision=job['state_revision'],
+                    expected_task_revision=task['state_revision'], expected_attempt_id=task['current_attempt']['id'])
+                from team_context_pages import CONTEXT_FORMAT
+                if (manifest.get('format') != CONTEXT_FORMAT or manifest.get('job_id') != job['id']
+                        or manifest.get('task_id') != task['id']
+                        or manifest.get('attempt_id') != task['current_attempt']['id']
+                        or manifest.get('execution_permission') != 'none'
+                        or manifest.get('manifest_digest') != _digest({k: v for k, v in manifest.items() if k != 'manifest_digest'})):
+                    raise ValueError('fresh_session_context_changed')
+                metadata = {'mode': 'fresh_native_checkpoint', 'native_resume': False,
+                    'checkpoint_id': binding['checkpoint_id'], 'checkpoint_digest': binding['checkpoint_digest'],
+                    'attempt_id': task['current_attempt']['id'], 'manifest_digest': manifest['manifest_digest'],
+                    'execution_permission': 'none'}
+                ctx.agent_run['checkpoint_session'] = metadata
+                return json.dumps({'checkpoint_reference': metadata, 'current_domain_context': manifest}, ensure_ascii=False)
         with self.store.lock, self.handoff.lock:
             self.store.assert_attempt(ctx.task)
             task = self.store.get(ctx.task['id'], 'task')
@@ -5167,7 +5240,10 @@ class Engine:
         for candidate in self._checkpoint_session_candidates():
             try:
                 stored = candidate['checkpoint_session_binding']
-                fresh = self.prepare_checkpoint_session(stored['source_task_id'], candidate['id'], writer_stopped=True)
+                if stored.get('mode') == 'fresh_native_checkpoint':
+                    fresh = self._validate_native_queued_session(candidate['id'])
+                else:
+                    fresh = self.prepare_checkpoint_session(stored['source_task_id'], candidate['id'], writer_stopped=True)
                 session_preflight[candidate['id']] = (candidate['state_revision'], fresh == stored)
             except SessionPreparationDeferred:
                 continue
@@ -6110,22 +6186,8 @@ class Engine:
             handoff_stamp = (self.handoff.db.total_changes,
                 self.handoff.db.execute('PRAGMA data_version').fetchone()[0])
             try:
-                basis = self.store.native_checkpoint_transition_basis(task_id)
-                record, ready_event = self.store.checkpoint_binding(basis['checkpoint']['id'])
-                job = self.store.get(record['job_id'], 'job')
-                receipt = self.handoff.checkpoint_receipt(job['project'], record, ready_event)
-                rows = self.store.db.execute("SELECT seq,body FROM events WHERE seq>? "
-                    "AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.task_id')=? "
-                    "ORDER BY seq LIMIT 2", (basis['transition_event_seq'], job['id'], task_id)).fetchall()
-                event = json.loads(rows[0][1]) if len(rows) == 1 else {}
-                expected = {'checkpoint_id': record['id'], 'ready_event_seq': ready_event['seq']}
-                if (receipt and len(rows) == 1 and event.get('type') == 'checkpoint_handoff_synced'
-                        and event.get('job_id') == job['id'] and event.get('task_id') == task_id
-                        and event.get('details') == expected):
-                    result['receipt_verified'] = True
-                    result['sync_event_seq'] = rows[0][0]
-                else:
-                    result['reasons'] = ['native_handoff_receipt_or_history_unresolved']
+                result['sync_event_seq'] = self._native_transition_receipt_sequence(task_id)
+                result['receipt_verified'] = True
             except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
                 result['reasons'] = ['native_handoff_receipt_or_history_unresolved']
             if (self._native_assessment_stamp() != store_stamp or not self._native_maintenance_idle()
@@ -6134,6 +6196,23 @@ class Engine:
                 result['sync_event_seq'] = None
                 result['reasons'] = sorted(set(result['reasons'] + ['native_handoff_observation_changed']))
         return result
+
+    def _native_transition_receipt_sequence(self, task_id):
+        """Validate the exact receipt under the caller's Store and Handoff locks."""
+        basis = self.store.native_checkpoint_transition_basis(task_id)
+        record, ready_event = self.store.checkpoint_binding(basis['checkpoint']['id'])
+        job = self.store.get(record['job_id'], 'job')
+        receipt = self.handoff.checkpoint_receipt(job['project'], record, ready_event)
+        rows = self.store.db.execute("SELECT seq,body FROM events WHERE seq>? "
+            "AND json_extract(body,'$.job_id')=? AND json_extract(body,'$.task_id')=? "
+            "ORDER BY seq LIMIT 2", (basis['transition_event_seq'], job['id'], task_id)).fetchall()
+        event = json.loads(rows[0][1]) if len(rows) == 1 else {}
+        expected = {'checkpoint_id': record['id'], 'ready_event_seq': ready_event['seq']}
+        if not (receipt and len(rows) == 1 and event.get('type') == 'checkpoint_handoff_synced'
+                and event.get('job_id') == job['id'] and event.get('task_id') == task_id
+                and event.get('details') == expected):
+            raise ValueError('native_handoff_receipt_or_history_unresolved')
+        return rows[0][0]
 
     def native_transition_combined_observation(self, task_id, *, actor=None):
         """Observe source plus derived receipt at a stable interval, never resume authority."""
@@ -6195,7 +6274,201 @@ class Engine:
                 result['reasons'] = sorted(set(result['reasons'] + ['native_transition_observation_changed']))
         return result
 
-    def _native_recovery_observation(self, task_id, *, confirmed=False, transition=False, transition_with_handoff=False):
+    def _native_final_recovery_basis(self, task_id):
+        """Check the native continuation basis while both write transactions are held.
+
+        This returns evidence only. The caller must perform its state transition
+        before releasing either transaction; this method never authorizes retry.
+        """
+        from team_checkpoint import load_collection, verify_collection
+        if (not self.store.depth or not self.handoff.db.in_transaction
+                or getattr(self.store._worker, 'task', None) is not None
+                or not self._native_maintenance_idle()):
+            raise ValueError('native_final_transaction_required')
+        sequence = self._native_transition_receipt_sequence(task_id)
+        observation = self._native_recovery_observation(task_id, transition=True,
+            transition_with_handoff=True,
+            verified_handoff={'receipt_verified': True, 'sync_event_seq': sequence})
+        if not observation['eligible_for_reconciliation']:
+            raise ValueError('native_final_source_changed')
+        basis = self.store.native_checkpoint_transition_basis(task_id)
+        record, job, task, paths, refs, tasks, synced = self._checkpoint_recovery_inputs(task_id, True)
+        if not synced or record != basis['checkpoint']:
+            raise ValueError('native_final_checkpoint_changed')
+        directory = self.store.directory / 'checkpoints'
+        collection = load_collection(job['project'], directory, record['collection_ref']['id'])
+        if collection['manifest_digest'] != record['collection_ref']['digest']:
+            raise ValueError('native_final_checkpoint_changed')
+        verify_collection(job['project'], directory, collection, paths)
+        if task.get('work_package_id') and not self._checkpoint_work_package_dispatch_valid(task_id):
+            raise ValueError('work_package_dispatch_review_required')
+        return {'checkpoint_id': record['id'], 'checkpoint_digest': record['manifest_digest'],
+                'transition_event_seq': basis['transition_event_seq'], 'handoff_event_seq': sequence,
+                'source_target': observation['target'], 'task_revision': task['state_revision'],
+                'job_revision': job['state_revision'], 'attempt_id': record['attempt_id']}
+
+    def _native_session_reference_digest(self, refs, task_id):
+        from team_session_policy import continuation_reference_digest
+        value = copy.deepcopy(refs)
+        value['evidence_refs']['recovery_context']['tasks'][task_id].pop('result_status', None)
+        return continuation_reference_digest(value, task_id)
+
+    def _native_same_task_session_binding(self, task_id):
+        """Build a same-task fresh-session binding after the final transaction check.
+
+        The result is not an execution permission. Callers must atomically bind
+        and queue the task, and revalidate it before reserving a new attempt.
+        """
+        from team_session_policy import TASK_KEYS, VERSION_KEYS, _digest, _profile
+        from team_checkpoint import load_collection, inspect_collection
+        basis = self._native_final_recovery_basis(task_id)
+        checkpoint, job, task, paths, refs, _, _ = self._checkpoint_recovery_inputs(task_id, True)
+        collection = load_collection(job['project'], self.store.directory / 'checkpoints', checkpoint['id'])
+        workspace = inspect_collection(job['project'], self.store.directory / 'checkpoints', collection, paths)
+        if (collection['manifest_digest'] != checkpoint['collection_ref']['digest']
+                or workspace.get('current') is not True):
+            raise ValueError('native_session_files_changed')
+        old_attempt = task.get('current_attempt') or {}
+        if (task.get('id') != task_id or task.get('role') != 'builder'
+                or not task.get('work_package_id') or old_attempt.get('id') != basis['attempt_id']
+                or old_attempt.get('status') not in ('closed', 'fenced')
+                or task.get('status') not in ('failed', 'blocked', 'interrupted')
+                or type(task.get('attempt')) is not int or task['attempt'] < 1):
+            raise ValueError('native_session_task_not_candidate')
+        versions = {key: job.get(key) for key in VERSION_KEYS}
+        profile = _profile(task.get('profile'))
+        body = {'schema_version': 1, 'mode': 'fresh_native_checkpoint',
+                'job_id': job['id'], 'source_task_id': task_id, 'target_task_id': task_id,
+                'checkpoint_id': basis['checkpoint_id'], 'checkpoint_digest': basis['checkpoint_digest'],
+                'source_attempt_id': basis['attempt_id'], 'target_attempt_before': basis['attempt_id'],
+                'target_ordinal_before': task['attempt'], 'task_digest': _digest({k: task.get(k) for k in TASK_KEYS}),
+                'profile_digest': _digest(profile), 'approved_versions': versions,
+                'transition_event_seq': basis['transition_event_seq'], 'handoff_event_seq': basis['handoff_event_seq'],
+                'source_target': basis['source_target'],
+                'reference_digest': self._native_session_reference_digest(refs, task_id), 'workspace_digest': _digest(workspace),
+                'native_resume': False, 'execution_permission': 'none'}
+        return dict(body, binding_digest=_digest(body))
+
+    def _queue_native_checkpoint_retry(self, task_id, workflow_target, *, actor=None, note=''):
+        """Bind and queue one confirmed native retry under the final CAS gates.
+
+        This internal transition does not start a worker; dispatch must separately
+        validate the saved binding and reserve a fresh attempt.
+        """
+        if (actor != 'authenticated_maintenance_session' or not isinstance(workflow_target, dict)
+                or getattr(self.store._worker, 'task', None) is not None):
+            raise ValueError('workflow_maintenance_action_required')
+        with self._checkpoint_project(task_id):
+            with self._native_store_handoff_transaction():
+                task = self.store.get(task_id, 'task')
+                job = self.store.get(task['job_id'], 'job')
+                self._validate_workflow_control_target(workflow_target, job['id'], 'retry_task', task_id)
+                binding = self._native_same_task_session_binding(task_id)
+                if any(item.get('status') == 'pending' for item in self.store.for_job('approval', job['id'])):
+                    raise ValueError('checkpoint_session_decision_pending')
+                if any(item.get('after') == task_id and item.get('status') != 'queued'
+                       for item in self.store.for_job('task', job['id'])):
+                    raise ValueError('native_session_successor_advanced')
+                history = list(task.get('recovery_history', [])) + [{
+                    'at': now(), 'attempt': task.get('attempt'), 'status': task.get('status'),
+                    'summary': task.get('summary'), 'result': task.get('result'),
+                    'failure_code': task.get('failure_code'), 'recovery': task.get('recovery'),
+                    'recovery_advice': task.get('recovery_advice'), 'agent_run_id': task.get('agent_run_id'),
+                    'failure_recovery': task.get('failure_recovery'),
+                    'retry_note': note,
+                    'recovery_confirmation': task.get('recovery_confirmation')}]
+                previous = getattr(self.store._worker, 'native_session_commit', None)
+                self.store._worker.native_session_commit = task_id
+                try:
+                    self.store.update(task_id, status='queued', checkpoint_session_binding=binding,
+                        recovery_history=history, recovery_confirmation=None, failure_recovery=None,
+                        result=None, summary='', recovery=None, recovery_advice=None, failure_code=None,
+                        retry_at=None, quota_waits=0)
+                finally:
+                    self.store._worker.native_session_commit = previous
+                job_changes = {'status': 'running'}
+                interruption = job.get('p0_interruption') or {}
+                if job.get('p0_contract_version') == 1 and interruption.get('resume_target') == task_id:
+                    job_changes['p0_interruption'] = dict(interruption, recovery_status='retrying')
+                self.store.update(job['id'], **job_changes)
+                self.store.event('native_checkpoint_retry_queued',
+                    '確認済みCheckpointから新しい試行を準備しました。実行前に再検証します。',
+                    task_id, job['id'], details={'checkpoint_id': binding['checkpoint_id'],
+                        'binding_digest': binding['binding_digest'], 'previous_attempt_id': binding['source_attempt_id']})
+                return {'queued': True, 'binding_digest': binding['binding_digest'], 'execution_permission': 'none'}
+
+    def _validate_native_queued_session(self, task_id, *, running=False):
+        """Recheck the same-task binding against its queued or fresh attempt."""
+        from team_checkpoint import checkpoint_digest, load_collection, inspect_collection
+        from team_session_policy import TASK_KEYS, VERSION_KEYS, _digest, _profile
+        from team_p0_contract import checkpoint_scope
+        with self.store.lock, self.handoff.lock:
+            task = self.store.get(task_id, 'task'); job = self.store.get(task['job_id'], 'job')
+            binding = task.get('checkpoint_session_binding') or {}
+            body = {k: v for k, v in binding.items() if k != 'binding_digest'}
+            attempt = task.get('current_attempt') or {}
+            if (binding.get('mode') != 'fresh_native_checkpoint' or binding.get('schema_version') != 1
+                    or binding.get('binding_digest') != _digest(body)
+                    or binding.get('source_task_id') != task_id or binding.get('target_task_id') != task_id
+                    or binding.get('job_id') != job['id'] or task.get('status') != ('running' if running else 'queued')
+                    or task.get('recovery_check_required') or task.get('recovery_confirmation') is not None
+                    or (not running and (attempt.get('id') != binding.get('source_attempt_id')
+                        or attempt.get('status') not in ('closed', 'fenced')
+                        or task.get('attempt') != binding.get('target_ordinal_before')))
+                    or (running and (attempt.get('id') in (None, binding.get('source_attempt_id'))
+                        or attempt.get('status') != 'running'
+                        or task.get('attempt') != binding.get('target_ordinal_before', -2) + 1
+                        or attempt.get('ordinal') != task.get('attempt')))
+                    or binding.get('task_digest') != _digest({k: task.get(k) for k in TASK_KEYS})
+                    or binding.get('profile_digest') != _digest(_profile(task.get('profile')))
+                    or binding.get('approved_versions') != {k: job.get(k) for k in VERSION_KEYS}
+                    or binding.get('native_resume') is not False or binding.get('execution_permission') != 'none'):
+                raise ValueError('native_session_binding_changed')
+            checkpoint = self.store.get(binding['checkpoint_id'], 'checkpoint')
+            if (checkpoint.get('state') != 'ready' or checkpoint.get('manifest_digest') != binding.get('checkpoint_digest')
+                    or checkpoint.get('manifest_digest') != checkpoint_digest(checkpoint)
+                    or checkpoint.get('attempt_id') != binding.get('source_attempt_id')
+                    or checkpoint.get('task_id') != task_id or task.get('resume_checkpoint_id') != checkpoint['id']):
+                raise ValueError('native_session_checkpoint_changed')
+            ready_seq = checkpoint['ready_binding']['event_seq']
+            row = self.store.db.execute('SELECT body FROM events WHERE seq=?', (ready_seq,)).fetchone()
+            event = json.loads(row[0]) if row else {}
+            if (event.get('type') != 'checkpoint_ready' or event.get('task_id') != task_id
+                    or event.get('job_id') != job['id'] or event.get('details') != {
+                        'checkpoint_id': checkpoint['id'], 'manifest_digest': checkpoint['manifest_digest'],
+                        'revisions': {k: checkpoint['ready_binding'][k] for k in ('job', 'task', 'work_package')}}
+                    or not self.handoff.checkpoint_receipt(job['project'], checkpoint, dict(event, seq=ready_seq))):
+                raise ValueError('native_session_receipt_changed')
+            transition_row = self.store.db.execute('SELECT body FROM events WHERE seq=?',
+                (binding.get('transition_event_seq'),)).fetchone()
+            sync_row = self.store.db.execute('SELECT body FROM events WHERE seq=?',
+                (binding.get('handoff_event_seq'),)).fetchone()
+            transition = json.loads(transition_row[0]) if transition_row else {}
+            synced = json.loads(sync_row[0]) if sync_row else {}
+            if (transition.get('type') != 'native_checkpoint_transition_committed'
+                    or transition.get('job_id') != job['id'] or transition.get('task_id') != task_id
+                    or (transition.get('details') or {}).get('checkpoint_id') != checkpoint['id']
+                    or synced.get('type') != 'checkpoint_handoff_synced'
+                    or synced.get('job_id') != job['id'] or synced.get('task_id') != task_id
+                    or synced.get('details') != {'checkpoint_id': checkpoint['id'], 'ready_event_seq': ready_seq}):
+                raise ValueError('native_session_history_changed')
+            rows = self.store.db.execute("SELECT body FROM events WHERE json_extract(body,'$.type')=? "
+                "AND json_extract(body,'$.task_id')=? AND json_extract(body,'$.details.binding_digest')=?",
+                ('native_checkpoint_retry_queued', task_id, binding['binding_digest'])).fetchall()
+            if len(rows) != 1:
+                raise ValueError('native_session_queue_event_invalid')
+            refs = self._checkpoint_reference_snapshot(job, task)
+            if self._native_session_reference_digest(refs, task_id) != binding.get('reference_digest'):
+                raise ValueError('native_session_authority_changed')
+            paths = checkpoint_scope(job, self.store.get(job['plan_approval_id'], 'approval'))
+            collection = load_collection(job['project'], self.store.directory / 'checkpoints', checkpoint['id'])
+            workspace = inspect_collection(job['project'], self.store.directory / 'checkpoints', collection, paths)
+            if (collection['manifest_digest'] != checkpoint['collection_ref']['digest']
+                    or _digest(workspace) != binding.get('workspace_digest')):
+                raise ValueError('native_session_files_changed')
+            return binding
+
+    def _native_recovery_observation(self, task_id, *, confirmed=False, transition=False, transition_with_handoff=False, verified_handoff=None):
         # Metadata reads take their own short Store locks. Git, file hashing and
         # prior-artifact validation run without an outer Store lock. Any DB write
         # across this interval invalidates the public assessment, even a rollback
@@ -6260,14 +6533,10 @@ class Engine:
         if basis:
             excluded = {basis['confirmation_event_seq']}
             if transition:
-                current = self.store.get(task_id, 'task')
-                proof = (current.get('recovery_confirmation') or {}).get('native_reconciliation') or {}
-                if proof.get('record_id') != basis['transition']['reconciliation_id'] or type(proof.get('record_event_seq')) is not int:
-                    raise ValueError('native_reconciliation_event_unresolved')
-                excluded.add(proof['record_event_seq'])
+                excluded.add(basis['reconciliation_event_seq'])
                 excluded.update((basis['checkpoint_ready_event_seq'], basis['transition_event_seq']))
                 if transition_with_handoff:
-                    handoff = self.native_transition_handoff_observation(task_id, actor='authenticated_maintenance_session')
+                    handoff = verified_handoff if verified_handoff is not None else self.native_transition_handoff_observation(task_id, actor='authenticated_maintenance_session')
                     if not handoff['receipt_verified'] or type(handoff['sync_event_seq']) is not int:
                         raise ValueError('native_handoff_receipt_or_history_unresolved')
                     excluded.add(handoff['sync_event_seq'])
@@ -6498,7 +6767,7 @@ class Engine:
                 raise ValueError('保守確認後に状態が変化しました。再確認してください。')
         return (task['state_revision'], job['state_revision'], marker['event_seq']), bootstrap
 
-    def retry(self, task_id, note, handoff_allowed=False, *, workflow_target=None):
+    def retry(self, task_id, note, handoff_allowed=False, *, workflow_target=None, actor=None):
         from team_p0_contract import workflow_version
         if workflow_target is not None:
             if not isinstance(note,str) or len(note) > 4000 or type(handoff_allowed) is not bool:
@@ -6511,6 +6780,20 @@ class Engine:
             job = self.store.get(task['job_id'], 'job')
             if workflow_target is not None:
                 self._validate_workflow_control_target(workflow_target,job['id'],'retry_task',task_id)
+            native = bool((task.get('recovery_confirmation') or {}).get('native_reconciliation'))
+            if native and (workflow_target is None or actor != 'authenticated_maintenance_session' or handoff_allowed):
+                raise ValueError('native_retry_requires_confirmed_scope')
+        if native:
+            if self.store.native_checkpoint_requires_transition(self.store.get(task_id, 'task')):
+                checkpoint = self.collect_checkpoint(task_id, writer_stopped=True)
+                result = self.finalize_native_checkpoint(checkpoint['id'], writer_stopped=True, actor=actor)
+                if not result['store_ready'] or not result['handoff_synced']:
+                    raise ValueError('native_handoff_receipt_or_history_unresolved')
+            current_target = self.workflow_control_target(job['id'], 'retry_task', task_id)
+            return self._queue_native_checkpoint_retry(task_id, current_target, actor=actor, note=note)
+        with self.store.lock:
+            task = self.store.get(task_id, 'task')
+            job = self.store.get(task['job_id'], 'job')
             if workflow_version(job) == 1 and (task.get('recovery_check_required') or task.get('recovery_confirmation')):
                 expected, bootstrap = self._recovery_retry_binding(task_id)
         if expected is not None and not bootstrap:
