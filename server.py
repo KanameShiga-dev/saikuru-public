@@ -729,6 +729,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('復旧調査の指定が不正です。')
                 result = engine.user_recovery_request(body['job_id'], body['target'], body['confirmed'],
                                                       body.get('include_diagnostic', False))
+            elif path == '/api/recovery/user-repair':
+                if set(body) != {'job_id', 'target', 'confirmed'}:
+                    raise ValueError('修復の指定が不正です。')
+                result = engine.user_recovery_repair(body['job_id'], body['target'], body['confirmed'])
             elif path == '/api/recovery/user-retry':
                 if set(body) != {'job_id', 'target', 'confirmed'}:
                     raise ValueError('復旧操作の指定が不正です。')

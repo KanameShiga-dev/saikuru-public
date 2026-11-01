@@ -160,6 +160,57 @@ class UserRecoveryTests(unittest.TestCase):
                 {'task_id': current['task_id'], 'binding': current['binding']}, True)
         self.assertEqual(self.store.get(self.task_id)['status'], 'failed')
 
+    def accepted_investigation(self, summary='架空の一時領域が不足。作成後に確認する。'):
+        child_id = self.engine.user_recovery_request(self.job_id, self.target(), True)['job_id']
+        child = self.store.get(child_id, 'job')
+        researcher = self.engine.new_task(child, '架空の調査', '架空の調査', 'researcher')
+        self.store.update(researcher['id'], status='succeeded', summary=summary,
+                          result={'status': 'done', 'summary': summary})
+        self.store.update(child_id, status='accepted')
+        return child_id, researcher['id']
+
+    def test_reviewed_investigation_creates_linked_repair_with_normal_approvals(self):
+        investigation, _ = self.accepted_investigation()
+        current = self.engine.user_recovery_target(self.job_id)
+        self.assertIn('一時領域', current['repair_preview'])
+        target = {'task_id': current['task_id'], 'binding': current['binding']}
+        with self.assertRaises(ValueError):
+            self.engine.user_recovery_repair(self.job_id, target, False)
+        child_id = self.engine.user_recovery_repair(self.job_id, target, True)['job_id']
+        child = self.store.get(child_id, 'job')
+        self.assertEqual(child['g2_status'], 'pending')
+        self.assertFalse(child['recovery_readonly'])
+        self.assertIn(current['repair_preview'], child['goal'])
+        self.assertIn('未検証', child['goal'])
+        self.assertEqual(child['role_overrides']['builder']['model'], 'gpt-6-sol')
+        case = next(c for c in self.store.for_job('recovery_case', self.job_id)
+                    if c['recovery_job_id'] == child_id)
+        self.assertEqual(case['investigation_job_id'], investigation)
+        with self.assertRaises(ValueError):
+            self.engine.user_recovery_repair(self.job_id, target, True)
+        with self.assertRaises(ValueError):
+            self.engine.user_recovery_retry(self.job_id, self.target(), True)
+
+    def test_changed_or_sensitive_investigation_cannot_be_used_for_repair(self):
+        _, researcher_id = self.accepted_investigation()
+        target = self.target()
+        self.store.update(researcher_id, summary='架空の報告を変更')
+        with self.assertRaises(ValueError):
+            self.engine.user_recovery_repair(self.job_id, target, True)
+        self.store.update(researcher_id, summary='password=fictional-secret-value')
+        current = self.engine.user_recovery_target(self.job_id)
+        self.assertIsNone(current['repair_preview'])
+        with self.assertRaises(ValueError):
+            self.engine.user_recovery_repair(self.job_id, self.target(), True)
+
+    def test_accepted_repair_allows_explicit_retry_without_auto_resuming(self):
+        self.accepted_investigation()
+        child_id = self.engine.user_recovery_repair(self.job_id, self.target(), True)['job_id']
+        self.store.update(child_id, status='accepted')
+        self.assertEqual(self.store.get(self.task_id)['status'], 'failed')
+        self.engine.user_recovery_retry(self.job_id, self.target(), True)
+        self.assertEqual(self.store.get(self.task_id)['status'], 'queued')
+
     def test_legacy_stopped_task_can_request_same_approved_investigation(self):
         self.store.update(self.job_id, p0_contract_version=0, status='failed')
         target = self.engine.user_recovery_target(self.job_id, self.task_id)
@@ -167,6 +218,16 @@ class UserRecoveryTests(unittest.TestCase):
             {'task_id': target['task_id'], 'binding': target['binding']}, True)
         self.assertEqual(self.store.get(result['job_id'])['g2_status'], 'pending')
         self.assertEqual(self.store.get(self.task_id)['status'], 'failed')
+
+    def test_interrupted_p0_task_can_request_readonly_investigation(self):
+        self.store.update(self.job_id, status='interrupted', p0_interruption=None)
+        self.store.update(self.task_id, status='interrupted', recovery_check_required=True)
+        current = self.engine.user_recovery_target(self.job_id, self.task_id)
+        self.assertTrue(current['recovery_readonly'])
+        target = {'task_id': current['task_id'], 'binding': current['binding']}
+        child_id = self.engine.user_recovery_request(self.job_id, target, True)['job_id']
+        self.assertTrue(self.store.get(child_id)['recovery_readonly'])
+        self.assertEqual(self.store.get(self.task_id)['status'], 'interrupted')
 
     def test_diagnostic_summary_is_sent_only_with_explicit_consent(self):
         self.store.update(self.task_id, summary='架空の依存物が見つかりません。')
@@ -289,6 +350,20 @@ class UserRecoveryTests(unittest.TestCase):
         self.engine.user_recovery_answer(self.job_id, current, {'q': {'option_id': 'yes', 'text': ''}}, True)
         self.assertEqual(self.store.get(self.task_id)['status'], 'queued')
 
+    def test_cancelled_investigation_can_be_requested_again(self):
+        first = self.engine.user_recovery_request(self.job_id, self.target(), True)['job_id']
+        self.engine.cancel_job(first)
+        second = self.engine.user_recovery_request(self.job_id, self.target(), True)['job_id']
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.store.get(second)['g2_status'], 'pending')
+
+    def test_cancelled_repair_does_not_disable_readonly_on_new_investigation(self):
+        self.accepted_investigation()
+        repair = self.engine.user_recovery_repair(self.job_id, self.target(), True)['job_id']
+        self.engine.cancel_job(repair)
+        new_id = self.engine.user_recovery_request(self.job_id, self.target(), True)['job_id']
+        self.assertTrue(self.store.get(new_id)['recovery_readonly'])
+
     def test_sensitive_maintenance_question_is_not_exposed(self):
         self.maintenance_question('サンドボックスのパスワードを入力してください。')
         target = self.target()
@@ -355,6 +430,8 @@ class UserRecoveryTests(unittest.TestCase):
         self.assertEqual(call('/api/retry', {'id': self.task_id, 'checked_changes': True})[0], 403)
         payload = {'job_id': self.job_id,
                    'target': {'task_id': target['task_id'], 'binding': target['binding']}, 'confirmed': False}
+        self.assertEqual(call('/api/recovery/user-repair', payload, authenticated=False)[0], 403)
+        self.assertEqual(call('/api/recovery/user-repair', payload)[0], 400)
         self.assertEqual(call('/api/recovery/user-retry', payload)[0], 400)
         self.assertEqual(self.store.get(self.task_id)['status'], 'failed')
         payload['confirmed'] = True
