@@ -3,6 +3,7 @@ import json
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -98,6 +99,8 @@ class UserRecoveryTests(unittest.TestCase):
             self.engine.user_recovery_request(self.job_id, target, False)
         result = self.engine.user_recovery_request(self.job_id, target, True)
         child = self.store.get(result['job_id'], 'job')
+        self.assertEqual(child['project'], self.store.get(self.job_id)['project'])
+        self.assertIn('采来本体やその運用データではない', child['goal'])
         self.assertEqual(child['status'], 'awaiting_approval')
         self.assertEqual(child['g2_status'], 'pending')
         self.assertTrue(child['recovery_model_locked'])
@@ -135,6 +138,8 @@ class UserRecoveryTests(unittest.TestCase):
         from team_adapters import ProviderError
         child_id = self.engine.user_recovery_request(self.job_id, self.target(), True)['job_id']
         child = self.store.get(child_id, 'job')
+        self.assertEqual(child['project'], self.store.get(self.job_id)['project'])
+        self.assertIn('采来本体やその運用データではない', child['goal'])
         self.assertTrue(child['recovery_readonly'])
         self.assertIn('読み取り専用', child['goal'])
         planner = next(t for t in self.store.for_job('task', child_id) if t['role'] == 'planner')
@@ -178,6 +183,8 @@ class UserRecoveryTests(unittest.TestCase):
             self.engine.user_recovery_repair(self.job_id, target, False)
         child_id = self.engine.user_recovery_repair(self.job_id, target, True)['job_id']
         child = self.store.get(child_id, 'job')
+        self.assertEqual(child['project'], self.store.get(self.job_id)['project'])
+        self.assertIn('采来本体やその運用データではない', child['goal'])
         self.assertEqual(child['g2_status'], 'pending')
         self.assertFalse(child['recovery_readonly'])
         self.assertIn(current['repair_preview'], child['goal'])
@@ -210,6 +217,16 @@ class UserRecoveryTests(unittest.TestCase):
         self.assertEqual(self.store.get(self.task_id)['status'], 'failed')
         self.engine.user_recovery_retry(self.job_id, self.target(), True)
         self.assertEqual(self.store.get(self.task_id)['status'], 'queued')
+
+    def test_workflow_repair_requires_evidence_for_prior_operations(self):
+        job = dict(self.store.get(self.job_id), workflow_contract_version=1)
+        task = self.store.get(self.task_id)
+        with patch.object(self.engine, '_reviewed_operation_basis', side_effect=ValueError('unresolved')):
+            self.assertTrue(self.engine._workflow_recovery_confirmation_required(task, job, True))
+        with patch.object(self.engine, '_reviewed_operation_basis', return_value={'unresolved': []}):
+            self.assertFalse(self.engine._workflow_recovery_confirmation_required(task, job, True))
+            self.assertTrue(self.engine._workflow_recovery_confirmation_required(
+                dict(task, recovery_check_required=True), job, True))
 
     def test_legacy_stopped_task_can_request_same_approved_investigation(self):
         self.store.update(self.job_id, p0_contract_version=0, status='failed')

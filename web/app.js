@@ -1349,7 +1349,7 @@ function advicePanel(task){
 }
 function recoveryInvestigationControls(host,job,target,message){
   const profile=target.recovery_planner_profile;
-  const help=el('p','復旧調査は元の作業と関連付けた別の依頼です。停止理由の分類と操作承認の件数を使い、詳細なエラーログは自動で渡しません。AIは開始の承認後に調査します。'+
+  const help=el('p','調査・修復の対象は、停止した依頼の開発対象プロジェクトです。復旧調査は元の作業と関連付けた別の依頼です。停止理由の分類と操作承認の件数を使い、詳細なエラーログは自動で渡しません。AIは開始の承認後に調査します。'+
     (profile?` 使用予定: ${profile.adapter} / ${profile.model} / ${profile.effort}（元の計画担当）。`:' 元の計画担当のモデルを確認できないため、調査を開始できません。'),'hint');
   host.append(help);
   if(target.recovery_readonly)host.append(el('p','前の操作の結果を確認できないため、今回は読み取り調査のみです。修復は行わず、必要な確認と修復案を報告します。','hint'));
@@ -1789,7 +1789,8 @@ function renderDetail(task,version) {
       node.classList.add('tech-only');
     }
     const detail=hasUserDecision?'操作の確認待ちがあります。下の承認欄をご確認ください。':phase.detail;
-    const status=section('いまの状況',phase.label+'\n'+detail+(job.p0_progress?.next_action?'\n次の動作：'+job.p0_progress.next_action:''));
+    const nextAction=phase.key==='maintenance_required'?'停止した工程の原因と復旧方法を確認する':job.p0_progress?.next_action;
+    const status=section('いまの状況',phase.label+'\n'+detail+(nextAction?'\n次の動作：'+nextAction:''));
     status.classList.add('p0-status');status.setAttribute('role','status');body.prepend(status);
     if(phase.key==='maintenance_required'&&!hasUserDecision){
       const inspect=el('button','原因と復旧方法を確認する'),message=el('p','','hint');
