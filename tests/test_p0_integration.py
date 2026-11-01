@@ -98,27 +98,186 @@ class P0IntegrationTests(unittest.TestCase):
         self.assertEqual(engine.accept_completion(current_id, '正式受領')['status'], 'accepted')
         self.assertEqual(store.get(job['id'])['goal_contract']['completion_status'], 'accepted')
 
+# Self-contained fictional W06.02 fixtures; no workspace-relative reads.
+K3_PLAN_JSON = (
+    '{"summary": "Fictional equipment ledger with list/search, detail and edit screens.", "security_review_required": true, "questions": [], "context_updates": [], "warnings": [], "goal_contract": {"primary_goal": "架空の備品約200件を一覧・検索・詳細・編集の3画面で扱えるようにする。", "deliverables": ["一覧・検索画面", "詳細画面", "編集画面", "架空データ・自動テスト・README"], "acceptance_criteria": ["E0001〜E0200 の200件が架空の名前・カテゴリ・在庫数・備考を持ち、一覧に件数200が表示される", "名前の一部とカテゴリで絞り込め、該当0件では「該当する備品はありません」と表示される", "長すぎる・記号だけの検索語では形式の誤りを表示し、入力をそのまま実行・描画しない", "一覧から選んだ備品の全項目が表示され、存在しないIDでは「見つかりません」と表示される", "名前・カテゴリ・在庫数・備考を編集して保存できる", "空の名前・範囲外の在庫数・長すぎる備考・HTMLのタグを含む入力は保存されず、項目ごとの誤りが表示され、入力が消えない", "保存後に詳細・一覧・検索の結果へ反映され、再起動後も残る", "先に保存された備品を古い版のまま保存しようとすると上書きせず、読み直しを求める"], "non_goals": ["利用者の認証・権限", "貸出の記録・期限", "複数人の同時編集の合流", "外部公開・push・デプロイ"], "constraints": ["架空データだけを使う", "127.0.0.1 だけで待ち受ける", "依存パッケージを追加しない"]}, "code_test_plan": {"required": true, "reason": "Search, validation, persistence and conflict behaviour are checked automatically.", "cases": ["200 fictional items and count", "filter and empty result", "invalid search input", "detail and unknown id", "save", "field validation keeps input", "redisplay and persistence", "version conflict"], "command": "python -B -m unittest discover -s tests", "existing_tests": []}, "checkpoint_paths": ["app.py", "fixtures/equipment.json", "static/index.html", "static/app.js", "tests/test_app.py", "README.md"], "work_packages": [{"wbs_id": "W1.01", "title": "架空データと一覧・検索", "goal_links": ["一覧・検索画面", "架空データ・自動テスト・README", "E0001〜E0200 の200件が架空の名前・カテゴリ・在庫数・備考を持ち、一覧に件数200が表示される", "名前の一部とカテゴリで絞り込め、該当0件では「該当する備品はありません」と表示される", "長すぎる・記号だけの検索語では形式の誤りを表示し、入力をそのまま実行・描画しない"], "done_when": ["一覧・絞込み・0件・不正入力の自動テストが通る"], "depends_on": [], "input_artifacts": []}, {"wbs_id": "W1.02", "title": "詳細の表示", "goal_links": ["詳細画面", "一覧から選んだ備品の全項目が表示され、存在しないIDでは「見つかりません」と表示される"], "done_when": ["詳細と存在しないIDの自動テストが通る"], "depends_on": ["W1.01"], "input_artifacts": []}, {"wbs_id": "W1.03", "title": "編集と保存時の検査", "goal_links": ["編集画面", "名前・カテゴリ・在庫数・備考を編集して保存できる", "空の名前・範囲外の在庫数・長すぎる備考・HTMLのタグを含む入力は保存されず、項目ごとの誤りが表示され、入力が消えない"], "done_when": ["保存と項目ごとの誤り・入力の保持の自動テストが通る"], "depends_on": ["W1.02"], "input_artifacts": []}, {"wbs_id": "W1.04", "title": "保存後の再表示と版の衝突", "goal_links": ["一覧・検索画面", "編集画面", "保存後に詳細・一覧・検索の結果へ反映され、再起動後も残る", "先に保存された備品を古い版のまま保存しようとすると上書きせず、読み直しを求める"], "done_when": ["保存後の再表示・再起動後の永続化・版の衝突の自動テストが通る"], "depends_on": ["W1.03"], "input_artifacts": []}], "tasks": [{"wbs_id": "W1.01", "role": "builder", "title": "架空データと一覧・検索を作る", "instruction": "SCOPE.md の範囲で、架空データの生成、一覧・件数・絞込み・0件・検索語の検査と自動テストを作る。", "goal_links": ["一覧・検索画面", "架空データ・自動テスト・README", "E0001〜E0200 の200件が架空の名前・カテゴリ・在庫数・備考を持ち、一覧に件数200が表示される", "名前の一部とカテゴリで絞り込め、該当0件では「該当する備品はありません」と表示される", "長すぎる・記号だけの検索語では形式の誤りを表示し、入力をそのまま実行・描画しない"]}, {"wbs_id": "W1.02", "role": "builder", "title": "詳細画面を作る", "instruction": "一覧から選んだ備品の詳細と、存在しないIDの表示と自動テストを作る。", "goal_links": ["詳細画面", "一覧から選んだ備品の全項目が表示され、存在しないIDでは「見つかりません」と表示される"]}, {"wbs_id": "W1.03", "role": "builder", "title": "編集と保存時の検査を作る", "instruction": "編集・保存と、項目ごとの誤りの表示・入力の保持と自動テストを作る。", "goal_links": ["編集画面", "名前・カテゴリ・在庫数・備考を編集して保存できる", "空の名前・範囲外の在庫数・長すぎる備考・HTMLのタグを含む入力は保存されず、項目ごとの誤りが表示され、入力が消えない"]}, {"wbs_id": "W1.04", "role": "builder", "title": "保存後の再表示と版の衝突を作る", "instruction": "保存後の詳細・一覧・検索への反映、再起動後の永続化、版の衝突で上書きしない処理と自動テストを作る。", "goal_links": ["一覧・検索画面", "編集画面", "保存後に詳細・一覧・検索の結果へ反映され、再起動後も残る", "先に保存された備品を古い版のまま保存しようとすると上書きせず、読み直しを求める"]}]}'
+)
+
+K3_EQUIPMENT_APP = (
+    '"""Fictional W06.02 equipment app fixture, standard-library WSGI only."""\n'
+    'import html\n'
+    'import json\n'
+    'import re\n'
+    'from pathlib import Path\n'
+    'from urllib.parse import parse_qs\n'
+    '\n'
+    '\n'
+    'class EquipmentApp:\n'
+    '    def __init__(self, root):\n'
+    "        self.path = Path(root) / 'fixtures' / 'equipment.json'\n"
+    '        self.path.parent.mkdir(parents=True, exist_ok=True)\n'
+    '        if not self.path.exists():\n'
+    "            self.save([{'id': 'E%04d' % n, 'name': '備品%04d' % n, 'category': '種類%d' % (n % 5),\n"
+    "                        'stock': n % 100, 'notes': '', 'version': 1} for n in range(1, 201)])\n"
+    '\n'
+    '    def load(self):\n'
+    "        return json.loads(self.path.read_text(encoding='utf-8'))\n"
+    '\n'
+    '    def save(self, rows):\n'
+    "        self.path.write_text(json.dumps(rows, ensure_ascii=False), encoding='utf-8')\n"
+    '\n'
+    '    def __call__(self, env, start):\n'
+    "        path = env.get('PATH_INFO', '/')\n"
+    "        query = parse_qs(env.get('QUERY_STRING', ''), keep_blank_values=True)\n"
+    '        rows = self.load()\n'
+    '        esc = lambda value: html.escape(str(value), quote=True)\n'
+    '        errors = []\n'
+    "        if path == '/':\n"
+    "            term = query.get('q', [''])[0]\n"
+    "            category = query.get('category', [''])[0]\n"
+    '            if len(term) > 100 or (term and not any(ch.isalnum() for ch in term)):\n'
+    "                errors.append('検索語の形式が不正です')\n"
+    '                shown = []\n'
+    '            else:\n'
+    "                shown = [row for row in rows if term in row['name'] and (not category or category == row['category'])]\n"
+    "            body = '<h1>一覧・検索</h1><p>全件数: %d</p><p>%s</p>' % (len(rows), esc('; '.join(errors)))\n"
+    '            body += \'\'.join(\'<a href="/detail?id=%s">%s</a>\' % (esc(row[\'id\']), esc(row[\'name\'])) for row in shown)\n'
+    "            if not shown and not errors: body += '<p>該当する備品はありません</p>'\n"
+    "        elif path in ('/detail', '/edit'):\n"
+    "            item_id = query.get('id', [''])[0]\n"
+    "            item = next((r for r in rows if r['id'] == item_id), None)\n"
+    '            if item is None:\n'
+    "                body = '<p>見つかりません</p>'\n"
+    "            elif path == '/detail':\n"
+    '                body = \'<h1>詳細</h1><p>%s</p><a href="/edit?id=%s">編集</a>\' % (esc(json.dumps(item, ensure_ascii=False)), esc(item_id))\n'
+    '            else:\n'
+    '                values = dict(item)\n'
+    "                if env.get('REQUEST_METHOD') == 'POST':\n"
+    "                    length = int(env.get('CONTENT_LENGTH') or 0)\n"
+    "                    form = parse_qs(env['wsgi.input'].read(length).decode('utf-8'), keep_blank_values=True)\n"
+    "                    for key in ('name', 'category', 'stock', 'notes', 'version'):\n"
+    "                        values[key] = form.get(key, [''])[0]\n"
+    "                    if not values['name'].strip(): errors.append('名前')\n"
+    "                    if values['category'] not in ['種類%d' % i for i in range(5)]: errors.append('カテゴリ')\n"
+    "                    try: stock = int(values['stock'])\n"
+    '                    except ValueError: stock = -1\n'
+    "                    if stock < 0 or stock > 99: errors.append('在庫数')\n"
+    "                    if len(values['notes']) > 2000: errors.append('備考')\n"
+    "                    if any(re.search(r'<[^>]*>', values[key]) for key in ('name', 'category', 'notes')):\n"
+    "                        errors.append('HTMLタグ')\n"
+    "                    if values['version'] != str(item['version']): errors.append('版の衝突: 読み直してください')\n"
+    '                    if not errors:\n'
+    "                        item.update(name=values['name'], category=values['category'], stock=stock,\n"
+    "                                    notes=values['notes'], version=item['version'] + 1)\n"
+    '                        self.save(rows)\n'
+    "                        start('303 See Other', [('Location', '/detail?id=' + item_id), ('Content-Length', '0')])\n"
+    "                        return [b'']\n"
+    '                body = \'<h1>編集</h1><p>%s</p><form method="post">\' % esc(\'; \'.join(errors))\n'
+    '                body += \'\'.join(\'<input name="%s" value="%s">\' % (key, esc(values[key]))\n'
+    "                                for key in ('name', 'category', 'stock', 'notes', 'version')) + '</form>'\n"
+    '        else:\n'
+    "            body = '<p>見つかりません</p>'\n"
+    '        data = (\'<!doctype html><html><meta charset="utf-8"><body>\' + body + \'</body></html>\').encode(\'utf-8\')\n'
+    "        start('200 OK', [('Content-Type', 'text/html; charset=utf-8'), ('Content-Length', str(len(data)))])\n"
+    '        return [data]\n'
+)
+
+K3_EQUIPMENT_TESTS = (
+    'import io\n'
+    'import threading\n'
+    'import tempfile\n'
+    'import unittest\n'
+    'from urllib.parse import urlencode\n'
+    'from urllib.request import Request, urlopen\n'
+    'from wsgiref.simple_server import make_server\n'
+    'from app import EquipmentApp\n'
+    '\n'
+    '\n'
+    'class FictionalEquipmentScenarios(unittest.TestCase):\n'
+    '    def setUp(self):\n'
+    '        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)\n'
+    '        self.app = EquipmentApp(self.tmp.name)\n'
+    '\n'
+    "    def call(self, path, query='', form=None):\n"
+    "        encoded = urlencode(form or {}).encode('utf-8')\n"
+    "        env = {'PATH_INFO': path, 'QUERY_STRING': query, 'REQUEST_METHOD': 'POST' if form is not None else 'GET',\n"
+    "               'CONTENT_LENGTH': str(len(encoded)), 'wsgi.input': io.BytesIO(encoded)}\n"
+    '        response = {}\n'
+    "        body = b''.join(self.app(env, lambda status, headers: response.update(status=status, headers=dict(headers))))\n"
+    "        return response, body.decode('utf-8')\n"
+    '\n'
+    '    def test_s1_s4_normal_empty_invalid_and_persistence(self):\n'
+    "        response, listing = self.call('/')\n"
+    "        self.assertIn('全件数: 200', listing); self.assertIn('備品0001', listing)\n"
+    "        self.assertIn('E0001', self.call('/detail', 'id=E0001')[1])\n"
+    "        self.assertIn('見つかりません', self.call('/detail', 'id=E9999')[1])\n"
+    "        self.assertIn('該当する備品はありません', self.call('/', 'q=NO_SUCH_ITEM')[1])\n"
+    "        self.assertIn('検索語の形式が不正です', self.call('/', 'q=!!!')[1])\n"
+    "        self.assertIn('検索語の形式が不正です', self.call('/', 'q=' + 'a' * 101)[1])\n"
+    '        original = self.app.load()[0]\n'
+    "        form = {'name': '', 'category': original['category'], 'stock': '-1', 'notes': '<script>', 'version': '1'}\n"
+    "        _, invalid = self.call('/edit', 'id=E0001', form)\n"
+    "        for label in ('名前', '在庫数', 'HTMLタグ'): self.assertIn(label, invalid)\n"
+    "        self.assertIn('&lt;script&gt;', invalid); self.assertNotIn('<script>', invalid)\n"
+    '        self.assertEqual(self.app.load()[0], original)\n'
+    "        form.update(name='変更済備品', stock='99', notes='正常')\n"
+    "        response, _ = self.call('/edit', 'id=E0001', form)\n"
+    "        self.assertTrue(response['status'].startswith('303'))\n"
+    "        self.assertIn('変更済備品', self.call('/detail', 'id=E0001')[1])\n"
+    "        self.assertIn('変更済備品', self.call('/', 'q=' + urlencode({'q': '変更済備品'}).split('=', 1)[1])[1])\n"
+    '        self.app = EquipmentApp(self.tmp.name)\n'
+    "        self.assertEqual(self.app.load()[0]['name'], '変更済備品')\n"
+    "        _, conflict = self.call('/edit', 'id=E0001', form)\n"
+    "        self.assertIn('版の衝突', conflict); self.assertEqual(self.app.load()[0]['version'], 2)\n"
+    "        form.update(version='2', stock='100', notes='x' * 2001)\n"
+    "        _, invalid = self.call('/edit', 'id=E0001', form)\n"
+    "        self.assertIn('在庫数', invalid); self.assertIn('備考', invalid)\n"
+    "        self.assertEqual(self.app.load()[0]['version'], 2)\n"
+    '\n'
+    '    def test_s4_loopback_server_restart_keeps_saved_fictional_data(self):\n'
+    '        def start():\n'
+    "            server = make_server('127.0.0.1', 0, EquipmentApp(self.tmp.name))\n"
+    '            thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()\n'
+    '            return server, thread\n'
+    '        def stop(server, thread):\n'
+    '            server.shutdown(); thread.join(5); server.server_close()\n'
+    '        server, thread = start()\n'
+    '        try:\n'
+    "            address = 'http://127.0.0.1:%d' % server.server_port\n"
+    "            body = urlencode({'name': '再表示備品', 'category': '種類1', 'stock': '3', 'notes': '架空', 'version': '1'}).encode('utf-8')\n"
+    "            with urlopen(Request(address + '/edit?id=E0001', data=body), timeout=5) as response:\n"
+    "                self.assertIn('再表示備品', response.read().decode('utf-8'))\n"
+    '        finally:\n'
+    '            stop(server, thread)\n'
+    '        server, thread = start()\n'
+    '        try:\n'
+    "            with urlopen('http://127.0.0.1:%d/detail?id=E0001' % server.server_port, timeout=5) as response:\n"
+    "                self.assertIn('再表示備品', response.read().decode('utf-8'))\n"
+    '        finally:\n'
+    '            stop(server, thread)\n'
+    '\n'
+    '\n'
+    "if __name__ == '__main__': unittest.main()\n"
+)
+
+
 class WorkflowApiIntegrationTests(unittest.TestCase):
     """Synthetic worker results and synthetic user actions, never real receipt."""
 
     def test_four_fictional_work_packages_run_in_order_to_synthetic_receipt(self):
         import json
-        import shutil
-        from pathlib import Path
         from tests import test_workflow_api as fixtures
         from unittest.mock import patch
         def four_packages(two=False):
-            case = Path(__file__).resolve().parents[3] / 'Work' / 'ai-driven-development-plan-20261026' / 'runs' / 'W06.02' / 'claude' / 'case.json'
-            value = json.loads(case.read_text(encoding='utf-8'))['plan_payload']
+            value = json.loads(K3_PLAN_JSON)
             value['checkpoint_paths'] = ['app.py', 'w101.py', 'w102.py', 'w103.py', 'w104.py',
                                          'tests/test_equipment.py']
             return value
         with patch('tests.test_plan_revision.proposal', side_effect=four_packages):
             f = fixtures.WorkflowApiTests(); self.addCleanup(f.doCleanups); f.setUp()
         engine, store, job_id = f.engine, f.store, f.f.job_id
-        case_dir = Path(__file__).resolve().parents[3] / 'Work' / 'ai-driven-development-plan-20261026' / 'runs' / 'W06.03' / 'codex'
-        shutil.copyfile(case_dir / 'equipment_fixture.py', f.f.workspace.project / 'app.py')
-        shutil.copyfile(case_dir / 'test_equipment_fixture.py', f.f.workspace.project / 'tests' / 'test_equipment.py')
+        (f.f.workspace.project / 'app.py').write_text(K3_EQUIPMENT_APP, encoding='utf-8')
+        (f.f.workspace.project / 'tests' / 'test_equipment.py').write_text(K3_EQUIPMENT_TESTS, encoding='utf-8')
         for index in range(1, 5):
             (f.f.workspace.project / ('w10%d.py' % index)).write_text('# SYNTHETIC package artifact\n', encoding='utf-8')
         original_finish = engine._finish
@@ -184,8 +343,6 @@ class WorkflowApiIntegrationTests(unittest.TestCase):
                 self.assertIn(store.get(builder['id'])['current_attempt']['status'], ('closed', 'fenced'))
                 code, assessed = f.request('/api/workflow/recovery/assess', {
                     'action': 'assess_recovery', 'job_id': job_id, 'task_id': builder['id']}, maintenance=True)
-                if not assessed.get('eligible_for_reconciliation'):
-                    engine._recovery_control_inputs(builder['id'], allow_native_assessment=True)
                 self.assertEqual(code, 200, assessed); self.assertTrue(assessed['eligible_for_reconciliation'], assessed)
                 code, reconciled = f.request('/api/workflow/recovery/reconcile', {
                     'action': 'reconcile_recovery', 'job_id': job_id, 'task_id': builder['id'],
