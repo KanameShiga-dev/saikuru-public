@@ -249,6 +249,22 @@ class P0ApiTests(unittest.TestCase):
         masked = next(item for item in public['tasks'] if item['id'] == task['id'])
         self.assertEqual(masked['profile']['adapter'], '')
 
+    def test_test_temp_failure_exposes_only_safe_reason(self):
+        store = self.server.app.store
+        job = store.all('job')[0]
+        task = store.for_job('task', job['id'])[0]
+        store.update(job['id'], p0_contract_version=1, goal_contract=initial(job['goal']),
+                     p0_interruption={'interrupted_task_id': task['id'],
+                                      'recovery_status': 'maintenance_required',
+                                      'interruption_reason': 'test_temp_scope',
+                                      'failure_signature': 'fictional-private-signature'})
+        status, public = self.request('/api/state')
+        self.assertEqual(status, 200)
+        stop = next(item for item in public['jobs'] if item['id'] == job['id'])['p0_interruption']
+        self.assertEqual(stop['public_reason'], 'test_temp_unavailable')
+        self.assertNotIn('interruption_reason', stop)
+        self.assertNotIn('failure_signature', stop)
+
     def test_unrelated_optimization_becomes_nonblocking_backlog(self):
         store = self.server.app.store
         job = store.all('job')[0]

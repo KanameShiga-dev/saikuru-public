@@ -10,7 +10,7 @@ const jobStatuses = {...statuses,planning:'計画中',awaiting_acceptance:'成�
 // 画面側で障害の種類を推測しない。未知の値は「保守対応待ち」とし、成功や判断待ちとは扱わない。
 const P0_PHASES={
   retrying:{key:'retrying',label:'復旧中',detail:'采来が自動で復旧を試みています。完了すると、止まった作業から再開します。あなたの操作は不要です。'},
-  maintenance_required:{key:'maintenance_required',label:'保守対応待ち',detail:'作業の成果は保存されています。保守担当が対応します。あなたの操作は不要です。'},
+  maintenance_required:{key:'maintenance_required',label:'保守対応待ち',detail:'作業が停止しました。原因は確認中です。途中の成果は保存されています。'},
   safety_blocked:{key:'safety_blocked',label:'安全上の確認待ち',detail:'安全のため作業を止めました。作業の成果は保存されています。権限のある担当者の確認が必要です。'}
 };
 function p0Phase(job){
@@ -19,6 +19,15 @@ function p0Phase(job){
   if(!status)return null;
   if(status==='retrying')return P0_PHASES.retrying;
   if(job.status!=='blocked')return null;
+  const reasons={
+    test_temp_unavailable:'テスト用の一時フォルダーを使用できず、担当を起動する前に停止しました。準備状況を確認してから、止まった工程の再開が必要です。',
+    execution_environment:'担当の実行環境を起動できず停止しました。実行環境を確認してから再開する必要があります。',
+    report_format:'担当の完了報告を読み取れず停止しました。報告と途中の成果を確認してから再開する必要があります。',
+    time_limit:'担当の処理が時間上限に達して停止しました。途中の処理と成果を確認してから再開する必要があります。',
+    provider_failure:'AI担当の実行中に問題が発生して停止しました。詳しい原因と途中の処理を確認してから再開する必要があります。'
+  };
+  if(status==='maintenance_required'&&reasons[job.p0_interruption?.public_reason])
+    return {...P0_PHASES.maintenance_required,detail:reasons[job.p0_interruption.public_reason]+' 途中の成果は保存されています。'};
   return P0_PHASES[status]||P0_PHASES.maintenance_required;
 }
 // 利用者に判断を求める承認か。category の無い旧形式の承認は従来どおり扱う。保守・技術・改善の項目と、保守担当宛ての項目は含めない。

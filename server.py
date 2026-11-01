@@ -342,11 +342,23 @@ class App:
               'summary': '開発エンジンの確認が必要です。途中成果は保存されています。'}
              if task['id'] in maintenance_tasks else task)
             for task in state['tasks']]
-        exposed['jobs'] = [
-            (dict(job, p0_interruption={k: v for k, v in job['p0_interruption'].items()
-                                        if k not in ('failure_signature', 'interruption_reason')})
-             if job.get('p0_contract_version') == 1 and isinstance(job.get('p0_interruption'), dict) else job)
-            for job in state['jobs']]
+        exposed['jobs'] = []
+        for job in state['jobs']:
+            stop = job.get('p0_interruption')
+            if job.get('p0_contract_version') == 1 and isinstance(stop, dict):
+                public_stop = {k: v for k, v in stop.items()
+                               if k not in ('failure_signature', 'interruption_reason', 'public_reason')}
+                if stop.get('recovery_status') == 'maintenance_required':
+                    reason = {'test_temp_scope': 'test_temp_unavailable',
+                              'codex_sandbox': 'execution_environment',
+                              'format': 'report_format',
+                              'task_timeout': 'time_limit', 'timeout': 'time_limit',
+                              'provider': 'provider_failure'}.get(stop.get('interruption_reason'))
+                    if reason:
+                        public_stop['public_reason'] = reason
+                exposed['jobs'].append(dict(job, p0_interruption=public_stop))
+            else:
+                exposed['jobs'].append(job)
         maintenance_tasks.discard(None)
         exposed['events'] = [
             (dict(event, message='開発エンジンの確認が必要です。', details=None)
