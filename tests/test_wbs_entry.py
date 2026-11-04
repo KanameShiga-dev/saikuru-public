@@ -98,6 +98,16 @@ class WbsEntryTests(WbsFixture):
             self.server.app.engine.tick()
         self.assertEqual(launched, [])
 
+    def test_v01_state_screen_shows_a_wbs_job_waiting_for_its_unexpiring_start_approval(self):
+        # M09 live run: the ai_start approval has expires_at=None (no expiry) and the state screen failed on it.
+        self.enable()
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        job = self.jobs()[0]
+        start = next(a for a in self.store.for_job('approval', job['id']) if a['kind'] == 'ai_start')
+        self.assertIsNone(start['expires_at'])
+        state = self.server.app.public_state()
+        self.assertIn(job['id'], json.dumps(state, ensure_ascii=False))
+
     def test_v01_registered_wbs_job_reaches_a_wbs_plan_through_the_real_planner_with_a_fake_provider(self):
         self.enable()
         self.assertEqual(self.register(workflow='wbs'), 200)

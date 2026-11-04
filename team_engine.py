@@ -3211,11 +3211,13 @@ class Engine:
             for approval in records['approvals']:
                 if approval['status'] != 'pending': continue
                 role = approval.get('intended_role')
+                # ai_start is bound to its scheduler attempt instead of a time and stores expires_at=None.
+                unexpired = approval.get('expires_at') is None or approval['expires_at'] > now()
                 actionable = (known and role in ('end_user','authorized_person')
-                    and approval.get('expires_at',0) > now() and job['status'] not in ('cancelled','interrupted'))
+                    and unexpired and job['status'] not in ('cancelled','interrupted'))
                 if job['status'] in ('accepted','accepted_with_pending_checks') and approval['kind'] != 'plan': actionable = False
                 if role == 'maintainer':
-                    actionable = (known and maintainer and approval.get('expires_at',0) > now()
+                    actionable = (known and maintainer and unexpired
                         and job['status'] not in ('cancelled','interrupted'))
                 if approval['kind'] == 'feature_review':
                     target = (approval.get('payload') or {}).get('feature_target') or {}
