@@ -14,13 +14,18 @@
 | 両方が既知のテーブルを持ち、識別子が一致または片側が未設定 | 許可 | （許可） |
 | 片方だけが存在・初期化済み | 停止 | `pair_partial` |
 | 読めない・`quick_check` が失敗 | 停止 | `db_corrupt` |
-| 無関係なテーブルだけを持つ | 停止 | `schema_unknown` |
+| 無関係なテーブルだけを持つ、またはテーブル名が同じでも構造が違う（列の型・NOT NULL・主キー、UNIQUE の有無と列、余分な必須列、CHECK・外部キー・トリガー） | 停止 | `schema_unknown` |
 | `schema_version` がこの版より新しい | 停止 | `schema_newer` |
 | 両側の `pair_id` が異なる（別ペアの混在） | 停止 | `pair_mismatch` |
 
 `pair_id` と `schema_version` は、各 DB の `pair_identity` テーブルに入る。`Store` / `HandoffDB` が
 初期化時に登録し、先に作られた側の識別子を後の側が引き継ぐ。この版より前から使っている DB には
 識別子がなく、その場合は互換として扱われる（識別子が無い側の取り違えは検出できない）。
+
+構造の基準は `team_deployment.py` の `TABLE_SPEC` で、`team_store.py` / `team_handoff.py` の CREATE TABLE と
+手で揃えている（片方を変えたら他方も変える）。`conflicts.resolution` は後から追加された列なので任意。
+過去の版が作った実 DB が基準と一致するかは、実データを読めないため未確認。一致しない場合は
+`schema_unknown` で止まるので、起動前に利用者へ連絡する。
 
 読み取りは、`-wal` / `-shm` が無ければ `immutable=1`、あれば `mode=ro` で開く。前者は側ファイルを作らない。
 後者は既存の側ファイルを読むだけで、新しく作らない。

@@ -24,20 +24,42 @@ REQUIRED_TABLES = {
     HANDOFF_DB: {'records', 'facts', 'conflicts', 'skill_candidates', 'skill_versions',
                  'skill_active', 'skill_titles'},
 }
-# Columns every release has had (conflicts.resolution is added by migration, so it is not required here).
-REQUIRED_COLUMNS = {
-    'objects': ('kind', 'id', 'body'),
-    'events': ('seq', 'body'),
-    'transitions': ('seq', 'kind', 'id', 'job_id', 'from_status', 'to_status', 'at', 'reason'),
-    'metrics_meta': ('key', 'value'),
-    'records': ('seq', 'project', 'job_id', 'task_id', 'kind', 'source_id', 'happened_at', 'payload'),
-    'facts': ('seq', 'project', 'job_id', 'key', 'value', 'evidence', 'authority', 'source_id', 'status',
-              'created_at'),
-    'conflicts': ('id', 'job_id', 'key', 'old_fact', 'new_fact', 'status', 'resolved_at'),
-    'skill_candidates': ('id', 'project', 'experience_key', 'content_hash', 'payload', 'created_at'),
-    'skill_versions': ('id', 'project', 'name', 'candidate_id', 'payload', 'created_at'),
-    'skill_active': ('project', 'name', 'version_id', 'enabled'),
-    'skill_titles': ('name', 'title', 'updated_at'),
+# Structure every release has had, mirroring the CREATE TABLE statements in team_store.py / team_handoff.py:
+# column -> (declared type, NOT NULL, primary-key position), and the UNIQUE column sets.
+# conflicts.resolution is added by migration, so it is optional. Extra columns are tolerated only if a
+# write that omits them still succeeds (nullable or defaulted, not part of the key).
+TABLE_SPEC = {
+    'objects': {'columns': {'kind': ('TEXT', 0, 0), 'id': ('TEXT', 0, 1), 'body': ('TEXT', 1, 0)}, 'unique': set()},
+    'events': {'columns': {'seq': ('INTEGER', 0, 1), 'body': ('TEXT', 1, 0)}, 'unique': set()},
+    'transitions': {'columns': {'seq': ('INTEGER', 0, 1), 'kind': ('TEXT', 0, 0), 'id': ('TEXT', 0, 0),
+                                'job_id': ('TEXT', 0, 0), 'from_status': ('TEXT', 0, 0),
+                                'to_status': ('TEXT', 0, 0), 'at': ('REAL', 0, 0), 'reason': ('TEXT', 0, 0)},
+                    'unique': set()},
+    'metrics_meta': {'columns': {'key': ('TEXT', 0, 1), 'value': ('REAL', 0, 0)}, 'unique': set()},
+    'records': {'columns': {'seq': ('INTEGER', 0, 1), 'project': ('TEXT', 1, 0), 'job_id': ('TEXT', 0, 0),
+                            'task_id': ('TEXT', 0, 0), 'kind': ('TEXT', 1, 0), 'source_id': ('TEXT', 1, 0),
+                            'happened_at': ('REAL', 1, 0), 'payload': ('TEXT', 1, 0)},
+                'unique': {('source_id',)}},
+    'facts': {'columns': {'seq': ('INTEGER', 0, 1), 'project': ('TEXT', 1, 0), 'job_id': ('TEXT', 1, 0),
+                          'key': ('TEXT', 1, 0), 'value': ('TEXT', 1, 0), 'evidence': ('TEXT', 1, 0),
+                          'authority': ('TEXT', 1, 0), 'source_id': ('TEXT', 1, 0), 'status': ('TEXT', 1, 0),
+                          'created_at': ('REAL', 1, 0)},
+              'unique': {('source_id',)}},
+    'conflicts': {'columns': {'id': ('INTEGER', 0, 1), 'job_id': ('TEXT', 1, 0), 'key': ('TEXT', 1, 0),
+                              'old_fact': ('INTEGER', 1, 0), 'new_fact': ('INTEGER', 1, 0),
+                              'status': ('TEXT', 1, 0), 'resolved_at': ('REAL', 0, 0)},
+                  'optional': {'resolution': ('TEXT', 0, 0)}, 'unique': set()},
+    'skill_candidates': {'columns': {'id': ('TEXT', 0, 1), 'project': ('TEXT', 1, 0),
+                                     'experience_key': ('TEXT', 1, 0), 'content_hash': ('TEXT', 1, 0),
+                                     'payload': ('TEXT', 1, 0), 'created_at': ('REAL', 1, 0)},
+                         'unique': {('project', 'experience_key', 'content_hash')}},
+    'skill_versions': {'columns': {'id': ('TEXT', 0, 1), 'project': ('TEXT', 1, 0), 'name': ('TEXT', 1, 0),
+                                   'candidate_id': ('TEXT', 1, 0), 'payload': ('TEXT', 1, 0),
+                                   'created_at': ('REAL', 1, 0)}, 'unique': set()},
+    'skill_active': {'columns': {'project': ('TEXT', 1, 1), 'name': ('TEXT', 1, 2),
+                                 'version_id': ('TEXT', 1, 0), 'enabled': ('INTEGER', 1, 0)}, 'unique': set()},
+    'skill_titles': {'columns': {'name': ('TEXT', 0, 1), 'title': ('TEXT', 1, 0), 'updated_at': ('REAL', 1, 0)},
+                     'unique': set()},
 }
 SCHEMA_VERSION = 1
 MANIFEST_NAME = 'pair-manifest.json'
@@ -84,6 +106,35 @@ def _counts(db):
             for name in names}
 
 
+def _table_compatible(db, table):
+    """Does the table's structure match TABLE_SPEC closely enough that normal writes behave as designed?
+    Names alone are not enough: an unexpected UNIQUE would make `INSERT OR IGNORE` drop records silently."""
+    spec = TABLE_SPEC[table]
+    wanted = {**spec['columns'], **spec.get('optional', {})}
+    actual = {r[1]: (r[2].upper(), r[3], r[5], r[4])
+              for r in db.execute('PRAGMA table_info("%s")' % table)}
+    if not set(spec['columns']) <= set(actual):
+        return False
+    for column, (kind, notnull, pk, default) in actual.items():
+        if column in wanted:
+            if (kind, notnull, pk) != wanted[column]:
+                return False
+        elif notnull and default is None or pk:
+            return False  # an extra column that ordinary inserts do not fill, or an extra key part
+    unique = set()
+    for _, index, is_unique, origin, partial in db.execute('PRAGMA index_list("%s")' % table):
+        if is_unique and origin != 'pk':
+            if partial:
+                return False
+            unique.add(tuple(r[2] for r in db.execute('PRAGMA index_info("%s")' % index)))
+    if unique != spec['unique']:
+        return False
+    if db.execute('PRAGMA foreign_key_list("%s")' % table).fetchone():
+        return False
+    create_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()[0]
+    return not re.search(r'\bCHECK\b|\bWITHOUT\s+ROWID\b|\bGENERATED\b', create_sql, re.IGNORECASE)
+
+
 def inspect_db(path, name):
     """Read-only state of one DB: missing | empty | ready | foreign | corrupt | newer."""
     path = Path(path)
@@ -98,10 +149,10 @@ def inspect_db(path, name):
                 return {'state': 'empty'}
             if not REQUIRED_TABLES[name] <= set(counts):
                 return {'state': 'foreign'}
-            for table in REQUIRED_TABLES[name]:
-                columns = {r[1] for r in db.execute('PRAGMA table_info("%s")' % table)}
-                if not set(REQUIRED_COLUMNS[table]) <= columns:
-                    return {'state': 'foreign'}
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger'").fetchone():
+                return {'state': 'foreign'}  # a trigger can silently drop or rewrite writes
+            if not all(_table_compatible(db, table) for table in REQUIRED_TABLES[name]):
+                return {'state': 'foreign'}
             identity = {}
             if 'pair_identity' in counts:
                 identity = dict(db.execute('SELECT key, value FROM pair_identity').fetchall())

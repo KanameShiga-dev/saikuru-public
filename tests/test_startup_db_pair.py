@@ -95,6 +95,53 @@ class PairCheck(Fixture):
             self.assertEqual(caught.exception.code, 'schema_unknown', table)
             self.assertEqual(snapshot(folder), before, table)
 
+    def test_expected_names_and_columns_with_incompatible_structure_are_refused_before_any_write(self):
+        """Same column names, different constraints: INSERT OR IGNORE would silently lose later records."""
+        records = ('CREATE TABLE records (seq INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, '
+                   'job_id TEXT, task_id TEXT, kind TEXT NOT NULL, source_id TEXT NOT NULL UNIQUE, '
+                   'happened_at REAL NOT NULL, payload TEXT NOT NULL%s)')
+        cases = {
+            'unique-project': (deploy.HANDOFF_DB, 'records', records % ', UNIQUE(project)'),
+            'missing-source-unique': (deploy.HANDOFF_DB, 'records', records.replace(' UNIQUE', '') % ''),
+            'check-constraint': (deploy.HANDOFF_DB, 'records', records % ", CHECK(kind <> 'x')"),
+            'extra-required-column': (deploy.HANDOFF_DB, 'records', records % ', extra TEXT NOT NULL'),
+            'wrong-type': (deploy.TEAM_DB, 'metrics_meta', 'CREATE TABLE metrics_meta (key TEXT PRIMARY KEY, value BLOB)'),
+            'wrong-key': (deploy.TEAM_DB, 'objects', 'CREATE TABLE objects (kind TEXT, id TEXT, body TEXT NOT NULL, '
+                          'PRIMARY KEY(kind, id))'),
+        }
+        for label, (db_name, table, ddl) in cases.items():
+            folder = Path(self.temp.name) / ('structure-' + label)
+            make_pair(folder)
+            sql(folder / db_name, 'DROP TABLE ' + table)
+            sql(folder / db_name, ddl)
+            before = snapshot(folder)
+            with self.assertRaises(deploy.DeploymentError, msg=label) as caught:
+                deploy.require_pair(folder)
+            self.assertEqual(caught.exception.code, 'schema_unknown', label)
+            self.assertEqual(snapshot(folder), before, label)
+
+    def test_a_trigger_or_foreign_key_makes_the_pair_incompatible(self):
+        trigger = Path(self.temp.name) / 'trigger'
+        make_pair(trigger)
+        sql(trigger / deploy.HANDOFF_DB, 'CREATE TRIGGER drop_all BEFORE INSERT ON records '
+            'BEGIN SELECT RAISE(IGNORE); END')
+        key = Path(self.temp.name) / 'foreign-key'
+        make_pair(key)
+        sql(key / deploy.HANDOFF_DB, 'DROP TABLE skill_titles')
+        sql(key / deploy.HANDOFF_DB, 'CREATE TABLE skill_titles (name TEXT PRIMARY KEY, title TEXT NOT NULL, '
+            'updated_at REAL NOT NULL, FOREIGN KEY(name) REFERENCES skill_active(project))')
+        for folder in (trigger, key):
+            before = snapshot(folder)
+            with self.assertRaises(deploy.DeploymentError, msg=folder.name) as caught:
+                deploy.require_pair(folder)
+            self.assertEqual(caught.exception.code, 'schema_unknown')
+            self.assertEqual(snapshot(folder), before)
+
+    def test_older_conflicts_table_without_resolution_is_still_compatible(self):
+        make_pair(self.data)
+        sql(self.data / deploy.HANDOFF_DB, 'ALTER TABLE conflicts DROP COLUMN resolution')
+        self.assertEqual(deploy.require_pair(self.data)['state'], 'ready')
+
     def test_empty_files_count_as_blank(self):
         self.data.mkdir()
         for name in deploy.PAIR_FILES:
