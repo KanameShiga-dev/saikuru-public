@@ -66,7 +66,7 @@
       "test_ids": [],
       "classification": "unclassified",
       "current_result": "reproduced",
-      "evidence": "2026-11-04: the whole-list run and tests.test_native_recovery_confirmation alone each stopped making progress at a different test inside that module (300 s and 600 s limits); a later run of 42 modules was killed at its 15-minute limit inside tests.test_wbs_entry (after having passed tests.test_recovery_integration_synthetic slowly). Cause not examined: may be machine load, a lock wait, or a real hang.",
+      "evidence": "2026-11-04: the whole-list run and tests.test_native_recovery_confirmation alone each stopped making progress at a different test inside that module (300 s and 600 s limits); a later run of 42 modules was killed at its 15-minute limit inside tests.test_wbs_entry (after having passed tests.test_recovery_integration_synthetic slowly). 2026-11-05: the pytest whole run also hit the runner's 2700 s limit at about 89% (whole_run_attempts). Cause not examined: may be machine load, a lock wait, slow tests, or a real hang.",
       "next_action": "Run the stalled modules one at a time with a longer limit and no other run in parallel; read the stalled test to see what it waits on.",
       "owner": "M07 follow-up"
     },
@@ -112,6 +112,17 @@
       "base_commit": "b4d9610a790147bf2c07b4d6bfd6fd32d1c1c1f7",
       "modules": "tests.test_p0_core .. tests.test_workspace_boundary (42 modules, not completed)",
       "known_failure_ids": ["KF-004", "KF-005"]
+    }
+  ],
+  "whole_run_attempts": [
+    {
+      "note": "NOT a final run: the standard whole run did not complete. 2026-11-05, `python -I run_wbs_tests.py --pytest -q` from the worktree root, stopped by the runner after 2700 s (exit 124). No summary line exists, so no totals or failing test names are recorded. Progress output reached about 89% of the 1394 collected tests (plus 2 collection errors, KF-006 and KF-007) and showed many F marks and one block of E marks, so the overall result is NOT a pass. Per-test results were not read.",
+      "base_commit": "2719dde",
+      "command": "python -I run_wbs_tests.py --pytest -q",
+      "collected": 1394,
+      "collection_errors": 2,
+      "exit_code": 124,
+      "known_failure_ids": ["KF-005", "KF-006", "KF-007"]
     }
   ],
   "final_run": null,
