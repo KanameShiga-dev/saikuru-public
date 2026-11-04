@@ -36,10 +36,13 @@ def validate(data):
             if tid in seen_tests:
                 problems.append('%s: test %s already counted by %s' % (eid, tid, seen_tests[tid]))
             seen_tests[tid] = eid
+    for c in data.get('collection_errors', []):
+        if c.get('kf') not in seen_ids:
+            problems.append('collection error %s: unknown tracker id %s' % (c.get('file'), c.get('kf')))
     return problems
 
 
-def test_id_problems(tid):
+def id_problems(tid):
     """tid is dotted module path plus Class.test_name, e.g. tests.test_x.Case.test_y."""
     parts = tid.split('.')
     for i in range(len(parts) - 2, 0, -1):
@@ -66,7 +69,7 @@ class SchemaTests(unittest.TestCase):
     def test_referenced_tests_exist_and_are_enabled(self):
         for e in self.data['entries']:
             for tid in e['test_ids']:
-                self.assertEqual(test_id_problems(tid), [], e['id'] + ' ' + tid)
+                self.assertEqual(id_problems(tid), [], e['id'] + ' ' + tid)
 
     def test_missing_classification_is_detected(self):
         self.data['entries'][0]['classification'] = ''
@@ -89,10 +92,14 @@ class SchemaTests(unittest.TestCase):
         self.data['entries'][0]['classification'] = 'fixture'
         self.assertTrue(any('without a recorded run' in p for p in validate(self.data)))
 
+    def test_collection_error_without_entry_is_detected(self):
+        self.data['collection_errors'][0]['kf'] = 'KF-999'
+        self.assertTrue(any('unknown tracker id' in p for p in validate(self.data)))
+
     def test_disabled_test_is_detected(self):
-        self.assertEqual(test_id_problems('tests.test_known_failures.SchemaTests.no_such_test'),
+        self.assertEqual(id_problems('tests.test_known_failures.SchemaTests.no_such_test'),
                          ['test not found in test_known_failures.py'])
-        self.assertEqual(test_id_problems('tests.test_nothing.Case.test_y'), ['module file not found'])
+        self.assertEqual(id_problems('tests.test_nothing.Case.test_y'), ['module file not found'])
 
 
 class FinalRunRecordTests(unittest.TestCase):

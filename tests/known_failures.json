@@ -30,8 +30,8 @@
       "test_ids": [],
       "classification": "runner",
       "current_result": "reproduced",
-      "evidence": "2026-11-04 run via run_wbs_tests.py (partial run 1): ImportError, ModuleNotFoundError: No module named 'test_checkpoint_collection' at tests/test_checkpoint_commit.py line 9. The runner imports by dotted name, so tests/ is not on sys.path. pytest.ini pythonpath=. does not add tests/ either, so the pytest entry is expected to fail the same way (not run).",
-      "next_action": "Decide whether to change the import to `tests.test_checkpoint_collection` or add tests/ to pythonpath; needs a change to an existing test, outside this task's file list.",
+      "evidence": "2026-11-04 run via run_wbs_tests.py (partial run 1): ImportError, ModuleNotFoundError: No module named 'test_checkpoint_collection' at tests/test_checkpoint_commit.py line 9. The dotted-name runner still cannot import it. 2026-11-05 pytest (--pytest) with pythonpath=. only: the same ImportError at collection; after adding `tests` to pythonpath in pytest.ini the module collects (collection_errors no longer lists it).",
+      "next_action": "Resolved for the pytest entry by pytest.ini. The dotted-name runner still fails; fixing it means changing the import in tests/test_checkpoint_commit.py, outside this task's file list.",
       "owner": "M07 follow-up"
     },
     {
@@ -69,7 +69,31 @@
       "evidence": "2026-11-04: the whole-list run and tests.test_native_recovery_confirmation alone each stopped making progress at a different test inside that module (300 s and 600 s limits); a later run of 42 modules was killed at its 15-minute limit inside tests.test_wbs_entry (after having passed tests.test_recovery_integration_synthetic slowly). Cause not examined: may be machine load, a lock wait, or a real hang.",
       "next_action": "Run the stalled modules one at a time with a longer limit and no other run in parallel; read the stalled test to see what it waits on.",
       "owner": "M07 follow-up"
+    },
+    {
+      "id": "KF-006",
+      "title": "test_document_read.py cannot be collected: Pillow is not installed in the test environment",
+      "test_ids": [],
+      "classification": "dependency",
+      "current_result": "reproduced",
+      "evidence": "2026-11-05 pytest collection: ModuleNotFoundError: No module named 'PIL' (document_media_worker.py line 12, imported from test_document_read.py line 6). Pillow is declared in requirements-documents.txt but not in requirements-test.txt.",
+      "next_action": "Decide whether the standard test environment installs requirements-documents.txt, or the test should skip without Pillow; then remove the file from collection_errors.",
+      "owner": "M07 follow-up"
+    },
+    {
+      "id": "KF-007",
+      "title": "tests/test_ui_decision_benchmark.py cannot be collected: module ui_decision_benchmark does not exist in this checkout",
+      "test_ids": [],
+      "classification": "unclassified",
+      "current_result": "reproduced",
+      "evidence": "2026-11-05 pytest collection: ModuleNotFoundError: No module named 'ui_decision_benchmark' (tests/test_ui_decision_benchmark.py line 4). A file search of this worktree finds no ui_decision_benchmark.py. Same failure as the loader error noted in KF-004. Whether the module was never committed or was removed is not established.",
+      "next_action": "Check history for the module; then either add it, or fix/remove the test (outside this task's file list), and drop the file from collection_errors.",
+      "owner": "M07 follow-up"
     }
+  ],
+  "collection_errors": [
+    {"file": "test_document_read.py", "kf": "KF-006"},
+    {"file": "tests/test_ui_decision_benchmark.py", "kf": "KF-007"}
   ],
   "partial_runs": [
     {
