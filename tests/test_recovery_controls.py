@@ -246,5 +246,49 @@ class RecoveryControlTests(unittest.TestCase):
         self.assertTrue(self.store.get(self.task['id'])['recovery_check_required'])
 
 
+class InterruptionBoundaryTests(unittest.TestCase):
+    """The declared boundary/effect table, using fictional values only."""
+
+    def setUp(self):
+        import team_recovery
+        self.recovery = team_recovery
+
+    def test_four_declared_boundaries_and_every_supported_pair_is_classified(self):
+        self.assertEqual(self.recovery.INTERRUPTION_BOUNDARIES, (
+            'before_worker_start', 'after_edit', 'after_verification_command', 'before_result_report'))
+        for boundary, effects in self.recovery._SUPPORTED_EFFECTS.items():
+            self.assertIn(boundary, self.recovery.INTERRUPTION_BOUNDARIES)
+            for effect in effects:
+                self.assertIn(effect, self.recovery.EFFECT_TYPES)
+                plan = self.recovery.interruption_plan(boundary, effect)
+                self.assertTrue(plan['supported'])
+                self.assertEqual(plan['execution_permission'], 'none')
+        self.assertEqual(set(self.recovery._SUPPORTED_EFFECTS), set(self.recovery.INTERRUPTION_BOUNDARIES))
+
+    def test_only_an_effect_free_start_may_be_replayed(self):
+        replayable = [(b, e) for b, effects in self.recovery._SUPPORTED_EFFECTS.items() for e in effects
+                      if self.recovery.interruption_plan(b, e)['replay_allowed']]
+        self.assertEqual(replayable, [('before_worker_start', 'none')])
+        self.assertFalse(self.recovery.interruption_plan('before_worker_start', 'none')['reconciliation_required'])
+
+    def test_effects_after_start_require_reconciliation_and_are_not_replayed(self):
+        for boundary, effect in (('after_edit', 'file_edit'), ('after_verification_command', 'verification_command'),
+                                 ('before_result_report', 'result_report')):
+            plan = self.recovery.interruption_plan(boundary, effect)
+            self.assertFalse(plan['replay_allowed'])
+            self.assertTrue(plan['reconciliation_required'])
+            self.assertTrue(plan['reconciliation_steps'])
+
+    def test_unsupported_or_unknown_pairs_are_never_replayed(self):
+        for boundary, effect in (('after_edit', 'none'), ('before_worker_start', 'file_edit'),
+                                 ('after_edit', 'network_publish'), ('mid_stream', 'file_edit'), (None, None)):
+            plan = self.recovery.interruption_plan(boundary, effect)
+            self.assertFalse(plan['supported'])
+            self.assertEqual(plan['effect'], 'unknown')
+            self.assertFalse(plan['replay_allowed'])
+            self.assertTrue(plan['reconciliation_required'])
+            self.assertTrue(plan['reconciliation_steps'])
+
+
 if __name__ == '__main__':
     unittest.main()

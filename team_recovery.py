@@ -86,6 +86,41 @@ def workflow_failure_advice(task):
             'state': state, 'execution_permission': 'none'}
 
 
+# Declared interruption boundaries and the effect type each one can leave behind.
+# Only (boundary, effect) pairs listed here are supported. Anything else, including
+# an unrecognised boundary or effect, is treated as an unknown effect.
+INTERRUPTION_BOUNDARIES = ('before_worker_start', 'after_edit', 'after_verification_command', 'before_result_report')
+EFFECT_TYPES = {
+    'none': '作用なし（worker 起動前）',
+    'file_edit': '承認範囲内のファイル編集',
+    'verification_command': '検証コマンドの実行（確定結果は operation_result に残る）',
+    'result_report': '結果報告の送信',
+}
+_SUPPORTED_EFFECTS = {
+    'before_worker_start': ('none',),
+    'after_edit': ('file_edit',),
+    'after_verification_command': ('file_edit', 'verification_command'),
+    'before_result_report': ('file_edit', 'verification_command', 'result_report'),
+}
+_RECONCILIATION = ('作業の書き手の停止を確認する', '承認範囲内の変更を確認する',
+                   'operation_assessment と確定済みの検証結果を照合し、作用の成否を保守担当が判断する')
+
+
+def interruption_plan(boundary, effect):
+    """Advisory only: never permission, retry or a command.
+
+    A fresh start is offered only when nothing could have happened. Every other
+    pair keeps confirmed results and needs reconciliation before any replay;
+    an unsupported or unknown pair is never replayed.
+    """
+    supported = effect in _SUPPORTED_EFFECTS.get(boundary, ())
+    return {'schema_version': 1, 'boundary': boundary if boundary in INTERRUPTION_BOUNDARIES else 'unknown',
+            'effect': effect if supported else 'unknown', 'supported': supported,
+            'replay_allowed': supported and (boundary, effect) == ('before_worker_start', 'none'),
+            'reconciliation_required': not (boundary == 'before_worker_start' and effect == 'none' and supported),
+            'reconciliation_steps': list(_RECONCILIATION), 'execution_permission': 'none'}
+
+
 def retry_local_read(operation, max_retries=2):
     """Retry only an idempotent local read on a transient SQLite lock."""
     for attempt in range(max_retries + 1):
