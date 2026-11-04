@@ -7,6 +7,9 @@ $pythonExe = $env:AGENT_TEAM_INSTALL_PYTHON
 if (-not (Test-Path -LiteralPath (Join-Path $projectDir 'background_runner.py'))) { throw 'Project missing.' }
 if (-not (Test-Path -LiteralPath $pythonExe)) { throw 'Python missing.' }
 if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { throw 'Task already exists. Inspect it before replacing it.' }
+# Do not register a supervisor that would start a server against an unusable DB pair (read-only check).
+& $pythonExe -I -X utf8 (Join-Path $projectDir 'team_deployment.py') check --data (Join-Path $projectDir 'data') | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'DB pair check refused registration. Nothing was registered.' }
 $account = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 # Get-Credential prompts inside the console and shows nothing from a child process, so use the Windows sign-in dialog (CredUI).
 Add-Type -TypeDefinition @'

@@ -9,6 +9,7 @@ import sys
 import time
 import urllib.request
 from team_config import ROOT
+from team_deployment import DeploymentError, require_pair
 
 
 def health(url):
@@ -57,10 +58,16 @@ def main():
                 return
             time.sleep(.2)
         raise SystemExit('Shutdown still in progress; do not start another instance yet.')
-    (ROOT / 'data' / 'background.disabled').unlink(missing_ok=True)
     if health(url):
+        (ROOT / 'data' / 'background.disabled').unlink(missing_ok=True)
         print('Already running: ' + url)
         return
+    # Refuse before the Task Scheduler or a child process can touch the DBs; keep the disabled marker.
+    try:
+        require_pair(ROOT / 'data')
+    except DeploymentError as exc:
+        raise SystemExit(f'Start refused (DB pair check): {exc}')
+    (ROOT / 'data' / 'background.disabled').unlink(missing_ok=True)
     if os.name == 'nt':
         powershell = str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
         find_task = subprocess.run([powershell, '-NoProfile', '-Command',

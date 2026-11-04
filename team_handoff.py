@@ -8,6 +8,8 @@ import time
 from contextlib import closing
 from pathlib import Path
 
+from team_deployment import register_identity
+
 
 def canonical(path):
     return str(Path(path).resolve()).casefold()
@@ -87,6 +89,7 @@ class HandoffDB:
         ''')
         if 'resolution' not in [r[1] for r in self.db.execute('PRAGMA table_info(conflicts)')]:
             self.db.execute('ALTER TABLE conflicts ADD COLUMN resolution TEXT')
+        register_identity(self.db, directory, 'team.sqlite3')
         self.db.commit()
 
     def close(self):

@@ -7,6 +7,7 @@ import sys
 import time
 from manage import health
 from team_config import ROOT
+from team_deployment import DeploymentError, require_pair
 
 
 def main():
@@ -31,6 +32,14 @@ def main():
                 continue
             if child is not None and child.poll() is None:
                 time.sleep(3)
+                continue
+            try:
+                require_pair(data)
+            except DeploymentError as exc:
+                with (data / 'server.stderr.log').open('ab') as err:
+                    err.write(f'Background start refused (DB pair check): {exc}\n'.encode('utf-8'))
+                time.sleep(delay)
+                delay = min(60, delay * 2)
                 continue
             with (data / 'server.stdout.log').open('ab') as out, (data / 'server.stderr.log').open('ab') as err:
                 child = subprocess.Popen([sys.executable, '-X', 'utf8', str(ROOT / 'server.py')],

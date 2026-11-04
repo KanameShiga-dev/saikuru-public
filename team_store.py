@@ -9,6 +9,7 @@ import uuid
 from contextlib import contextmanager, closing
 from pathlib import Path
 
+from team_deployment import register_identity
 from team_p0_contract import workflow_version
 
 
@@ -44,6 +45,7 @@ class Store:
         self.db.execute('CREATE INDEX IF NOT EXISTS transition_job ON transitions(job_id, seq)')
         self.db.execute('CREATE TABLE IF NOT EXISTS metrics_meta (key TEXT PRIMARY KEY, value REAL)')
         self.db.execute("INSERT OR IGNORE INTO metrics_meta VALUES ('started_at', ?)", (now(),))
+        register_identity(self.db, self.directory, 'handoff.sqlite3')
         self.db.commit()
 
     def put(self, kind, obj, transition_reason=None):

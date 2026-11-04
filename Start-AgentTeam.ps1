@@ -21,6 +21,9 @@ try {
     if ($_.Exception.Message -eq 'Port is occupied by another service.') { throw }
 }
 $dataPath = Join-Path $projectRoot 'data'
+# Read-only DB-pair check before anything is created or started (same check as server.py / manage.py).
+& $pythonPath -I -X utf8 (Join-Path $projectRoot 'team_deployment.py') check --data $dataPath | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'DB pair check refused startup. Nothing was written; see the message above.' }
 New-Item -ItemType Directory -Path $dataPath -Force | Out-Null
 $arguments = @('-X', 'utf8', ('"' + $scriptPath + '"'), '--port', [string]$Port)
 $process = Start-Process -FilePath $pythonPath -ArgumentList $arguments -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $dataPath 'server.stdout.log') -RedirectStandardError (Join-Path $dataPath 'server.stderr.log')

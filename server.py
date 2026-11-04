@@ -11,6 +11,8 @@ import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from team_deployment import DeploymentError, require_pair
 from urllib.parse import urlparse, parse_qs
 
 from team_config import ROOT, default_provider_settings, discover, environment_status, load_config, validate_config
@@ -1219,7 +1221,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(directory, port=8790):
-    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    # Read-only DB-pair check before the data lock, the stores and the listening socket exist.
+    require_pair(directory)
+    server =ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.daemon_threads = True
     try:
         server.app = App(directory, server.server_port)
@@ -1253,7 +1257,10 @@ def main():
     parser.add_argument('--port', type=int, default=8790)
     parser.add_argument('--data', type=Path, default=ROOT / 'data')
     args = parser.parse_args()
-    server = make_server(args.data, args.port)
+    try:
+        server = make_server(args.data, args.port)
+    except DeploymentError as exc:
+        raise SystemExit(f'起動を中止しました（DB ペアの検査）: {exc}')
     if args.port == 8790:
         threading.Thread(target=mobile_loop, args=(server.app,), daemon=True).start()
     server.app.usage.start()
