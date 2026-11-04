@@ -23,6 +23,71 @@
       "evidence": "SAIKURU_IDE_RELEASE_READINESS.md lines 35 and 51: suspected fixture drift, fix not done, test names not recorded.",
       "next_action": "Identify the four tests from a full run; classify (suspected fixture) only after reading the failing assertions.",
       "owner": "M07 follow-up"
+    },
+    {
+      "id": "KF-003",
+      "title": "tests.test_checkpoint_commit cannot be imported by module name: it does `import test_checkpoint_collection` (bare sibling import)",
+      "test_ids": [],
+      "classification": "runner",
+      "current_result": "reproduced",
+      "evidence": "2026-11-04 run via run_wbs_tests.py (partial run 1): ImportError, ModuleNotFoundError: No module named 'test_checkpoint_collection' at tests/test_checkpoint_commit.py line 9. The runner imports by dotted name, so tests/ is not on sys.path. pytest.ini pythonpath=. does not add tests/ either, so the pytest entry is expected to fail the same way (not run).",
+      "next_action": "Decide whether to change the import to `tests.test_checkpoint_collection` or add tests/ to pythonpath; needs a change to an existing test, outside this task's file list.",
+      "owner": "M07 follow-up"
+    },
+    {
+      "id": "KF-004",
+      "title": "Failures and errors seen in a single non-final run, not yet read or classified",
+      "test_ids": [
+        "tests.test_claude_builder_temp_scope.ClaudeBuilderTempScopeTests.test_non_builder_or_job_without_validation_keeps_environment",
+        "tests.test_g1_g2_adversarial.G1G2AdversarialTests.test_spawned_processes_can_claim_g2_only_once",
+        "tests.test_quality_engine_hook_synthetic.HookTests.test_a_failing_recorder_never_holds_up_acceptance",
+        "tests.test_quality_engine_hook_synthetic.HookTests.test_accepting_a_stopped_job_without_a_fix_also_records",
+        "tests.test_quality_engine_hook_synthetic.HookTests.test_reaching_acceptance_records_the_owned_deliverable",
+        "tests.test_quality_engine_hook_synthetic.HookTests.test_recording_leaves_the_deliverable_and_the_approval_flow_alone",
+        "tests.test_quality_view_synthetic.TestFileTests.test_matching_hash_passes_changed_or_deleted_file_invalidates",
+        "tests.test_quality_view_synthetic.VerificationTests.test_commands_all_zero_passes",
+        "tests.test_reacceptance_fixture.ReacceptanceTests.test_conditional_evidence_requires_new_acceptance_and_preserves_history",
+        "tests.test_reacceptance_fixture.ReacceptanceTests.test_reopening_preserves_pending_human_decision",
+        "tests.test_routing_eval.RoutingEvaluationTests.test_full_keeps_planner",
+        "tests.test_routing_eval.RoutingEvaluationTests.test_light_has_builder_and_both_reviews_without_planner",
+        "tests.test_routing_eval.RoutingEvaluationTests.test_review_context_shadow_and_on_remove_only_duplicate_instruction",
+        "tests.test_safe_start.SafeStartTests.test_s09_all_mutation_routes_denied",
+        "tests.test_safe_start.SafeStartTests.test_s13_normal_path_unchanged"
+      ],
+      "classification": "unclassified",
+      "current_result": "reproduced",
+      "evidence": "2026-11-04 partial runs 1 and 2 (see partial_runs). Only the first two have a read traceback: the temp-scope one raises ProviderError 'test_temp_scope' (temp dir outside the allowed range), the g1_g2 one hits queue.Empty after a 15 s wait on spawned processes. The rest were seen as FAIL/ERROR lines only; assertions not read. Also tests.test_ui_decision_benchmark failed to load (loader error, cause not read). Whether any of these is KF-001 or KF-002 is not established.",
+      "next_action": "Read each failing assertion, then classify as product / fixture / dependency / runner / environment. Re-run on a quiet machine to separate load-dependent failures (g1_g2) from real ones.",
+      "owner": "M07 follow-up"
+    },
+    {
+      "id": "KF-005",
+      "title": "Runs did not finish: a test stalled until the time limit",
+      "test_ids": [],
+      "classification": "unclassified",
+      "current_result": "reproduced",
+      "evidence": "2026-11-04: the whole-list run and tests.test_native_recovery_confirmation alone each stopped making progress at a different test inside that module (300 s and 600 s limits); a later run of 42 modules was killed at its 15-minute limit inside tests.test_wbs_entry (after having passed tests.test_recovery_integration_synthetic slowly). Cause not examined: may be machine load, a lock wait, or a real hang.",
+      "next_action": "Run the stalled modules one at a time with a longer limit and no other run in parallel; read the stalled test to see what it waits on.",
+      "owner": "M07 follow-up"
+    }
+  ],
+  "partial_runs": [
+    {
+      "note": "NOT a final run. Run 1 of 2 by module name via run_wbs_tests.py. Root-level modules and tests.continuity.* / tests.ui.* cannot be passed to the runner (usage error), so they were not run.",
+      "base_commit": "b4d9610a790147bf2c07b4d6bfd6fd32d1c1c1f7",
+      "python": "3.14 (from traceback path)",
+      "modules": "tests.test_accept_without_fix_compatibility .. tests.test_history_metrics (23 modules)",
+      "executed": 236,
+      "errors": 3,
+      "failed": 0,
+      "skipped": 1,
+      "known_failure_ids": ["KF-003", "KF-004"]
+    },
+    {
+      "note": "NOT a final run. Run 2 was killed at its time limit inside tests.test_wbs_entry; no summary line exists, so no totals are recorded. tests.test_native_recovery_confirmation was run separately and stalled (KF-005).",
+      "base_commit": "b4d9610a790147bf2c07b4d6bfd6fd32d1c1c1f7",
+      "modules": "tests.test_p0_core .. tests.test_workspace_boundary (42 modules, not completed)",
+      "known_failure_ids": ["KF-004", "KF-005"]
     }
   ],
   "final_run": null,

@@ -1,7 +1,9 @@
 """Contract: the standard test entry finds every test module, same as an explicit list."""
 import configparser
+import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -120,6 +122,30 @@ class CheckoutDiscoveryTests(unittest.TestCase):
         self.assertTrue(lines)
         for line in lines:
             self.assertIn('==', line, 'unpinned requirement: ' + line)
+
+
+@unittest.skipUnless(importlib.util.find_spec('pytest'), 'pytest is not installed (requirements-test.txt)')
+class PytestCollectionTests(unittest.TestCase):
+    """The standard runner (python -m pytest) must collect the same files as the explicit module list."""
+
+    @classmethod
+    def setUpClass(cls):
+        cfg = read_pytest_ini(ROOT / 'pytest.ini')
+        cls.expected = {m.replace('.', '/') + '.py' for m in discover_modules(ROOT, excluded=cfg['norecursedirs'].split())}
+        proc = subprocess.run([sys.executable, '-m', 'pytest', '--collect-only', '-q', '-p', 'no:cacheprovider'],
+                              cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+        cls.returncode = proc.returncode
+        cls.output = proc.stdout + proc.stderr
+        cls.collected = {line.split('::', 1)[0] for line in proc.stdout.splitlines() if '::' in line}
+
+    def test_collection_has_no_errors(self):
+        self.assertEqual(self.returncode, 0, self.output[-2000:])
+
+    def test_pytest_collects_every_discovered_file(self):
+        self.assertEqual(sorted(self.expected - self.collected), [], 'files pytest did not collect')
+
+    def test_pytest_collects_nothing_outside_discovered_files(self):
+        self.assertEqual(sorted(self.collected - self.expected), [], 'files only pytest collected')
 
 
 if __name__ == '__main__':
