@@ -569,10 +569,49 @@ function featureReworkForm(wp,job){
   },'danger');send.dataset.focusKey='feature-rework-send:'+wp.id;box.append(note,send);
   return box;
 }
+// 待機理由の種類ごとの説明と次に起きること。種類と担当はサーバーの投影（dispatch.*.details）の値で、画面では推測しない。
+const WAIT_KIND_LABELS={
+  stopped:'依頼が実行中ではないため、次の作業を始めません。',capacity:'別の作業が同じ場所を使っているため、終わるまで待っています。',
+  decision:'確認の返事を待っているため、次の作業を始めません。',dependency:'先に必要な作業や機能の確認が済むのを待っています。',
+  retry:'失敗した作業の再試行までの待ち時間です。',maintenance:'再起動などで止まった作業の確認を待っています。',
+  consistency:'計画と記録が一致しないため、始めません。',unknown:'待っている理由を判別できません。安全のため始めません。'
+};
+const WAIT_NEXT_LABELS={
+  user:'次に動く人：あなた（表示された確認を行ってください）',system:'次に動く人：采来（あなたの操作は不要です。条件がそろうと自動で進みます）',
+  maintainer:'次に動く人：保守担当（確認が済むまで再開しません）'
+};
+function waitReasonList(wf,packages){
+  const titles=new Map();for(const wp of packages)for(const id of wp.task_ids||[])titles.set(id,wp.title);
+  const rows=[];
+  for(const row of wf.dispatch?.waiting||[])for(const d of row.details||[])rows.push({target:titles.get(row.task_id)||'次の作業',d});
+  for(const d of wf.dispatch?.reason_details||[])if(d.code!=='no_ready_task'||!rows.length)rows.push({target:'依頼全体',d});
+  if(!rows.length||wf.dispatch?.status==='ready')return null;
+  const seen=new Set(),list=el('ul',undefined,'wait-reasons');
+  for(const {target,d} of rows){
+    const key=target+'|'+d.code;if(seen.has(key))continue;seen.add(key);
+    const li=el('li',`${target}：${WAIT_KIND_LABELS[d.kind]||WAIT_KIND_LABELS.unknown}　${WAIT_NEXT_LABELS[d.owner]||WAIT_NEXT_LABELS.maintainer}`);
+    li.append(el('small','　'+d.code,'tech-only'));list.append(li);
+  }
+  const box=el('div',undefined,'progress-group');box.append(el('h4','今は始めない理由と、次に起きること'),list);return box;
+}
+// 計画の上限（1〜6件）と、7件以上の依頼の進め方。件数が上限に達したときに案内する。切り捨てや自動分割はしない。
+function packageLimitNote(wf,count){
+  const lim=wf.context?.package_limit;if(!lim||count<lim.limit)return null;
+  const box=el('div',undefined,'progress-group package-limit');box.append(el('p',lim.reason,'hint'),progressList('7件以上の依頼の進め方',lim.next,'›','unmet'));return box;
+}
+// 引継ぎ：現在の要求・計画の版、未完了の機能、次に動く人。会話の全文は含めない。
+function handoffNote(wf){
+  const c=wf.context||{};if(!c.plan_revision)return null;
+  const open=(c.unfinished_packages||[]).map(p=>p.title);
+  const box=el('div',undefined,'progress-group handoff');box.append(el('h4','引継ぎの要点'));
+  box.append(el('p',`要求の版 ${c.requirement_revision}／承認済みの計画の版 ${c.plan_revision}。確認が済んでいない機能：${open.length?open.join('、'):'なし'}。`,'hint'),
+    el('p',WAIT_NEXT_LABELS[c.next_owner]||'次に動く人を確認できません。','hint'));return box;
+}
 function workflowPanel(job){
   const wf=job.workflow||{},progress=wf.progress||{},packages=wf.work_packages||[];
   const panel=el('section',undefined,'workflow-panel');panel.append(el('h4',`機能の一覧（${packages.length}件）`));
   panel.append(el('p',WAIT_OWNER_LABELS[wf.wait_owner]||'誰の番かを確認できません。','wait-owner'));
+  const waits=waitReasonList(wf,packages);if(waits)panel.append(waits);
   const stops=(wf.stop_codes||[]).map(c=>WORKFLOW_STOP_LABELS[c]).filter(Boolean);
   if(stops.length)panel.append(progressList('止まっている理由',stops,'!','unmet'));
   if(wf.uncertain_operation)panel.append(el('p','結果が分からない操作があります。安全のため、保守担当が確認するまで同じ操作を繰り返しません。','notice'));
@@ -609,6 +648,7 @@ function workflowPanel(job){
   }
   if(!packages.length)panel.append(el('p','機能の一覧はまだありません（計画の承認後に表示されます）。','hint'));
   else panel.append(list);
+  for(const extra of [packageLimitNote(wf,packages.length),handoffNote(wf)])if(extra)panel.append(extra);
   return panel;
 }
 // 影響を受けない機能ごとに「以前の確認を再利用する」か「再実行する」かを選ぶ。選ばない機能は停止したままになる。

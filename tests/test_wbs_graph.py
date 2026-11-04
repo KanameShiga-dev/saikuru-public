@@ -52,6 +52,34 @@ class GraphTests(unittest.TestCase):
         wbs.validate_work_packages(value)
         self.assertEqual(value, before)  # No rewrite, token heuristic or Task split.
 
+    def test_one_and_six_packages_valid_seven_refused_with_split_guidance(self):
+        def sized(count):
+            value = proposal(); package, task = value['work_packages'][0], value['tasks'][0]
+            value['work_packages'] = [dict(copy.deepcopy(package), wbs_id=f'W1.{n:02d}') for n in range(1, count + 1)]
+            value['tasks'] = [dict(copy.deepcopy(task), wbs_id=f'W1.{n:02d}') for n in range(1, count + 1)]
+            return value
+        for count in (1, 6):
+            self.assertEqual(len(wbs.validate_work_packages(sized(count))), count)
+        for field in ('work_packages', 'tasks'):
+            value = sized(6); value[field].append(copy.deepcopy(value[field][0]))
+            before = copy.deepcopy(value)
+            with self.assertRaises(ValueError) as caught: wbs.validate_work_packages(value)
+            self.assertEqual(str(caught.exception), 'work_package_count_over_limit')
+            self.assertEqual(value, before)  # Nothing is truncated or rewritten.
+        with self.assertRaises(ValueError) as caught: wbs.validate_work_packages(dict(proposal(), work_packages=[]))
+        self.assertEqual(str(caught.exception), 'work_package_count_invalid')
+        self.assertEqual(wbs.SIZE_ADVICE['limit'], 6)
+        self.assertIn('7件以上', wbs.GUIDE); self.assertIn('段階', wbs.GUIDE)
+
+    def test_wait_advice_distinguishes_kinds_and_owners_without_dispatching(self):
+        expected = {'workspace_or_series_busy': ('capacity', 'system'), 'retry_wait': ('retry', 'system'),
+                    'pending_decision': ('decision', 'user'), 'dependency_feature_review_required': ('dependency', 'system'),
+                    'recovery_confirmation_required': ('maintenance', 'maintainer'),
+                    'task_plan_not_current': ('consistency', 'maintainer'), 'never_seen_code': ('unknown', 'maintainer')}
+        for code, pair in expected.items():
+            advice = wbs.wait_advice(code)
+            self.assertEqual((advice['kind'], advice['owner']), pair, code)
+
     def test_old_approved_payload_without_inputs_remains_valid(self):
         value = proposal(); del value['work_packages'][0]['input_artifacts']
         self.assertEqual(wbs.validate_work_packages(value), value['work_packages'])

@@ -23,7 +23,43 @@ GUIDE = ('\n新方式の計画はwork_packagesとcheckpoint_pathsを含める。
          'これから作る成果物はここへ捏造せずdepends_onで示し、既存入力がなければ空配列。'
          '作業の単位は確認可能な成果と完了条件とし、トークン数だけで分割しない。'
          '依存はパッケージのラベルで示す。checkpoint_pathsは承認を求める具体的な相対ファイルだけ。'
-         '質問時はtasks/work_packages/checkpoint_pathsを空配列にし、未承認の実行はしない。')
+         '質問時はtasks/work_packages/checkpoint_pathsを空配列にし、未承認の実行はしない。'
+         '一度の計画で扱う作業パッケージは1〜6件。7件以上が必要な依頼は、6件に詰め込んだり捨てたりせず、'
+         '目的と依存の順を保った段階（先行の計画と後続の計画）に分け、今回は最初の段階だけを書く。'
+         '後続の段階への成果物の受け渡しはinput_artifactsで示し、後続は再承認を経て進める。')
+
+# 7件以上の依頼は切り捨てず、段階に分ける案内を返す。画面にもこの内容を出す。
+SIZE_ADVICE = {
+    'limit': MAX_PACKAGES,
+    'reason': f'一度の計画で扱える作業パッケージは1〜{MAX_PACKAGES}件です。それを超える分を黙って省くことはしません。',
+    'next': ['目的と依存の順を保ち、依頼を段階に分ける',
+             '今回は最初の段階だけを計画して承認する',
+             '次の段階は、先行段階の成果物を入力にして、あらためて計画・承認する'],
+}
+
+# 待機理由のコード → 種類と、次に動く人。種類ごとの説明文は画面側にある。未知のコードは保守担当の確認にする。
+WAIT_ADVICE = {
+    'job_not_running': ('stopped', 'user'),
+    'workspace_or_series_busy': ('capacity', 'system'),
+    'pending_decision': ('decision', 'user'),
+    'no_ready_task': ('dependency', 'system'),
+    'after_not_succeeded': ('dependency', 'system'),
+    'retry_wait': ('retry', 'system'),
+    'recovery_confirmation_required': ('maintenance', 'maintainer'),
+    'task_plan_not_current': ('consistency', 'maintainer'),
+    'workflow_authority_or_records_invalid': ('consistency', 'maintainer'),
+}
+
+
+def wait_advice(code):
+    """Read-only description of one dispatch reason code; never grants a dispatch."""
+    if code in WAIT_ADVICE:
+        kind, owner = WAIT_ADVICE[code]
+    elif code.startswith('dependency_'):
+        kind, owner = 'dependency', 'system'
+    else:
+        kind, owner = 'unknown', 'maintainer'
+    return {'code': code, 'kind': kind, 'owner': owner}
 
 LINK_DESCRIPTION = ('goal_contractの成果物・受入条件の文字列そのもの、または成果物はD1,D2,...、'
                     '受入条件はA1,A2,...の番号（配列順で1始まり、大文字・半角の完全一致のみ）。'
@@ -85,6 +121,8 @@ def validate_work_packages(payload, job=None, *, check_current_inputs=True):
     deliverables = set(_texts(contract.get('deliverables'), 'deliverables'))
     criteria = set(_texts(contract.get('acceptance_criteria'), 'acceptance_criteria'))
     allowed = deliverables | criteria
+    if isinstance(packages, list) and len(packages) > MAX_PACKAGES:
+        raise ValueError('work_package_count_over_limit')
     if not isinstance(packages, list) or not 1 <= len(packages) <= MAX_PACKAGES:
         raise ValueError('work_package_count_invalid')
     labels, folded = {}, set()
@@ -121,7 +159,9 @@ def validate_work_packages(payload, job=None, *, check_current_inputs=True):
         for dependency in labels[label]['depends_on']: visit(dependency)
         visiting.remove(label); seen.add(label)
     for label in labels: visit(label)
-    if not isinstance(tasks, list) or not 1 <= len(tasks) <= 6:
+    if isinstance(tasks, list) and len(tasks) > MAX_PACKAGES:
+        raise ValueError('work_package_count_over_limit')
+    if not isinstance(tasks, list) or not 1 <= len(tasks) <= MAX_PACKAGES:
         raise ValueError('work_package_tasks_invalid')
     assigned = set()
     for task in tasks:

@@ -3161,7 +3161,7 @@ class Engine:
 
     def workflow_view(self, job_id, *, maintainer=False):
         """Request-scoped UI hints; no Context construction, file/Git reads or dispatch."""
-        from team_wbs import dispatch_state, digest
+        from team_wbs import dispatch_state, digest, wait_advice, SIZE_ADVICE
         from team_recovery import workflow_failure_advice
         with self.store.lock:
             job = self.store.get(job_id,'job')
@@ -3176,6 +3176,10 @@ class Engine:
                 dispatch = {k:observed[k] for k in ('status','candidate_task_id','reasons','waiting') if k in observed}
             except (ValueError,KeyError,TypeError):
                 dispatch = {'status':'blocked','candidate_task_id':None,'reasons':['workflow_authority_or_records_invalid']}
+            # Display-only explanation of the same reason codes; it never changes what dispatch decided.
+            dispatch['reason_details'] = [wait_advice(c) for c in dispatch.get('reasons',[])]
+            dispatch['waiting'] = [dict(row,details=[wait_advice(c) for c in row.get('reasons',[])])
+                                   for row in dispatch.get('waiting',[])] if 'waiting' in dispatch else []
             active = any(t['id'] in self.active or t['status'] in ('running','awaiting_approval')
                          or (t.get('current_attempt') or {}).get('status') == 'running' for t in records['tasks'])
             pending = []; actions = []; maintenance = False; unknown_effects = False; stop_codes = set()
@@ -3265,6 +3269,9 @@ class Engine:
                     ('primary_goal','deliverables','acceptance_criteria','non_goals','constraints')},
                 'requirement_revision':job['requirement_revision'],'plan_revision':job['plan_revision'],
                 'pending_decision_ids':[p['id'] for p in pending],
+                'unfinished_packages':[{'wbs_id':w['wbs_id'],'title':w['title']} for w in packages
+                    if not any(p['id'] == w['id'] and p['feature_approved'] for p in projection['packages'])],
+                'next_owner':owner,'package_limit':copy.deepcopy(SIZE_ADVICE),
                 'input_versions':[{'wbs_id':s['wbs_id'],'artifacts':copy.deepcopy(s.get('input_artifacts',[]))}
                     for s in (plan['payload'].get('work_packages') or [])] if plan and projection['reason'] is None else []}
             result = {'job_id':job_id,'job_revision':job['state_revision'],'plan_revision':job['plan_revision'],

@@ -142,6 +142,27 @@ class WorkflowApiTests(unittest.TestCase):
         self.assertIn('workflow',job); self.assertIn('workflow',quality)
         self.assertEqual(self.f.state(),before)
 
+    def test_view_explains_waits_limit_and_handoff_without_dispatching(self):
+        task_id = self.store.for_job('task', self.f.job_id)[0]['id']
+        fake = {'status': 'waiting', 'candidate_task_id': None, 'reasons': ['no_ready_task'], 'state_signature': 'x',
+                'waiting': [{'task_id': task_id, 'reasons': ['dependency_feature_review_required', 'retry_wait', 'surprise_code']}]}
+        before = self.f.state()
+        with patch('team_wbs.dispatch_state', return_value=fake):
+            code, view = self.view()
+        self.assertEqual(code, 200, view)
+        details = view['dispatch']['waiting'][0]['details']
+        self.assertEqual({d['code']: (d['kind'], d['owner']) for d in details},
+                         {'dependency_feature_review_required': ('dependency', 'system'), 'retry_wait': ('retry', 'system'),
+                          'surprise_code': ('unknown', 'maintainer')})
+        self.assertEqual(view['dispatch']['reason_details'][0]['code'], 'no_ready_task')
+        context = view['context']
+        self.assertEqual(context['package_limit']['limit'], 6)
+        self.assertEqual(context['next_owner'], view['wait_owner'])
+        self.assertEqual(context['plan_revision'], self.f.job()['plan_revision'])
+        self.assertEqual(len(context['unfinished_packages']), len(view['work_packages']))
+        self.assertNotIn('instruction', json.dumps(context['unfinished_packages']))
+        self.assertEqual(self.f.state(), before)  # Viewing neither dispatched nor changed state.
+
     def test_stopped_job_projection_is_read_only_and_legacy_rework_blocked(self):
         for state in ('blocked','failed','interrupted','cancelled'):
             self.store.update(self.f.job_id,status=state); before=self.f.state()
