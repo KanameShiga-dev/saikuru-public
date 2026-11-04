@@ -53,14 +53,15 @@ WAIT_ADVICE = {
 REVIEW_WAITS = {'pending_decision': 'user', 'dependency_feature_review_required': 'system'}
 
 
-def wait_advice(code, approver=None):
+def wait_advice(code, approver=None, preparing=False):
     """Read-only description of one dispatch reason code; never grants a dispatch.
 
     approver: who holds an actionable pending approval ('user' or 'authorized_person'), if any.
+    preparing: a finished feature still needs its review started, which only the user can do.
     """
     if code in REVIEW_WAITS:
         kind = 'decision' if code == 'pending_decision' else 'dependency'
-        owner = approver or REVIEW_WAITS[code]
+        owner = approver or ('user' if preparing else REVIEW_WAITS[code])
     elif code in WAIT_ADVICE:
         kind, owner = WAIT_ADVICE[code]
     elif code.startswith('dependency_'):

@@ -3250,14 +3250,14 @@ class Engine:
             authorized_pending = any(p['actionable'] and p['intended_role'] == 'authorized_person' for p in pending)
             # Display-only explanation of the same reason codes; it never changes what dispatch decided.
             approver = 'user' if user_pending else 'authorized_person' if authorized_pending else None
-            dispatch['reason_details'] = [wait_advice(c,approver) for c in dispatch.get('reasons',[])]
-            dispatch['waiting'] = [dict(row,details=[wait_advice(c,approver) for c in row.get('reasons',[])])
+            preparing = any('request_feature_review' in w['available_actions'] for w in packages)
+            dispatch['reason_details'] = [wait_advice(c,approver,preparing) for c in dispatch.get('reasons',[])]
+            dispatch['waiting'] = [dict(row,details=[wait_advice(c,approver,preparing) for c in row.get('reasons',[])])
                                    for row in dispatch.get('waiting',[])]
             waiting = any('dependency' in reason for row in dispatch.get('waiting',[]) for reason in row.get('reasons',[]))
             terminal = job['status'] in ('accepted','accepted_with_pending_checks','cancelled')
-            preparing = any('request_feature_review' in w['available_actions'] for w in packages)
-            owner = ('maintainer' if maintenance else 'user' if user_pending else 'authorized_person' if authorized_pending
-                     else 'saikuru' if preparing
+            # Starting a feature review is a button only the user can press, so Saikuru is not the one to act.
+            owner = ('maintainer' if maintenance else 'user' if user_pending or preparing else 'authorized_person' if authorized_pending
                      else 'dependency' if waiting else 'none' if terminal else 'saikuru')
             for wp in packages:
                 wp['dependencies'] = [{'id':w['id'],'title':w['title'],'execution_state':w['execution_state'],

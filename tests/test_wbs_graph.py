@@ -84,6 +84,10 @@ class GraphTests(unittest.TestCase):
         for approver in ('user', 'authorized_person'):
             for code in ('pending_decision', 'dependency_feature_review_required'):
                 self.assertEqual(wbs.wait_advice(code, approver)['owner'], approver, (code, approver))
+        # A finished feature whose review is not started yet waits for the user to start it.
+        self.assertEqual(wbs.wait_advice('dependency_feature_review_required', None, True)['owner'], 'user')
+        self.assertEqual(wbs.wait_advice('dependency_feature_review_required')['owner'], 'system')
+        self.assertEqual(wbs.wait_advice('retry_wait', None, True)['owner'], 'system')
         # A broken review record is never fixed by a person approving it.
         self.assertEqual(wbs.wait_advice('dependency_feature_review_invalid', 'user')['owner'], 'maintainer')
         self.assertEqual(wbs.wait_advice('retry_wait', 'user')['owner'], 'system')

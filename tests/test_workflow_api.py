@@ -77,6 +77,15 @@ class WorkflowApiTests(unittest.TestCase):
             self.assertEqual((code,value['code']),(400,'workflow_request_invalid'))
         self.assertEqual(self.f.state(),before)
 
+    def test_review_not_started_names_the_user_as_next_actor(self):
+        for _ in range(3): self.f.finish_next()
+        status,view=self.view(); self.assertEqual(status,200,view)
+        self.assertTrue(any('request_feature_review' in w['available_actions'] for w in view['work_packages']))
+        self.assertEqual(view['wait_owner'],'user'); self.assertEqual(view['context']['next_owner'],'user')
+        rows=view['dispatch'].get('reason_details',[])+[d for r in view['dispatch'].get('waiting',[]) for d in r['details']]
+        for d in rows:
+            if d['code']=='dependency_feature_review_required': self.assertEqual(d['owner'],'user')
+
     def test_authenticated_prepare_decide_and_duplicate_refusal(self):
         for _ in range(3): self.f.finish_next()
         status,review=self.request('/api/workflow/feature-review/prepare',self.prepare_body())
