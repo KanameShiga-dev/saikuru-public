@@ -5344,7 +5344,31 @@ class Engine:
             return candidates
 
     def _start_task_thread(self, task):
-        threading.Thread(target=self._run, args=(task,), daemon=True).start()
+        try:
+            threading.Thread(target=self._run, args=(task,), daemon=True).start()
+        except BaseException:
+            self._release_unstarted(task)
+            raise
+
+    def _release_unstarted(self, task):
+        """No worker exists, so no edit or model call happened: close the reserved slot and requeue.
+
+        The failure still propagates (the scheduler pauses); this only keeps the
+        reservation from staying 'running' with nothing to run it."""
+        with self.store.atomic():
+            current = self.store.get(task['id'], 'task')
+            attempt = current.get('current_attempt')
+            if current['status'] != 'running' or current.get('attempt') != task.get('attempt'):
+                return
+            if attempt is not None:
+                if attempt.get('id') != (task.get('current_attempt') or {}).get('id'):
+                    return
+                self.store.close_attempt(task['id'], 'fenced', 'start-failed')
+                self.store.update(task['id'], status='queued')
+            else:
+                self.store.update(task['id'], status='queued', attempt=current['attempt'] - 1)
+            self.store.event('worker_start_failed', '実行を開始できなかったため、予約を戻して待機に戻しました。',
+                             task['id'], task['job_id'])
 
     def _workflow_preflight_candidates(self):
         """Cheap scheduling exclusions before Git/hash inspection, never permission.

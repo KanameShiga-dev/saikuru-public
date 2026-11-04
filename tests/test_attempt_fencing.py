@@ -209,6 +209,44 @@ class AttemptFencingTests(unittest.TestCase):
         self.assertNotIn(old['id'], self.engine.active)
         self.assertEqual(len(self.store.job_events(self.job['id'], 'attempt_closed')), 1)
 
+    def test_worker_thread_start_failure_releases_reservation_and_allows_fresh_attempt(self):
+        old = self.reserve()
+        ctx = self.context(old)
+        with mock.patch('team_engine.threading.Thread', side_effect=RuntimeError('Fictional thread limit')):
+            with self.assertRaises(RuntimeError):
+                self.engine._start_task_thread(old)
+        released = self.store.get(old['id'])
+        self.assertEqual(released['status'], 'queued')
+        self.assertEqual(released['current_attempt']['status'], 'fenced')
+        self.assertFalse(released.get('recovery_check_required'))
+        self.assertEqual(len(self.store.job_events(self.job['id'], 'worker_start_failed')), 1)
+        with self.assertRaises(StaleAttempt):
+            ctx.record_usage({'inputTokens': 999})
+        fresh = self.reserve()
+        self.assertEqual(fresh['attempt'], old['attempt'] + 1)
+        self.assertNotEqual(fresh['current_attempt']['id'], old['current_attempt']['id'])
+
+    def test_thread_start_failure_does_not_touch_a_newer_generation(self):
+        old = self.reserve()
+        new = self.next_attempt()
+        before = self.store.get(new['id'])
+        with mock.patch('team_engine.threading.Thread', side_effect=RuntimeError('Fictional thread limit')):
+            with self.assertRaises(RuntimeError):
+                self.engine._start_task_thread(old)
+        self.assertEqual(self.store.get(new['id']), before)
+        self.assertEqual(self.store.job_events(self.job['id'], 'worker_start_failed'), [])
+
+    def test_legacy_thread_start_failure_returns_task_to_queue_with_same_attempt_count(self):
+        job = self.store.put('job', dict(id='legacy-start-job', goal='Fictional legacy', project=str(self.project),
+                                       status='running', route='full', auto_execute=False))
+        task = self.engine.new_task(job, 'Legacy build', 'Fictional only', 'builder')
+        task = self.store.update(task['id'], attempt=1, status='running')
+        with mock.patch('team_engine.threading.Thread', side_effect=RuntimeError('Fictional thread limit')):
+            with self.assertRaises(RuntimeError):
+                self.engine._start_task_thread(task)
+        released = self.store.get(task['id'])
+        self.assertEqual((released['status'], released['attempt']), ('queued', 0))
+
     def test_agent_run_and_history_retain_their_reserved_attempt_ids(self):
         self.engine.commands = {'codex': ['fictional-cli'], 'claude': ['fictional-cli']}
         self.engine.usage_snapshot = lambda: {}
