@@ -80,6 +80,14 @@ class GraphTests(unittest.TestCase):
             advice = wbs.wait_advice(code)
             self.assertEqual((advice['kind'], advice['owner']), pair, code)
 
+    def test_wait_owner_follows_who_holds_the_pending_approval(self):
+        for approver in ('user', 'authorized_person'):
+            for code in ('pending_decision', 'dependency_feature_review_required'):
+                self.assertEqual(wbs.wait_advice(code, approver)['owner'], approver, (code, approver))
+        # A broken review record is never fixed by a person approving it.
+        self.assertEqual(wbs.wait_advice('dependency_feature_review_invalid', 'user')['owner'], 'maintainer')
+        self.assertEqual(wbs.wait_advice('retry_wait', 'user')['owner'], 'system')
+
     def test_old_approved_payload_without_inputs_remains_valid(self):
         value = proposal(); del value['work_packages'][0]['input_artifacts']
         self.assertEqual(wbs.validate_work_packages(value), value['work_packages'])

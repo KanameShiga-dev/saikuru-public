@@ -152,6 +152,7 @@ const WORKFLOW_ERROR_LABELS={
   workflow_version_required:'この依頼の形式では、この操作を使えません。画面を再読み込みしてください。',
   workflow_feature_target_required:'新方式の依頼では、依頼全体ではなく機能ごとに差し戻します。機能の一覧の「この機能を差し戻す」を使ってください。',
   dependency_feature_review_required:'この機能の状態が変わったため、送りませんでした。新しい表示で、確認が必要な機能を確かめてください。',
+  work_package_count_over_limit:'一度の計画で扱える作業パッケージは1〜6件です。依頼を段階に分け、今回は最初の段階だけを計画して承認してください。次の段階は、先行段階の成果物を入力にして、あらためて計画・承認します。',
   work_package_state_changed:'機能の状態が変わったため、送りませんでした。新しい表示を確かめてください。',
   work_package_not_current:'この機能は計画の変更で古くなったため、送りませんでした。新しい機能の一覧を確かめてください。'
 };
@@ -578,7 +579,10 @@ const WAIT_KIND_LABELS={
 };
 const WAIT_NEXT_LABELS={
   user:'次に動く人：あなた（表示された確認を行ってください）',system:'次に動く人：采来（あなたの操作は不要です。条件がそろうと自動で進みます）',
-  maintainer:'次に動く人：保守担当（確認が済むまで再開しません）'
+  maintainer:'次に動く人：保守担当（確認が済むまで再開しません）',
+  authorized_person:'次に動く人：権限のある担当者（表示された確認を行ってください）',
+  saikuru:'次に動く人：采来（あなたの操作は不要です）',dependency:'次に動く人：采来（先に必要な機能の確認が済むのを待っています）',
+  none:'待っている操作はありません。'
 };
 function waitReasonList(wf,packages){
   const titles=new Map();for(const wp of packages)for(const id of wp.task_ids||[])titles.set(id,wp.title);
@@ -596,16 +600,24 @@ function waitReasonList(wf,packages){
 }
 // 計画の上限（1〜6件）と、7件以上の依頼の進め方。件数が上限に達したときに案内する。切り捨てや自動分割はしない。
 function packageLimitNote(wf,count){
-  const lim=wf.context?.package_limit;if(!lim||count<lim.limit)return null;
+  const lim=wf.context?.package_limit;if(!lim||(count<lim.limit&&!wf.context?.plan_over_limit))return null;
   const box=el('div',undefined,'progress-group package-limit');box.append(el('p',lim.reason,'hint'),progressList('7件以上の依頼の進め方',lim.next,'›','unmet'));return box;
 }
 // 引継ぎ：現在の要求・計画の版、未完了の機能、次に動く人。会話の全文は含めない。
 function handoffNote(wf){
   const c=wf.context||{};if(!c.plan_revision)return null;
   const open=(c.unfinished_packages||[]).map(p=>p.title);
+  const verified=c.basis==='approved_records';
   const box=el('div',undefined,'progress-group handoff');box.append(el('h4','引継ぎの要点'));
-  box.append(el('p',`要求の版 ${c.requirement_revision}／承認済みの計画の版 ${c.plan_revision}。確認が済んでいない機能：${open.length?open.join('、'):'なし'}。`,'hint'),
-    el('p',WAIT_NEXT_LABELS[c.next_owner]||'次に動く人を確認できません。','hint'));return box;
+  const plan=verified?`承認済みの計画の版 ${c.plan_revision}`:`計画の版 ${c.plan_revision}（記録を照合できていないため、承認済みとは扱いません）`;
+  box.append(el('p',`要求の版 ${c.requirement_revision}／${plan}。確認が済んでいない機能：${open.length?open.join('、'):'なし'}。`,'hint'));
+  const inputs=(c.input_versions||[]).filter(v=>(v.artifacts||[]).length);
+  if(inputs.length){
+    const list=el('ul',undefined,'handoff-inputs');
+    for(const v of inputs)for(const a of v.artifacts)list.append(el('li',`${v.wbs_id}：${a.path}（版 ${String(a.sha256||'').slice(0,12)}）`));
+    box.append(el('p','引き渡す成果物（承認済みの計画に記録された入力）','hint'),list);
+  }
+  box.append(el('p',WAIT_NEXT_LABELS[c.next_owner]||'次に動く人を確認できません。','hint'));return box;
 }
 function workflowPanel(job){
   const wf=job.workflow||{},progress=wf.progress||{},packages=wf.work_packages||[];

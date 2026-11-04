@@ -41,19 +41,27 @@ SIZE_ADVICE = {
 WAIT_ADVICE = {
     'job_not_running': ('stopped', 'user'),
     'workspace_or_series_busy': ('capacity', 'system'),
-    'pending_decision': ('decision', 'user'),
     'no_ready_task': ('dependency', 'system'),
     'after_not_succeeded': ('dependency', 'system'),
     'retry_wait': ('retry', 'system'),
     'recovery_confirmation_required': ('maintenance', 'maintainer'),
     'task_plan_not_current': ('consistency', 'maintainer'),
     'workflow_authority_or_records_invalid': ('consistency', 'maintainer'),
+    'dependency_feature_review_invalid': ('consistency', 'maintainer'),
 }
+# 人の確認で解消する待機。確認が出ていればその相手（user / authorized_person）、まだ出ていなければ既定の担当。
+REVIEW_WAITS = {'pending_decision': 'user', 'dependency_feature_review_required': 'system'}
 
 
-def wait_advice(code):
-    """Read-only description of one dispatch reason code; never grants a dispatch."""
-    if code in WAIT_ADVICE:
+def wait_advice(code, approver=None):
+    """Read-only description of one dispatch reason code; never grants a dispatch.
+
+    approver: who holds an actionable pending approval ('user' or 'authorized_person'), if any.
+    """
+    if code in REVIEW_WAITS:
+        kind = 'decision' if code == 'pending_decision' else 'dependency'
+        owner = approver or REVIEW_WAITS[code]
+    elif code in WAIT_ADVICE:
         kind, owner = WAIT_ADVICE[code]
     elif code.startswith('dependency_'):
         kind, owner = 'dependency', 'system'

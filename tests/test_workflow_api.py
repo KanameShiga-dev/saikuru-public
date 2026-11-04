@@ -162,6 +162,20 @@ class WorkflowApiTests(unittest.TestCase):
         self.assertEqual(len(context['unfinished_packages']), len(view['work_packages']))
         self.assertNotIn('instruction', json.dumps(context['unfinished_packages']))
         self.assertEqual(self.f.state(), before)  # Viewing neither dispatched nor changed state.
+        self.assertFalse(context['plan_over_limit'])
+        self.assertEqual(context['basis'], 'approved_records')
+        self.assertIn('input_versions', context)
+
+    def test_rejected_seven_package_plan_is_flagged_for_the_screen(self):
+        task = self.store.for_job('task', self.f.job_id)[0]
+        self.store.update(task['id'], role='planner', status='blocked',
+                          summary='計画の検査で不備が見つかりました。\n- 不備：work_package_count_over_limit')
+        self.store.update(self.f.job_id, status='blocked')
+        code, view = self.view()
+        self.assertEqual(code, 200, view)
+        self.assertTrue(view['context']['plan_over_limit'])
+        self.assertEqual(view['context']['package_limit']['limit'], 6)
+        self.assertNotIn('不備', json.dumps(view['context']))  # Only the flag, not the planner text.
 
     def test_stopped_job_projection_is_read_only_and_legacy_rework_blocked(self):
         for state in ('blocked','failed','interrupted','cancelled'):

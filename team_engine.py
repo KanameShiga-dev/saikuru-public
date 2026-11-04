@@ -3176,10 +3176,6 @@ class Engine:
                 dispatch = {k:observed[k] for k in ('status','candidate_task_id','reasons','waiting') if k in observed}
             except (ValueError,KeyError,TypeError):
                 dispatch = {'status':'blocked','candidate_task_id':None,'reasons':['workflow_authority_or_records_invalid']}
-            # Display-only explanation of the same reason codes; it never changes what dispatch decided.
-            dispatch['reason_details'] = [wait_advice(c) for c in dispatch.get('reasons',[])]
-            dispatch['waiting'] = [dict(row,details=[wait_advice(c) for c in row.get('reasons',[])])
-                                   for row in dispatch.get('waiting',[])] if 'waiting' in dispatch else []
             active = any(t['id'] in self.active or t['status'] in ('running','awaiting_approval')
                          or (t.get('current_attempt') or {}).get('status') == 'running' for t in records['tasks'])
             pending = []; actions = []; maintenance = False; unknown_effects = False; stop_codes = set()
@@ -3252,6 +3248,11 @@ class Engine:
                 wp['task_ids'] = [t['id'] for t in members]
             user_pending = any(p['actionable'] and p['intended_role'] == 'end_user' for p in pending)
             authorized_pending = any(p['actionable'] and p['intended_role'] == 'authorized_person' for p in pending)
+            # Display-only explanation of the same reason codes; it never changes what dispatch decided.
+            approver = 'user' if user_pending else 'authorized_person' if authorized_pending else None
+            dispatch['reason_details'] = [wait_advice(c,approver) for c in dispatch.get('reasons',[])]
+            dispatch['waiting'] = [dict(row,details=[wait_advice(c,approver) for c in row.get('reasons',[])])
+                                   for row in dispatch.get('waiting',[])]
             waiting = any('dependency' in reason for row in dispatch.get('waiting',[]) for reason in row.get('reasons',[]))
             terminal = job['status'] in ('accepted','accepted_with_pending_checks','cancelled')
             preparing = any('request_feature_review' in w['available_actions'] for w in packages)
@@ -3272,6 +3273,9 @@ class Engine:
                 'unfinished_packages':[{'wbs_id':w['wbs_id'],'title':w['title']} for w in packages
                     if not any(p['id'] == w['id'] and p['feature_approved'] for p in projection['packages'])],
                 'next_owner':owner,'package_limit':copy.deepcopy(SIZE_ADVICE),
+                'plan_over_limit':job['status'] == 'blocked' and any(
+                    t['role'] == 'planner' and t['status'] == 'blocked'
+                    and 'work_package_count_over_limit' in (t.get('summary') or '') for t in records['tasks']),
                 'input_versions':[{'wbs_id':s['wbs_id'],'artifacts':copy.deepcopy(s.get('input_artifacts',[]))}
                     for s in (plan['payload'].get('work_packages') or [])] if plan and projection['reason'] is None else []}
             result = {'job_id':job_id,'job_revision':job['state_revision'],'plan_revision':job['plan_revision'],
