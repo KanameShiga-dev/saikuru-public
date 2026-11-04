@@ -1,13 +1,15 @@
 """Fictional feature decisions, bounded repairs and preserved independent evidence."""
 import copy
 import hashlib
+import json
 import subprocess
 import sys
 import threading
 import unittest
 from unittest.mock import patch
 
-from team_wbs import digest, dispatch_state, feature_review_receipt, approved_source, repair_impact
+from team_wbs import (digest, dispatch_state, feature_review_receipt, approved_source, repair_impact,
+                      package_members, task_evidence_digest)
 
 
 class ReworkTests(unittest.TestCase):
@@ -461,13 +463,41 @@ class TransferTests(unittest.TestCase):
         self.store.put('job',{k:v for k,v in dict(job,id=other_id,title='Fictional other job',
             plan_approval_id='fictional-other-plan_approval_id',
             requirements_approval_id='fictional-other-requirements_approval_id').items() if k != 'state_revision'})
-        foreign_review = dict(review,id='fictional-other-review',job_id=other_id)
-        foreign = {k:v for k,v in dict(mine,id='fictional-other-package',job_id=other_id,
-            spec_source_approval_id='fictional-other-plan_approval_id',
-            feature_review_approval_id=foreign_review['id']).items() if k != 'state_revision'}
+        foreign_id, foreign_review_id = 'fictional-other-package', 'fictional-other-review'
+        # The other job's own tasks, with evidence digests recomputed for their new ids.
+        members = [dict(t,id='fictional-other-task-%d' % i,job_id=other_id,work_package_id=foreign_id,
+                        spec_source_approval_id='fictional-other-plan_approval_id')
+                   for i,t in enumerate(package_members(self.store,self.job_id,mine))]
+        members = [{k:v for k,v in t.items() if k != 'state_revision'} for t in members]
+        # Its feature target names the other job and package, and every digest is recomputed to match.
+        target = dict(review['payload']['feature_target'],job_id=other_id,work_package_id=foreign_id,
+                      evidence_refs={t['id']:task_evidence_digest(t) for t in members})
+        target_hash = digest(target)
+        payload = dict(review['payload'],feature_target=target,feature_target_digest=target_hash)
+        foreign_review = dict(review,id=foreign_review_id,job_id=other_id,payload=payload,
+            digest=hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest(),
+            review_acknowledgement=dict(review['review_acknowledgement'],target_digest=target_hash))
+        foreign = {k:v for k,v in dict(mine,id=foreign_id,job_id=other_id,
+            spec_source_approval_id='fictional-other-plan_approval_id',feature_target_digest=target_hash,
+            feature_review_approval_id=foreign_review_id).items() if k != 'state_revision'}
         self.store.put('approval',foreign_review); foreign = self.store.put('work_package',foreign)
+        for t in members: self.store.put('task',t)
+        self.store.event('feature_review_decided','Fictional other job decision',job_id=other_id,details={
+            'approval_id':foreign_review_id,'work_package_id':foreign_id,'target_digest':target_hash,
+            'decision':'approved','actor':'authenticated_local_app_session',
+            'requirement_revision':job['requirement_revision'],'plan_revision':job['plan_revision']})
         self.assertEqual((foreign['review_status'],foreign_review['status']),('approved','approved'))
-        self.assertEqual(self.store.get(foreign_review['id'])['payload'],review['payload'])
+        # Control: the other job's evidence is genuinely valid for the other job (so ownership is what is tested).
+        other_job = self.store.get(other_id,'job'); plan = self.store.get(other_job['plan_approval_id'],'approval')
+        requirements = self.store.get(other_job['requirements_approval_id'],'approval')
+        records = [r for r in self.store.for_job('work_package',other_id) if r.get('plan_revision') == other_job['plan_revision']]
+        specs = {s['wbs_id']:s for s in approved_source(other_job,plan,requirements)}
+        proof = feature_review_receipt(self.store,other_job,plan,requirements,foreign,specs,records,{})
+        self.assertEqual((proof['approval_id'],proof['target_digest']),(foreign_review_id,target_hash))
+        # ...yet the same record is refused as evidence for this job.
+        with self.assertRaises(ValueError):
+            feature_review_receipt(self.store,job,self.store.get(job['plan_approval_id'],'approval'),
+                self.store.get(job['requirements_approval_id'],'approval'),foreign,specs,records,{})
         tampered = copy.deepcopy(revised['workflow_revision'])
         tampered['transfer_candidates'][0].update(source_work_package_id=foreign['id'],source_approval_id=foreign_review['id'])
         self.store.update(revised['id'],workflow_revision=tampered); before = self.state()
