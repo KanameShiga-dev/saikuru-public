@@ -128,24 +128,36 @@ class CheckoutDiscoveryTests(unittest.TestCase):
 class PytestCollectionTests(unittest.TestCase):
     """The standard runner (python -m pytest) must collect the same files as the explicit module list."""
 
+    @staticmethod
+    def collect(args):
+        proc = subprocess.run([sys.executable, '-m', 'pytest', '--collect-only', '-q', '-p', 'no:cacheprovider'] + args,
+                              cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+        nodes = {line.strip() for line in proc.stdout.splitlines() if '::' in line}
+        return proc.returncode, proc.stdout + proc.stderr, nodes
+
     @classmethod
     def setUpClass(cls):
         cfg = read_pytest_ini(ROOT / 'pytest.ini')
-        cls.expected = {m.replace('.', '/') + '.py' for m in discover_modules(ROOT, excluded=cfg['norecursedirs'].split())}
-        proc = subprocess.run([sys.executable, '-m', 'pytest', '--collect-only', '-q', '-p', 'no:cacheprovider'],
-                              cwd=str(ROOT), capture_output=True, text=True, timeout=300)
-        cls.returncode = proc.returncode
-        cls.output = proc.stdout + proc.stderr
-        cls.collected = {line.split('::', 1)[0] for line in proc.stdout.splitlines() if '::' in line}
+        files = [m.replace('.', '/') + '.py' for m in discover_modules(ROOT, excluded=cfg['norecursedirs'].split())]
+        cls.expected = set(files)
+        cls.default_rc, cls.default_out, cls.default_nodes = cls.collect([])
+        cls.explicit_rc, cls.explicit_out, cls.explicit_nodes = cls.collect(files)
+        cls.collected = {n.split('::', 1)[0] for n in cls.default_nodes}
 
     def test_collection_has_no_errors(self):
-        self.assertEqual(self.returncode, 0, self.output[-2000:])
+        self.assertEqual(self.default_rc, 0, self.default_out[-2000:])
+        self.assertEqual(self.explicit_rc, 0, self.explicit_out[-2000:])
 
     def test_pytest_collects_every_discovered_file(self):
         self.assertEqual(sorted(self.expected - self.collected), [], 'files pytest did not collect')
 
     def test_pytest_collects_nothing_outside_discovered_files(self):
         self.assertEqual(sorted(self.collected - self.expected), [], 'files only pytest collected')
+
+    def test_default_run_and_explicit_list_select_the_same_tests(self):
+        self.assertTrue(self.explicit_nodes, 'explicit list collected no tests')
+        self.assertEqual(sorted(self.explicit_nodes ^ self.default_nodes), [],
+                         'default run and explicit module list differ')
 
 
 if __name__ == '__main__':
