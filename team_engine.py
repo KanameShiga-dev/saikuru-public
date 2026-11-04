@@ -2628,17 +2628,19 @@ class Engine:
                              task['id'],job['id'],{'work_package_id':wp['id']})
 
     def _unbuilt_instruction(self, job, plan, wp):
-        """Approved build instruction for a feature none of whose builders has succeeded yet, else None.
+        """Approved build instructions of the feature's planned builder tasks that have not succeeded yet, else None.
 
-        A recheck replaces the queued original task; without this the feature's build instruction would be lost.
+        A recheck replaces the queued original tasks; without this the unbuilt instructions would be lost.
+        A succeeded task carrying the marker already covered every then-unbuilt planned builder.
         """
-        if any(t.get('work_package_id') == wp['id'] and t['role'] == 'builder' and t['status'] == 'succeeded'
-               for t in self.store.for_job('task',job['id'])):
-            return None
-        planned = [t['instruction'] for t in plan['payload']['tasks'] if t['wbs_id'] == wp['wbs_id'] and t['role'] == 'builder']
-        if not planned: return None
-        return ('\n'.join(planned) + '\n上流の機能が差し戻されたため、この機能は未着手のまま現行版の上で作成する。'
-                '作成後に完了条件と検証を現行版で確認する。')
+        marker = '上流の機能が差し戻されたため、この機能は未着手のまま現行版の上で作成する。'
+        tasks = [t for t in self.store.for_job('task',job['id']) if t.get('work_package_id') == wp['id'] and t['status'] == 'succeeded']
+        if any(marker in t['instruction'] for t in tasks): return None
+        built = {t.get('plan_task_index') for t in tasks if t['role'] == 'builder'}
+        pending = [t['instruction'] for i,t in enumerate(plan['payload']['tasks'])
+                   if t['wbs_id'] == wp['wbs_id'] and t['role'] == 'builder' and i not in built]
+        if not pending: return None
+        return '\n'.join(pending) + '\n' + marker + '作成後に完了条件と検証を現行版で確認する。'
 
     def _repair_package(self, job, wp, source, note, *, automatic=False):
         from team_wbs import approved_source, repair_impact, digest, scope_file_observation

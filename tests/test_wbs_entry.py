@@ -433,5 +433,45 @@ class WbsNormalPathTests(WbsFixture):
         self.assertTrue(all(self.store.get(i, 'task')['status'] == 'succeeded' for i in self.dispatched), self.dump())
 
 
+class UnbuiltInstructionTests(unittest.TestCase):
+    """M03-Q-B1: a feature with several planned builder tasks keeps every unbuilt instruction."""
+
+    PLAN = {'payload': {'tasks': [
+        {'wbs_id': 'W1.01', 'role': 'builder', 'instruction': '架空の作成A'},
+        {'wbs_id': 'W1.01', 'role': 'builder', 'instruction': '架空の作成B'},
+        {'wbs_id': 'W1.01', 'role': 'researcher', 'instruction': '架空の調査'},
+        {'wbs_id': 'W1.02', 'role': 'builder', 'instruction': '架空の別機能'}]}}
+    JOB = {'id': 'job1'}
+    WP = {'id': 'wp1', 'wbs_id': 'W1.01'}
+
+    def call(self, tasks):
+        engine = SimpleNamespace(store=SimpleNamespace(for_job=lambda kind, job_id: tasks))
+        return team_engine.Engine._unbuilt_instruction(engine, self.JOB, self.PLAN, self.WP)
+
+    @staticmethod
+    def task(index, status='succeeded', role='builder', instruction='x', wp='wp1'):
+        return {'work_package_id': wp, 'role': role, 'status': status, 'plan_task_index': index, 'instruction': instruction}
+
+    def test_nothing_built_returns_every_planned_builder_instruction(self):
+        text = self.call([self.task(0, 'queued'), self.task(1, 'queued')])
+        self.assertIn('架空の作成A', text); self.assertIn('架空の作成B', text)
+        self.assertNotIn('架空の調査', text); self.assertNotIn('架空の別機能', text)
+
+    def test_one_succeeded_and_one_queued_builder_returns_only_the_remaining_one(self):
+        text = self.call([self.task(0), self.task(1, 'queued')])
+        self.assertIn('架空の作成B', text); self.assertNotIn('架空の作成A', text)
+
+    def test_all_builders_succeeded_returns_none(self):
+        self.assertIsNone(self.call([self.task(0), self.task(1)]))
+
+    def test_other_feature_success_does_not_count(self):
+        text = self.call([self.task(0, wp='wp2'), self.task(1, wp='wp2')])
+        self.assertIn('架空の作成A', text); self.assertIn('架空の作成B', text)
+
+    def test_succeeded_replacement_task_covers_the_remaining_builders(self):
+        first = self.call([self.task(0, 'queued'), self.task(1, 'queued')])
+        self.assertIsNone(self.call([self.task(None, instruction=first)]))
+
+
 if __name__ == '__main__':
     unittest.main()
