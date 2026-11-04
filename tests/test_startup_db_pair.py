@@ -105,6 +105,10 @@ class PairCheck(Fixture):
             'missing-source-unique': (deploy.HANDOFF_DB, 'records', records.replace(' UNIQUE', '') % ''),
             'check-constraint': (deploy.HANDOFF_DB, 'records', records % ", CHECK(kind <> 'x')"),
             'extra-required-column': (deploy.HANDOFF_DB, 'records', records % ', extra TEXT NOT NULL'),
+            'extra-required-default-null': (deploy.HANDOFF_DB, 'records',
+                                            records % ', extra TEXT NOT NULL DEFAULT NULL'),
+            'extra-required-default-paren-null': (deploy.HANDOFF_DB, 'records',
+                                                  records % ', extra TEXT NOT NULL DEFAULT (NULL)'),
             'wrong-type': (deploy.TEAM_DB, 'metrics_meta', 'CREATE TABLE metrics_meta (key TEXT PRIMARY KEY, value BLOB)'),
             'wrong-key': (deploy.TEAM_DB, 'objects', 'CREATE TABLE objects (kind TEXT, id TEXT, body TEXT NOT NULL, '
                           'PRIMARY KEY(kind, id))'),

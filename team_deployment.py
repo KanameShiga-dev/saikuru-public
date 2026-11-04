@@ -119,7 +119,7 @@ def _table_compatible(db, table):
         if column in wanted:
             if (kind, notnull, pk) != wanted[column]:
                 return False
-        elif notnull and default is None or pk:
+        elif notnull and (default is None or default.strip(' ()\t\r\n').upper() == 'NULL') or pk:
             return False  # an extra column that ordinary inserts do not fill, or an extra key part
     unique = set()
     for _, index, is_unique, origin, partial in db.execute('PRAGMA index_list("%s")' % table):
