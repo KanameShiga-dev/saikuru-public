@@ -2627,6 +2627,19 @@ class Engine:
             self.store.event('feature_review_ready','技術確認が終了しました。機能の対象版を作成し、本人の確認を受けてください。',
                              task['id'],job['id'],{'work_package_id':wp['id']})
 
+    def _unbuilt_instruction(self, job, plan, wp):
+        """Approved build instruction for a feature none of whose builders has succeeded yet, else None.
+
+        A recheck replaces the queued original task; without this the feature's build instruction would be lost.
+        """
+        if any(t.get('work_package_id') == wp['id'] and t['role'] == 'builder' and t['status'] == 'succeeded'
+               for t in self.store.for_job('task',job['id'])):
+            return None
+        planned = [t['instruction'] for t in plan['payload']['tasks'] if t['wbs_id'] == wp['wbs_id'] and t['role'] == 'builder']
+        if not planned: return None
+        return ('\n'.join(planned) + '\n上流の機能が差し戻されたため、この機能は未着手のまま現行版の上で作成する。'
+                '作成後に完了条件と検証を現行版で確認する。')
+
     def _repair_package(self, job, wp, source, note, *, automatic=False):
         from team_wbs import approved_source, repair_impact, digest, scope_file_observation
         from team_dlp import require_clean_input
@@ -2669,6 +2682,8 @@ class Engine:
             kind = 'package_repair' if wp_id == wp['id'] else 'package_recheck'
             instruction = ('承認済みの機能と許可範囲を維持し、次の指摘を修正する。' if kind == 'package_repair'
                            else '関連機能の修正による影響だけを現行版で再確認する。無関係な成果を作り直さない。')
+            if kind == 'package_recheck':
+                instruction = self._unbuilt_instruction(job, plan, row) or instruction
             instruction += '\n指摘: ' + note + '\n完了条件: ' + '\n'.join(row['done_when']) + '\n必要な検証を記録し、権限・モデル・送信範囲を広げない。'
             fix = self._issue_package_task(job,row,kind,defect_id,instruction,after=source['id'],repair=generation,
                                            root=None if wp_id == wp['id'] else wp['id'])
@@ -2708,7 +2723,8 @@ class Engine:
                 workflow_generation=affected.get('workflow_generation',0)+1,feature_defect_id=defect_id,
                 invalidation_reason=impact['reasons'][wp_id],prior_feature_review_approval_id=affected.get('feature_review_approval_id'))
             check = self._issue_package_task(job,affected,'package_recheck',defect_id,
-                '関連機能の修正で共有ファイルが変わったため、完了条件と検証を現行版で再確認する。権限・対象範囲を広げない。',
+                self._unbuilt_instruction(job,self.store.get(job['plan_approval_id'],'approval'),affected)
+                or '関連機能の修正で共有ファイルが変わったため、完了条件と検証を現行版で再確認する。権限・対象範囲を広げない。',
                 after=task['id'],repair=task.get('repair',0),root=wp['id'])
             if requires_revision:
                 self.store.update(check['id'],status='blocked',failure_code='workflow_upstream_impact_requires_plan_revision')
