@@ -1,0 +1,126 @@
+"""Contract: the standard test entry finds every test module, same as an explicit list."""
+import configparser
+import json
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SKIP_DIRS = {'.git', '__pycache__'}
+
+
+def discover_modules(root, patterns=('test_*.py',), excluded=()):
+    """Return sorted dotted module names of test files under root, including dirs without __init__.py."""
+    skip = SKIP_DIRS | set(excluded)
+    names = set()
+    for path in Path(root).rglob('*.py'):
+        rel = path.relative_to(root)
+        if any(part in skip for part in rel.parts[:-1]):
+            continue
+        if any(path.match(p) for p in patterns):
+            names.add('.'.join(rel.with_suffix('').parts))
+    return sorted(names)
+
+
+def read_pytest_ini(path):
+    parser = configparser.ConfigParser()
+    parser.read(path, encoding='utf-8')
+    return parser['pytest']
+
+
+class FixtureDiscoveryTests(unittest.TestCase):
+    """Fictional tree: nested dir without __init__.py and a basename shared with the root."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        body = 'import unittest\nclass T(unittest.TestCase):\n{}\n'
+        (self.tmp / 'test_a.py').write_text(body.format('    def test_1(self): pass\n    def test_2(self): pass'))
+        (self.tmp / 'sub' / 'deep').mkdir(parents=True)
+        (self.tmp / 'sub' / 'test_a.py').write_text(body.format('    def test_3(self): pass'))
+        (self.tmp / 'sub' / 'deep' / 'test_b.py').write_text(body.format('    def test_4(self): pass'))
+        (self.tmp / 'sub' / 'helper.py').write_text('X = 1\n')
+        (self.tmp / 'docs').mkdir()
+        (self.tmp / 'docs' / 'test_hidden.py').write_text(body.format('    def test_5(self): pass'))
+
+    def test_finds_nested_and_same_basename(self):
+        self.assertEqual(discover_modules(self.tmp, excluded=('docs',)),
+                         ['sub.deep.test_b', 'sub.test_a', 'test_a'])
+
+    def test_helper_files_are_not_tests(self):
+        self.assertNotIn('sub.helper', discover_modules(self.tmp))
+
+    def test_unittest_discover_alone_misses_nested_dirs(self):
+        """Why a path-based list is needed: stdlib discovery skips dirs without __init__.py."""
+        suite = unittest.TestLoader().discover(str(self.tmp), top_level_dir=str(self.tmp))
+        found = suite.countTestCases()
+        explicit = self.load_explicit(discover_modules(self.tmp, excluded=('docs',)))
+        self.assertEqual(explicit, 4)
+        self.assertLess(found, explicit)
+
+    def test_explicit_run_matches_discovered_set(self):
+        modules = discover_modules(self.tmp, excluded=('docs',))
+        self.assertEqual(self.load_explicit(modules), 4)
+
+    def load_explicit(self, modules):
+        sys.path.insert(0, str(self.tmp))
+        self.addCleanup(self.drop_path)
+        self.addCleanup(self.drop_modules, modules)
+        loader = unittest.TestLoader()
+        return sum(loader.loadTestsFromName(m).countTestCases() for m in modules)
+
+    def drop_path(self):
+        if str(self.tmp) in sys.path:
+            sys.path.remove(str(self.tmp))
+
+    @staticmethod
+    def drop_modules(modules):
+        for name in modules:
+            for key in [k for k in sys.modules if k == name or k.startswith(name + '.') or name.startswith(k + '.')]:
+                sys.modules.pop(key, None)
+
+
+class CheckoutDiscoveryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.cfg = read_pytest_ini(ROOT / 'pytest.ini')
+        cls.excluded = cls.cfg['norecursedirs'].split()
+        cls.modules = discover_modules(ROOT, excluded=cls.excluded)
+        cls.everything = discover_modules(ROOT)
+        cls.inventory = json.loads((ROOT / 'tests' / 'known_failures.json').read_text(encoding='utf-8'))['inventory_modules']
+
+    def test_pytest_ini_pattern_is_test_star(self):
+        self.assertEqual(self.cfg['python_files'].split(), ['test_*.py'])
+
+    def test_exclusions_hide_no_test_file(self):
+        self.assertEqual(self.modules, self.everything,
+                         'norecursedirs would hide test files: %s' % sorted(set(self.everything) - set(self.modules)))
+
+    def test_testpaths_cover_root(self):
+        self.assertEqual(self.cfg['testpaths'].split(), ['.'])
+
+    def test_shared_basenames_need_importlib_mode(self):
+        basenames = [m.rsplit('.', 1)[-1] for m in self.modules]
+        duplicated = {b for b in basenames if basenames.count(b) > 1}
+        self.assertTrue(duplicated, 'fixture assumption changed; revisit pytest.ini import mode')
+        self.assertIn('--import-mode=importlib', self.cfg['addopts'])
+
+    def test_no_recorded_module_dropped(self):
+        missing = sorted(set(self.inventory) - set(self.modules))
+        self.assertEqual(missing, [], 'recorded test modules no longer discovered')
+
+    def test_inventory_has_no_duplicates(self):
+        self.assertEqual(len(self.inventory), len(set(self.inventory)))
+
+    def test_requirements_test_pins_pytest(self):
+        lines = [l.strip() for l in (ROOT / 'requirements-test.txt').read_text(encoding='utf-8').splitlines()
+                 if l.strip() and not l.startswith('#')]
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertIn('==', line, 'unpinned requirement: ' + line)
+
+
+if __name__ == '__main__':
+    unittest.main()

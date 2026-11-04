@@ -1,0 +1,3 @@
+# Optional standard runner. The unittest-based tests also run without it.
+# Version pinned from memory, not verified against pypi.org in this session.
+pytest==8.4.2
