@@ -424,6 +424,16 @@ def feature_target(basis):
             'source_snapshot':records,'test_snapshot':tests,'artifacts':observed,'dependency_targets':basis['dependencies']}
 
 
+def transferred_target(old_target, job, plan, requirements, wp, evidence_refs, dependency_targets, transfer):
+    """Feature target of a reused package in the new plan revision: same files and criteria, new versions and task ids."""
+    criteria = {'goal_links':wp['goal_links'],'done_when':wp['done_when']}
+    if old_target.get('criteria') != criteria: raise ValueError('workflow_transfer_criteria_changed')
+    return dict(deepcopy(old_target),work_package_id=wp['id'],workflow_generation=wp.get('workflow_generation',0),
+        requirement_revision=job['requirement_revision'],plan_revision=job['plan_revision'],
+        requirements_approval_digest=requirements['digest'],plan_approval_digest=plan['digest'],
+        evidence_refs=evidence_refs,dependency_targets=dependency_targets,evidence_transfer=transfer)
+
+
 def workspace_resources(job, approval):
     from team_handoff import canonical
     boundary = (approval.get('workflow_revision') or {}).get('workspace_boundary') or {}

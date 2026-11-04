@@ -931,10 +931,12 @@ class Handler(BaseHTTPRequestHandler):
                     job = self.app.store.get(task['job_id'], 'job')
                     if job.get('workflow_contract_version') == 1:
                         required = {'id', 'allow'}
-                        allowed = required | {'note', 'workflow_confirmation'}
+                        allowed = required | {'note', 'workflow_confirmation', 'transfer_decisions'}
                         if not required <= set(body) or set(body) - allowed:
                             raise WorkflowRequestError('workflow_request_invalid')
                         if body['allow'] and 'workflow_confirmation' not in body:
+                            raise WorkflowRequestError('workflow_request_invalid')
+                        if 'transfer_decisions' in body and (not body['allow'] or not isinstance(body['transfer_decisions'], dict)):
                             raise WorkflowRequestError('workflow_request_invalid')
                         if (not body['allow'] and 'workflow_confirmation' in body
                                 and body['workflow_confirmation'] != pending.get('workflow_revision_digest')):
@@ -942,7 +944,8 @@ class Handler(BaseHTTPRequestHandler):
                 if pending.get('intended_role') == 'maintainer' and not self.maintenance_authorized():
                     raise PermissionError('保守担当の認証が必要です。')
                 engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'),
-                              body.get('review_checklist'), workflow_confirmation=body.get('workflow_confirmation'))
+                              body.get('review_checklist'), workflow_confirmation=body.get('workflow_confirmation'),
+                              transfer_decisions=body.get('transfer_decisions'))
                 result = {'ok': True}
             elif path == '/api/jobs/formal-acceptance':
                 result = engine.accept_completion(str(body.get('approval_id', '')),

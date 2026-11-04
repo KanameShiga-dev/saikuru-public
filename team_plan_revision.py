@@ -46,6 +46,67 @@ def current_plan(store, job):
     return rows[0]
 
 
+def transfer_analysis(store, job, old_approval, before, after, affected):
+    """Offer evidence reuse for unaffected packages; applying it needs an explicit per-package user choice.
+
+    A package is offered only when its current approved feature receipt still verifies and its
+    recorded files are unchanged. Anything else is listed with reasons and can only be rerun.
+    """
+    if old_approval is None:
+        return [], []
+    import re
+    from team_wbs import feature_review_receipt, package_members
+    from team_p0_contract import artifact_records
+    requirements = store.get(job['requirements_approval_id'], 'approval')
+    records = [w for w in store.for_job('work_package', job['id']) if w['plan_revision'] == job['plan_revision']]
+    by_label = {w['wbs_id']: w for w in records}
+    old_specs = {s['wbs_id']: s for s in old_approval['payload']['work_packages']}
+    cache, found, blocked = {}, {}, {}
+    for label in sorted((before.keys() & after.keys()) - affected):
+        try:
+            wp = by_label[label]
+            proof = feature_review_receipt(store, job, old_approval, requirements, wp, old_specs, records, cache)
+            for path, sha in proof['files'].items():
+                if artifact_records(job['project'], [path]) != [{'path': path, 'sha256': sha}]:
+                    raise ValueError('dependency_artifact_changed')
+            target = store.get(proof['approval_id'], 'approval')['payload']['feature_target']
+            found[label] = (wp, proof, set(target['source_snapshot']))
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            code = str(error)
+            blocked[label] = [code if re.fullmatch('[a-z_]+', code) else 'evidence_not_current']
+    def owned_paths(label):
+        paths = set()
+        wp = by_label.get(label)
+        if wp and wp.get('feature_review_approval_id'):
+            target = (store.get(wp['feature_review_approval_id'], 'approval').get('payload') or {}).get('feature_target') or {}
+            paths.update(target.get('source_snapshot') or {})
+        if wp:
+            for task in package_members(store, job['id'], wp):
+                paths.update(r['path'] for r in task.get('workflow_artifact_records') or [])
+        return paths
+    def downstream(label):
+        seen = {label}
+        while True:
+            grown = seen | {n for n, spec in after.items() if set(spec['depends_on']) & seen}
+            if grown == seen: return seen - {label}
+            seen = grown
+    for label, (wp, proof, files) in list(found.items()):
+        changing = set().union(*(owned_paths(other) for other in affected - downstream(label)), set())
+        if files & changing:
+            blocked[label] = ['shared_file_with_changed_package']; del found[label]
+    while True:
+        lost = [label for label in found if any(dep not in found for dep in after[label]['depends_on'])]
+        if not lost: break
+        for label in lost:
+            blocked[label] = ['dependency_not_reusable']; del found[label]
+    candidates = []
+    for label, (wp, proof, files) in sorted(found.items()):
+        entry = {'wbs_id': label, 'source_work_package_id': wp['id'], 'source_approval_id': proof['approval_id'],
+                 'source_target_digest': proof['target_digest'], 'files': dict(sorted(proof['files'].items()))}
+        candidates.append(dict(entry, candidate_digest=approval_digest(entry)))
+    return candidates, [{'wbs_id': label, 'reasons': reasons} for label, reasons in sorted(blocked.items())]
+
+
 def analysis(store, job, payload, context=None):
     proposal_status(context)
     from team_p0_contract import validate_plan
@@ -80,6 +141,8 @@ def analysis(store, job, payload, context=None):
         affected = grown
     from team_harness import workspace_projection
     workspace = workspace_projection(job['project'], payload['checkpoint_paths'])
+    candidates, blocked = transfer_analysis(store, job, old_approval, before, after, affected)
+    reusable = {c['wbs_id'] for c in candidates}
     return {'schema_version': 1, 'job_id': job['id'], 'expected_job_revision': job['state_revision'],
         'workspace_boundary': workspace,
         'proposal_context': copy.deepcopy(context),
@@ -95,6 +158,10 @@ def analysis(store, job, payload, context=None):
         'affected_work_packages': sorted(affected),
         # No proof transfer is inferred from a similar label or old success.
         'reconfirmation_required': sorted(before.keys() | after.keys()),
+        # Offered only: reuse takes effect per package when the user chooses it while approving this revision.
+        'transfer_candidates': candidates, 'transfer_blocked': blocked,
+        'rerun_required': sorted(set(after) - reusable),
+        'transfer_policy': 'explicit_per_package_choice_matching_hash_job_inputs_and_current_receipt',
         'input_versions': [{'wbs_id': label, 'input_artifacts': copy.deepcopy(spec.get('input_artifacts', []))}
                            for label, spec in after.items()],
         'permission_effect': 'no_provider_model_deployment_or_external_action_permission',

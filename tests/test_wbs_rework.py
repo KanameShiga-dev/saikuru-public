@@ -341,4 +341,161 @@ class ReworkTests(unittest.TestCase):
         self.assertEqual(self.state(),before)
 
 
+class TransferTests(unittest.TestCase):
+    """A plan revision may reuse an unaffected package's confirmed evidence only by explicit per-package choice."""
+    def setUp(self):
+        self.base = ReworkTests(); self.addCleanup(self.base.doCleanups); self.base.setUp()
+        b = self.base; self.engine, self.store, self.job_id, self.project = b.engine, b.store, b.job_id, b.workspace.project
+
+    def job(self): return self.store.get(self.job_id,'job')
+    def state(self): return self.base.state()
+    def wps(self):
+        return {w['wbs_id']:w for w in self.store.for_job('work_package',self.job_id) if w['plan_revision'] == self.job()['plan_revision']}
+    def events(self,kind): return [e for e in self.store.events() if e['type'] == kind]
+
+    def approved_shared(self):
+        """Two approved, independent packages that both own app.py."""
+        b = self.base; payload = copy.deepcopy(b.fixture.payload); payload['work_packages'][1]['depends_on'] = []
+        payload['tasks'][0]['instruction'] += ' (both packages are rebuilt in this revision)'
+        approval = b.fixture.propose(payload); b.fixture.approve(approval)
+        b.first = next(t for t in b.tasks() if t.get('plan_task_index') == 0 and t.get('plan_revision') == self.job()['plan_revision'])
+        for _ in range(6): b.finish_next()
+        for wp in self.wps().values(): b.approve(self.engine.request_feature_review(self.job_id,wp['id'],expected_wp_revision=wp['state_revision']))
+
+    def revise(self, key=1):
+        payload = copy.deepcopy(self.store.get(self.job()['plan_approval_id'])['payload'])
+        payload['tasks'][key]['instruction'] += ' with fictional fix'
+        return self.base.fixture.propose(payload)
+
+    def approve(self, revised, choices=None):
+        return self.engine.decide(revised['id'],True,'Fictional explicit consent',
+            workflow_confirmation=revised['workflow_revision_digest'],transfer_decisions=choices)
+
+    def test_unaffected_confirmed_package_is_offered_and_proposal_changes_nothing(self):
+        self.base.independent_features(); before = self.job()
+        rev = self.revise()['workflow_revision']
+        self.assertEqual(rev['affected_work_packages'],['W1.02'])
+        self.assertEqual([c['wbs_id'] for c in rev['transfer_candidates']],['W1.01'])
+        self.assertEqual((rev['transfer_blocked'],rev['rerun_required']),([],['W1.02']))
+        self.assertEqual(self.job()['plan_revision'],before['plan_revision'])
+        self.assertFalse(self.events('workflow_evidence_transferred'))
+
+    def test_without_a_choice_unaffected_package_stays_stopped_and_unconfirmed(self):
+        self.base.independent_features(); self.approve(self.revise())
+        first = self.wps()['W1.01']
+        self.assertEqual(first['review_status'],'not_requested')
+        stopped = [t for t in self.store.for_job('task',self.job_id) if t.get('work_package_id') == first['id']]
+        self.assertTrue(stopped and all(t['status'] == 'blocked' and t['failure_code'] == 'workflow_transfer_required' for t in stopped))
+        self.assertNotEqual(self.engine.workflow_dispatch_view(self.job_id)['status'],'ready')
+        self.assertFalse(self.events('workflow_evidence_transferred'))
+
+    def test_reuse_keeps_history_rechecks_the_changed_package_and_reaches_final_review(self):
+        self.base.independent_features(); old = self.wps()['W1.01']
+        old_receipt = copy.deepcopy(self.store.get(old['feature_review_approval_id']))
+        self.approve(self.revise(),{'W1.01':'reuse'})
+        first = self.wps()['W1.01']
+        self.assertEqual((first['execution_state'],first['review_status']),('succeeded','approved'))
+        self.assertNotEqual(first['feature_review_approval_id'],old['feature_review_approval_id'])
+        self.assertEqual(self.store.get(old['feature_review_approval_id']),old_receipt)
+        record = self.events('workflow_evidence_transferred')[0]['details']
+        self.assertEqual((record['source_work_package_id'],record['new_work_package_id'],record['source_review_approval_id']),
+                         (old['id'],first['id'],old['feature_review_approval_id']))
+        self.assertEqual((record['source_plan_revision'],record['plan_revision']),(old['plan_revision'],self.job()['plan_revision']))
+        packages = {p['wbs_id']:p for p in self.engine.workflow_progress(self.job_id)['packages']}
+        self.assertTrue(packages['W1.01']['feature_approved']); self.assertFalse(packages['W1.02']['feature_approved'])
+        view = self.engine.workflow_dispatch_view(self.job_id)
+        self.assertEqual((view['status'],self.store.get(view['candidate_task_id'])['work_package_id']),('ready',self.wps()['W1.02']['id']))
+        for _ in range(3): self.base.finish_next()
+        second = self.wps()['W1.02']
+        self.base.approve(self.engine.request_feature_review(self.job_id,second['id'],expected_wp_revision=second['state_revision']))
+        progress = self.engine.workflow_progress(self.job_id)
+        self.assertEqual(progress['counts']['feature_approved'],2)
+        for _ in range(8):
+            if self.job()['status'] == 'awaiting_acceptance': break
+            self.base.finish_next()
+        self.assertEqual(self.job()['status'],'awaiting_acceptance')
+        self.assertFalse(self.engine.workflow_progress(self.job_id)['formal_receipt'])
+
+    def test_reused_package_can_still_be_reworked_without_touching_independent_evidence(self):
+        self.base.independent_features(); self.approve(self.revise(),{'W1.01':'reuse'})
+        for _ in range(3): self.base.finish_next()
+        second = self.wps()['W1.02']
+        self.base.approve(self.engine.request_feature_review(self.job_id,second['id'],expected_wp_revision=second['state_revision']))
+        first = self.wps()['W1.01']; kept = copy.deepcopy(self.store.get(second['id']))
+        result = self.engine.request_package_rework(self.job_id,first['id'],
+            {'action':'request_feature_rework','target_digest':first['feature_target_digest']},'Fictional bounded defect',
+            expected_wp_revision=first['state_revision'])
+        self.assertEqual(result['affected_ids'],[first['id']]); self.assertIn(second['id'],result['preserved_ids'])
+        self.assertEqual(self.store.get(second['id']),kept)
+
+    def test_shared_file_with_a_changed_package_is_not_offered_and_can_only_rerun(self):
+        self.approved_shared(); revised = self.revise(); rev = revised['workflow_revision']
+        self.assertEqual(rev['transfer_candidates'],[])
+        self.assertEqual(rev['transfer_blocked'],[{'wbs_id':'W1.01','reasons':['shared_file_with_changed_package']}])
+        before = self.state()
+        with self.assertRaises(ValueError): self.approve(revised,{'W1.01':'reuse'})
+        self.assertEqual(self.state(),before)
+        self.approve(revised,{'W1.01':'rerun'})
+        first = [t for t in self.store.for_job('task',self.job_id) if t.get('work_package_id') == self.wps()['W1.01']['id']]
+        self.assertTrue(first and all(t['status'] == 'queued' for t in first))
+        self.assertEqual(self.wps()['W1.01']['review_status'],'not_requested')
+        self.assertFalse(self.events('workflow_evidence_transferred'))
+
+    def test_file_changed_before_or_after_the_proposal_prevents_reuse(self):
+        self.base.independent_features(); revised = self.revise()
+        (self.project/'app.py').write_text('Fictional change after the preview\n',encoding='utf-8'); before = self.state()
+        with self.assertRaises(ValueError): self.approve(revised,{'W1.01':'reuse'})
+        self.assertEqual(self.state(),before)
+        self.engine.decide(revised['id'],False,'Fictional decline')
+        again = self.revise()['workflow_revision']
+        self.assertEqual(again['transfer_candidates'],[])
+        self.assertEqual(again['transfer_blocked'][0]['reasons'],['dependency_artifact_changed'])
+
+    def test_invalid_or_foreign_evidence_cannot_be_reused(self):
+        self.base.independent_features(); revised = self.revise()
+        tampered = copy.deepcopy(revised['workflow_revision'])
+        tampered['transfer_candidates'][0]['source_work_package_id'] = 'fictional-other-job-package'
+        self.store.update(revised['id'],workflow_revision=tampered); before = self.state()
+        with self.assertRaises(ValueError): self.approve(revised,{'W1.01':'reuse'})
+        self.assertEqual(self.state(),before)
+        self.store.update(revised['id'],workflow_revision=revised['workflow_revision'])
+        self.engine.decide(revised['id'],False,'Fictional decline')
+        self.store.update(self.wps()['W1.01']['feature_review_approval_id'],status='superseded')
+        blocked = self.revise()['workflow_revision']['transfer_blocked']
+        self.assertEqual(blocked,[{'wbs_id':'W1.01','reasons':['dependency_feature_review_invalid']}])
+
+    def test_second_decision_and_declined_revision_leave_one_transfer_or_none(self):
+        self.base.independent_features(); declined = self.revise(); before = self.state()
+        with self.assertRaises(ValueError):
+            self.engine.decide(declined['id'],False,'Fictional decline',transfer_decisions={'W1.01':'reuse'})
+        self.assertEqual(self.state(),before)
+        self.engine.decide(declined['id'],False,'Fictional keep the published plan')
+        self.assertFalse(self.events('workflow_evidence_transferred'))
+        self.assertEqual(self.wps()['W1.01']['review_status'],'approved')
+        revised = self.revise(); self.approve(revised,{'W1.01':'reuse'}); settled = self.state()
+        with self.assertRaises(ValueError): self.approve(revised,{'W1.01':'reuse'})
+        self.assertEqual(self.state(),settled); self.assertEqual(len(self.events('workflow_evidence_transferred')),1)
+
+    def test_revision_after_acceptance_reuses_only_the_chosen_package_and_is_not_accepted(self):
+        self.base.independent_features()
+        for task in self.base.tasks():
+            if task.get('workflow_job_task') and task['status'] == 'queued': self.store.update(task['id'],status='cancelled')
+        self.store.update(self.job_id,status='accepted')
+        self.approve(self.revise(),{'W1.01':'reuse'})
+        self.assertEqual(self.job()['status'],'running')
+        packages = {p['wbs_id']:p for p in self.engine.workflow_progress(self.job_id)['packages']}
+        self.assertEqual((packages['W1.01']['feature_approved'],packages['W1.02']['feature_approved']),(True,False))
+        self.assertFalse(self.engine.workflow_progress(self.job_id)['formal_receipt'])
+
+    def test_http_choice_is_part_of_the_approval_request_only(self):
+        self.base.independent_features(); revised = self.revise(); request = self.base.fixture.api_server()
+        body = {'id':revised['id'],'allow':True,'workflow_confirmation':revised['workflow_revision_digest']}
+        before = self.state()
+        for extra in ({'transfer_decisions':['W1.01']},{'transfer_decisions':{'W1.01':'keep'}},{'transfer_decisions':{'W9.99':'reuse'}}):
+            self.assertEqual(request('/api/decide',dict(body,**extra))[0],400)
+            self.assertEqual(self.state(),before)
+        self.assertEqual(request('/api/decide',dict(body,transfer_decisions={'W1.01':'reuse'}))[0],200)
+        self.assertEqual(self.wps()['W1.01']['review_status'],'approved')
+
+
 if __name__ == '__main__': unittest.main()

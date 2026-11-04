@@ -137,6 +137,10 @@ const WORKFLOW_ERROR_LABELS={
   workflow_sensitive_input_blocked:'入力に送信できない情報が含まれている可能性があります。表現を変えて入力してください。',
   workflow_input_or_maintenance_check_required:'入力内容を確認してください。解決しない場合は保守担当の確認が必要です。',
   workflow_revision_confirmation_not_current:'計画の確認内容が古くなりました。再読み込みして、表示された計画で確認してください。',
+  workflow_transfer_not_eligible:'再利用できない機能が選ばれました。画面を再読み込みして、表示された選択肢から選び直してください。',
+  workflow_transfer_dependency_not_reused:'先に必要な機能を再利用しない場合は、この機能も再利用できません。再実行を選んでください。',
+  workflow_transfer_decision_invalid:'再利用・再実行の選択が正しくありません。画面を再読み込みしてください。',
+  workflow_transfer_evidence_changed:'以前の確認の内容が変わっていたため、再利用できませんでした。再読み込みして選び直してください。',
   workflow_control_target_changed:'確認の間に依頼の状態が変わったため、送りませんでした。新しい表示を確かめて、必要ならもう一度操作してください。',
   workflow_control_action_invalid:'この操作は使えません。画面を再読み込みしてください。',
   workflow_control_task_invalid:'対象の作業がこの依頼と一致しません。画面を再読み込みしてください。',
@@ -607,6 +611,32 @@ function workflowPanel(job){
   else panel.append(list);
   return panel;
 }
+// 影響を受けない機能ごとに「以前の確認を再利用する」か「再実行する」かを選ぶ。選ばない機能は停止したままになる。
+// 再利用できるのは、成果物・入力・確認の記録が現在も一致する機能だけ。選択は承認の送信と一緒にだけ送られる。
+const transferChoices=new Map();
+function transferChoiceView(a,rev,name){
+  const group=el('div',undefined,'progress-group transfer-choices'),picked=transferChoices.get(a.id)||{};transferChoices.set(a.id,picked);
+  const offered=new Set((rev.transfer_candidates||[]).map(c=>c.wbs_id)),stopped=rev.transfer_blocked||[];
+  if(!offered.size&&!stopped.length)return group;
+  group.append(el('h4','影響を受けない機能の扱い'));
+  group.append(el('p','選ばない機能は停止したままになり、作業は進みません。再利用を選べるのは、成果物・入力・確認の記録が今も一致している機能だけです。いつでも拒否できます。','hint'));
+  const reasons={dependency_artifact_changed:'成果物のファイルが変わっています',shared_file_with_changed_package:'変更される機能と同じファイルを使っています',
+    dependency_not_reusable:'先に必要な機能を再利用できません',dependency_feature_review_required:'機能の確認が済んでいません',
+    dependency_feature_review_invalid:'以前の確認が有効ではありません',evidence_not_current:'以前の確認が現在の内容と一致しません'};
+  const rows=[...(rev.transfer_candidates||[]).map(c=>({id:c.wbs_id,why:null})),...stopped.map(b=>({id:b.wbs_id,why:b.reasons}))];
+  for(const row of rows){
+    const line=el('p',undefined,'transfer-row'),select=el('select'),label=el('label',name(row.id)+'：');
+    select.setAttribute('aria-label',`${name(row.id)}の扱い`);
+    const options=[['','選ばない（停止したまま）'],...(row.why?[]:[['reuse','以前の確認を再利用する']]),['rerun','再実行する']];
+    for(const [value,text] of options){const o=el('option',text);o.value=value;select.append(o);}
+    select.value=picked[row.id]||'';
+    select.addEventListener('change',()=>{if(select.value)picked[row.id]=select.value;else delete picked[row.id];});
+    label.append(select);line.append(label);
+    if(row.why)line.append(el('small','　再利用できない理由：'+row.why.map(r=>reasons[r]||r).join('、'),'hint'));
+    group.append(line);
+  }
+  return group;
+}
 // 新方式の計画の確認（承認前）。機能の分け方・完了の条件・使う既存の成果物・作業場所・変更の要点を表示する。
 // 承認では、表示した分析の digest をそのまま送る（workflow_confirmation）。非開発者に内部の設計判断を求めない。
 function planRevisionView(a){
@@ -633,7 +663,8 @@ function planRevisionView(a){
   if(rev.base_versions?.plan_revision>0){
     const affected=(rev.affected_work_packages||[]).map(name),again=(rev.reconfirmation_required||[]).map(name);
     box.append(progressList('変更の影響を受ける機能',affected,'!','unmet'));
-    box.append(progressList('新しい計画で確認し直す機能（影響がなくても、以前の確認は引き継ぎません）',again,'○','todo'));
+    box.append(progressList('新しい計画で確認し直す機能（既定では、影響がなくても以前の確認は引き継ぎません）',again,'○','todo'));
+    box.append(transferChoiceView(a,rev,name));
   }
   const ws=rev.workspace_boundary||{};
   const where=el('div',undefined,'progress-group');where.append(el('h4','作業する場所'));
@@ -1590,7 +1621,9 @@ function renderDetail(task,version) {
       // 新方式の計画は、表示した分析の digest を確認として送る。表示していない計画では承認しない。
       const confirmation=a.kind==='plan'&&a.workflow_revision_digest?{workflow_confirmation:a.workflow_revision_digest}:{};
       actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',async()=>{
-        await api('/api/decide',{id:a.id,allow:true,note:input.value,...confirmation});
+        const chosen=transferChoices.get(a.id)||{};
+        await api('/api/decide',{id:a.id,allow:true,note:input.value,...confirmation,...(Object.keys(chosen).length?{transfer_decisions:chosen}:{})});
+        transferChoices.delete(a.id);
         // W05.05.UI（F4）：承認の結果を文で伝える。開始・完了を約束しない。
         if(a.kind==='plan')notice('計画を承認しました。承認した計画で作業を進めます。機能ごとの確認は、各機能の作業の後に行います。');
         else if(a.kind==='ai_start')notice('AIによる計画作成の開始を承認しました（1回だけ）。計画ができたら、改めて確認をお願いします。');

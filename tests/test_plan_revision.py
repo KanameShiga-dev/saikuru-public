@@ -143,6 +143,35 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual(first['status'], 'blocked')
         self.assertEqual(first['failure_code'], 'workflow_transfer_required')
 
+    def test_unconfirmed_package_cannot_be_reused_but_may_be_rerun_by_explicit_choice(self):
+        self.approve(); self.stop_queued()
+        value = copy.deepcopy(self.payload); value['tasks'][1]['instruction'] += ' with fictional fix'
+        revised = self.propose(value); target = revised['workflow_revision']
+        self.assertEqual(target['transfer_candidates'], [])
+        self.assertEqual([b['wbs_id'] for b in target['transfer_blocked']], ['W1.01'])
+        self.assertEqual(target['rerun_required'], ['W1.01', 'W1.02'])
+        before = self.state()
+        for choices in ({'W1.01': 'reuse'}, {'W1.02': 'rerun'}, {'W9.99': 'rerun'}, {'W1.01': 'maybe'}, ['W1.01']):
+            with self.assertRaises(ValueError):
+                self.engine.decide(revised['id'], True, 'Fictional', workflow_confirmation=revised['workflow_revision_digest'],
+                                   transfer_decisions=choices)
+            self.assertEqual(self.state(), before)
+        self.engine.decide(revised['id'], True, 'Fictional', workflow_confirmation=revised['workflow_revision_digest'],
+                           transfer_decisions={'W1.01': 'rerun'})
+        first = next(t for t in self.store.for_job('task', self.job_id)
+                     if t.get('plan_revision') == 2 and t.get('plan_task_index') == 0)
+        self.assertEqual(first['status'], 'queued')
+        self.assertIsNone(first.get('failure_code'))
+
+    def test_reuse_requires_every_prerequisite_to_be_reused_too(self):
+        approval = {'payload': {'work_packages': [{'wbs_id': 'W1', 'depends_on': []}, {'wbs_id': 'W2', 'depends_on': ['W1']}]},
+                    'workflow_revision': {'transfer_candidates': [{'wbs_id': 'W1'}, {'wbs_id': 'W2'}], 'transfer_blocked': []}}
+        choose = self.engine._transfer_choices
+        self.assertEqual(choose(approval, {'W1': 'reuse', 'W2': 'reuse'}), {'W1': 'reuse', 'W2': 'reuse'})
+        for choices in ({'W2': 'reuse'}, {'W1': 'rerun', 'W2': 'reuse'}):
+            with self.assertRaises(ValueError): choose(approval, choices)
+        self.assertEqual(choose(approval, None), {})
+
     def test_worker_cannot_publish_or_modify_approved_requirements_even_while_planning(self):
         self.approve()
         self.store.update(self.job_id, status='planning')

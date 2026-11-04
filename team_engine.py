@@ -1602,7 +1602,24 @@ class Engine:
                     'workflow_revision': approval['workflow_revision'],
                     'workflow_revision_digest': approval['workflow_revision_digest']}
 
-    def _check_workflow_plan_decision(self, approval, task, job, confirmation):
+    @staticmethod
+    def _transfer_choices(approval, decisions):
+        """Per-package choices made while approving a revision; only offered candidates may be reused."""
+        if not decisions: return {}
+        target = approval['workflow_revision']
+        if (not isinstance(decisions, dict) or any(type(k) is not str or v not in ('reuse', 'rerun') for k, v in decisions.items())):
+            raise ValueError('workflow_transfer_decision_invalid')
+        offered = {c['wbs_id'] for c in target.get('transfer_candidates', [])}
+        stopped = {b['wbs_id'] for b in target.get('transfer_blocked', [])}
+        specs = {s['wbs_id']: s for s in approval['payload']['work_packages']}
+        for label, choice in decisions.items():
+            if label not in offered | stopped or (choice == 'reuse' and label not in offered):
+                raise ValueError('workflow_transfer_not_eligible')
+            if choice == 'reuse' and any(decisions.get(dep) != 'reuse' for dep in specs[label]['depends_on']):
+                raise ValueError('workflow_transfer_dependency_not_reused')
+        return dict(decisions)
+
+    def _check_workflow_plan_decision(self, approval, task, job, confirmation, transfer_decisions=None):
         from team_plan_revision import analysis, approval_digest, proposal_status
         target = approval.get('workflow_revision')
         context = approval.get('workflow_revision_context')
@@ -1621,6 +1638,7 @@ class Engine:
                 or (t.get('current_attempt') or {}).get('status') == 'running'
                 for t in self.store.for_job('task', job['id'])):
             raise ValueError('workflow_revision_writer_not_stopped')
+        return self._transfer_choices(approval, transfer_decisions)
 
     def _reject_workflow_revision(self, approval, job):
         """Declining a proposal is not cancellation of the published plan."""
@@ -1663,6 +1681,109 @@ class Engine:
         self.store.event('workflow_plan_published', '確認済みの要求・計画版を保存しました。過去の受領・証拠は履歴として保持します。',
                          task['id'], job['id'], {'approval_id': approval['id'], 'plan_revision': current['plan_revision'],
                                                 'requirement_revision': current['requirement_revision']})
+
+    _TRANSFER_TASK_FIELDS = ('summary', 'result', 'attempt', 'current_attempt', 'validation_runs', 'test_asset_snapshot',
+                             'test_assets', 'workflow_artifact_records', 'workflow_validation_evidence', 'profile',
+                             'finished_at')
+
+    def _apply_evidence_transfers(self, approval_id, choices):
+        """Carry confirmed evidence into the new revision, in dependency order, inside the approval transaction.
+
+        Every offered candidate was re-derived from current records and files when this approval was checked;
+        nothing here trusts a stored success flag. Old records stay untouched as history.
+        """
+        approval = self.store.get(approval_id, 'approval')
+        specs = {s['wbs_id']: s for s in approval['payload']['work_packages']}
+        candidates = {c['wbs_id']: c for c in approval['workflow_revision']['transfer_candidates']}
+        order = []
+        def visit(label):
+            if label in order: return
+            for dep in specs[label]['depends_on']: visit(dep)
+            order.append(label)
+        for label in sorted(label for label, choice in choices.items() if choice == 'reuse'): visit(label)
+        done = {}
+        for label in order:
+            done[label] = self._transfer_package(approval, candidates[label], specs[label], done)
+        self.store.event('workflow_transfer_decided', '影響外の機能ごとに、確認の再利用か再実行かの選択を記録しました。',
+                         approval['task_id'], approval['job_id'],
+                         {'revision_approval_id': approval_id, 'choices': dict(sorted(choices.items())),
+                          'reused': [label for label in order]})
+
+    def _transfer_package(self, approval, candidate, spec, done):
+        from team_wbs import digest, package_members, task_evidence_digest, transferred_target
+        job = self.store.get(approval['job_id'], 'job')
+        plan = self.store.get(job['plan_approval_id'], 'approval')
+        requirements = self.store.get(job['requirements_approval_id'], 'approval')
+        old_wp = self.store.get(candidate['source_work_package_id'], 'work_package')
+        old_review = self.store.get(candidate['source_approval_id'], 'approval')
+        old_target = old_review['payload']['feature_target']
+        if digest(old_target) != candidate['source_target_digest']:
+            raise ValueError('workflow_transfer_evidence_changed')
+        new_wp = next(w for w in self.store.for_job('work_package', job['id'])
+                      if w['plan_revision'] == job['plan_revision'] and w['wbs_id'] == spec['wbs_id'])
+        # A new generation keeps the not-yet-run planned tasks as history and makes the copied evidence current.
+        new_wp = self.store.update(new_wp['id'], workflow_generation=new_wp.get('workflow_generation', 0) + 1)
+        transfer_id = uid()
+        marker = {'transfer_id': transfer_id, 'source_work_package_id': old_wp['id'],
+                  'source_plan_revision': old_wp['plan_revision'], 'revision_approval_id': approval['id']}
+        planned = [t for t in self.store.for_job('task', job['id'])
+                   if t.get('work_package_id') == new_wp['id'] and t.get('workflow_generation', 0) == 0]
+        for held in planned:
+            # The chain of planned tasks continues only through a satisfied package; this is not package evidence.
+            self.store.update(held['id'], status='succeeded', failure_code=None, workflow_transfer=marker,
+                              summary='承認済みの確認の再利用により、この版では再実行しません。',
+                              result={'status': 'done', 'summary': '確認の再利用により実行不要', 'checks': [],
+                                      'artifacts': [], 'pending_checks': [], 'blocking_reasons': []})
+        after = planned[-1]['id'] if planned else approval['task_id']
+        mapping = {old_wp['id']: new_wp['id']}; copied = []
+        for old in package_members(self.store, job['id'], old_wp):
+            authority = copy.deepcopy(old.get('workflow_authority'))
+            if authority:
+                authority = dict(authority, source_id=mapping.get(authority.get('source_id'), authority.get('source_id')),
+                                 recheck_root_id=mapping.get(authority.get('recheck_root_id'), authority.get('recheck_root_id')))
+            fields = {'work_package_id': new_wp['id'], 'plan_revision': job['plan_revision'],
+                      'requirement_revision': job['requirement_revision'], 'spec_source_approval_id': plan['id'],
+                      'workflow_generation': new_wp['workflow_generation'], 'goal_links': list(new_wp['goal_links']),
+                      'workflow_transfer': dict(marker, source_task_id=old['id'])}
+            if authority: fields['workflow_authority'] = authority
+            if old.get('review_cycle'): fields['review_cycle'] = mapping.get(old['review_cycle'], old['review_cycle'])
+            new = self._new_task_record(job, old['title'], old['instruction'], old['role'], after, old.get('repair', 0),
+                                        old.get('agent_name'), fields)
+            new = self.store.update(new['id'], status='succeeded',
+                **{k: copy.deepcopy(old[k]) for k in self._TRANSFER_TASK_FIELDS if k in old})
+            mapping[old['id']] = new['id']; copied.append(new); after = new['id']
+        if not copied: raise ValueError('workflow_transfer_evidence_changed')
+        record = dict(marker, wbs_id=spec['wbs_id'], new_work_package_id=new_wp['id'],
+                      source_review_approval_id=old_review['id'], source_target_digest=candidate['source_target_digest'],
+                      candidate_digest=candidate['candidate_digest'], plan_revision=job['plan_revision'],
+                      requirement_revision=job['requirement_revision'])
+        by_label = {w['wbs_id']: w for w in self.store.for_job('work_package', job['id'])
+                    if w['plan_revision'] == job['plan_revision']}
+        target = transferred_target(old_target, job, plan, requirements, new_wp,
+            {t['id']: task_evidence_digest(self.store.get(t['id'], 'task')) for t in copied},
+            {by_label[dep]['id']: {'approval_id': done[dep]['approval_id'], 'target_digest': done[dep]['target_digest']}
+             for dep in spec['depends_on']}, record)
+        target_digest = digest(target)
+        review = self.new_approval(copied[-1], 'feature_review', {'feature_target': target, 'feature_target_digest': target_digest,
+            'summary': '改訂前に確認済みの機能を、同じ成果物・同じ入力のまま新しい版で利用します。'})
+        self.store.update(review['id'], category='ACCEPTANCE', intended_role='end_user', status='approved',
+            note='計画の改訂を承認するときに、この機能の確認の再利用を選択しました。', decided_at=now(),
+            evidence_transfer=record,
+            review_acknowledgement={'action': 'feature_review_confirmation', 'target_digest': target_digest,
+                                    'actor': 'authenticated_local_app_session', 'basis': 'plan_revision_transfer_choice',
+                                    'revision_approval_id': approval['id'], 'candidate_digest': candidate['candidate_digest']})
+        self.store.update(new_wp['id'], execution_state='succeeded', review_status='approved',
+                          feature_review_approval_id=review['id'], feature_target_digest=target_digest,
+                          evidence_transfer=record)
+        self.store.event('feature_review_decided', '改訂前の確認の再利用を、利用者の選択に基づいて新しい版に記録しました。',
+            review['task_id'], job['id'], {'approval_id': review['id'], 'work_package_id': new_wp['id'],
+                'target_digest': target_digest, 'decision': 'approved', 'actor': 'authenticated_local_app_session',
+                'requirement_revision': job['requirement_revision'], 'plan_revision': job['plan_revision'],
+                'transfer_id': transfer_id})
+        self.store.event('workflow_evidence_transferred', '影響外の機能の確認を、同じ成果物・入力・確認記録のまま新しい版へ移しました。',
+            review['task_id'], job['id'], dict(record, review_approval_id=review['id'], target_digest=target_digest,
+                                               choice='reuse'))
+        return {'approval_id': review['id'], 'target_digest': target_digest}
 
     @staticmethod
     def _g2_payload_digest(payload):
@@ -1950,7 +2071,7 @@ class Engine:
 
 
     def decide(self, approval_id, allow, note, answers=None, attachment_ids=None, review_checklist=None,
-               workflow_confirmation=None):
+               workflow_confirmation=None, transfer_decisions=None):
 
         with self.store.lock:
 
@@ -1995,8 +2116,11 @@ class Engine:
                 raise ValueError('この要求は処理済みです。')
 
             workflow_plan = approval['kind'] == 'plan' and job.get('workflow_contract_version') == 1
+            if transfer_decisions and not (workflow_plan and allow):
+                raise ValueError('workflow_transfer_not_eligible')
+            choices = {}
             if workflow_plan and allow:
-                self._check_workflow_plan_decision(approval, task, job, workflow_confirmation)
+                choices = self._check_workflow_plan_decision(approval, task, job, workflow_confirmation, transfer_decisions)
 
             if approval['kind'] == 'completion' and allow:
 
@@ -2090,8 +2214,11 @@ class Engine:
                     if allow:
 
                         if workflow_plan:
+                            self.store.update(approval_id, workflow_transfer_decisions=choices)
                             self._publish_workflow_plan(approval, task, job, workflow_confirmation)
                         self._expand_plan(task, task['result'])
+                        if choices:
+                            self._apply_evidence_transfers(approval_id, choices)
 
                     else:
 
@@ -3266,11 +3393,13 @@ class Engine:
             new = self.new_task(job, spec['title'], spec['instruction'], spec['role'], after,
                                 **({'plan_task_index': index} if workflow else {}))
             if workflow:
-                revision = self.store.get(job['plan_approval_id'], 'approval').get('workflow_revision') or {}
+                plan_row = self.store.get(job['plan_approval_id'], 'approval')
+                revision = plan_row.get('workflow_revision') or {}
                 if (revision.get('base_versions', {}).get('plan_revision', 0) > 0
-                        and spec['wbs_id'] not in revision.get('affected_work_packages', [])):
+                        and spec['wbs_id'] not in revision.get('affected_work_packages', [])
+                        and (plan_row.get('workflow_transfer_decisions') or {}).get(spec['wbs_id']) != 'rerun'):
                     self.store.update(new['id'], status='blocked', failure_code='workflow_transfer_required',
-                                      summary='影響外の工程は再実行せず、新版への証拠移送を確認するまで停止します。')
+                                      summary='影響外の工程です。以前の確認を再利用するか再実行するかを、計画の承認画面で選ぶまで停止します。')
             if job.get('p0_contract_version') == 1 and not workflow:
                 new = self.store.update(new['id'], goal_links=list(spec['goal_links']), goal_id=job['id'])
 

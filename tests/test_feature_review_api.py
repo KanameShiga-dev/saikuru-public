@@ -30,6 +30,18 @@ class PlanEnvelopeTests(unittest.TestCase):
         self.assertEqual(self.f.state(), before)
         self.assertEqual(self.f.job()['status'], 'running')
 
+    def test_transfer_choice_is_refused_unless_offered_and_never_rides_a_denial(self):
+        before = self.f.state()
+        for extra in ({'transfer_decisions': {'W1.01': 'reuse'}}, {'transfer_decisions': ['W1.01']}):
+            code, result = self.request('/api/decide', dict(self.body, **extra))
+            self.assertEqual(code, 400)
+            self.assertEqual(self.f.state(), before)
+        denial = dict(self.body, allow=False, transfer_decisions={'W1.01': 'reuse'})
+        self.assertEqual(self.request('/api/decide', denial)[0], 400)
+        self.assertEqual(self.f.state(), before)
+        self.assertEqual(self.request('/api/decide', dict(self.body, transfer_decisions={}))[0], 200)
+        self.assertEqual(self.f.job()['plan_revision'], 1)
+
     def test_missing_confirmation_or_foreign_identity_cannot_approve(self):
         before = self.f.state()
         for body in ({'id': self.body['id'], 'allow': True}, dict(self.body, id='fictional-foreign')):
