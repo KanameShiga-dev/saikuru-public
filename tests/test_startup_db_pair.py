@@ -81,6 +81,20 @@ class PairCheck(Fixture):
             deploy.require_pair(self.data)
         self.assertEqual(caught.exception.code, 'schema_unknown')
 
+    def test_expected_table_names_with_incompatible_columns_are_refused_before_any_write(self):
+        for db_name, table, ddl in (
+                (deploy.HANDOFF_DB, 'records', 'CREATE TABLE records (id INTEGER PRIMARY KEY, note TEXT)'),
+                (deploy.TEAM_DB, 'objects', 'CREATE TABLE objects (id TEXT PRIMARY KEY)')):
+            folder = Path(self.temp.name) / ('columns-' + table)
+            make_pair(folder)
+            sql(folder / db_name, 'DROP TABLE ' + table)
+            sql(folder / db_name, ddl)
+            before = snapshot(folder)
+            with self.assertRaises(deploy.DeploymentError, msg=table) as caught:
+                deploy.require_pair(folder)
+            self.assertEqual(caught.exception.code, 'schema_unknown', table)
+            self.assertEqual(snapshot(folder), before, table)
+
     def test_empty_files_count_as_blank(self):
         self.data.mkdir()
         for name in deploy.PAIR_FILES:

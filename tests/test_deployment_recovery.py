@@ -172,6 +172,16 @@ class ReleaseManifest(unittest.TestCase):
         manifest['files'].append({'path': 'data/team.sqlite3', 'size': 3, 'sha256': '0' * 64, 'kind': 'sqlite3'})
         self.assertEqual(deploy.verify_release_manifest(self.root, manifest), ['not allowed: data/team.sqlite3'])
 
+    def test_backslash_paths_cannot_smuggle_excluded_files_into_a_manifest(self):
+        (self.root / 'data').mkdir(exist_ok=True)
+        (self.root / 'data' / 'file.txt').write_text('operational', encoding='utf-8')
+        self.assertEqual(deploy.excluded_reason('data\\file.txt'), 'excluded folder')
+        manifest = deploy.build_release_manifest(self.root, ['app.py'], COMMIT)
+        data = b'operational'
+        manifest['files'].append({'path': 'data\\file.txt', 'size': len(data),
+                                  'sha256': hashlib.sha256(data).hexdigest(), 'kind': 'txt'})
+        self.assertEqual(deploy.verify_release_manifest(self.root, manifest), ['not allowed: data\\file.txt'])
+
     def test_command_line_writes_a_new_manifest_only(self):
         out = self.root / 'candidate.json'
         argv = ['manifest', '--root', str(self.root), '--commit', COMMIT, '--out', str(out), 'app.py']

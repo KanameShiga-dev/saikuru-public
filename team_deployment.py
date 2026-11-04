@@ -24,6 +24,21 @@ REQUIRED_TABLES = {
     HANDOFF_DB: {'records', 'facts', 'conflicts', 'skill_candidates', 'skill_versions',
                  'skill_active', 'skill_titles'},
 }
+# Columns every release has had (conflicts.resolution is added by migration, so it is not required here).
+REQUIRED_COLUMNS = {
+    'objects': ('kind', 'id', 'body'),
+    'events': ('seq', 'body'),
+    'transitions': ('seq', 'kind', 'id', 'job_id', 'from_status', 'to_status', 'at', 'reason'),
+    'metrics_meta': ('key', 'value'),
+    'records': ('seq', 'project', 'job_id', 'task_id', 'kind', 'source_id', 'happened_at', 'payload'),
+    'facts': ('seq', 'project', 'job_id', 'key', 'value', 'evidence', 'authority', 'source_id', 'status',
+              'created_at'),
+    'conflicts': ('id', 'job_id', 'key', 'old_fact', 'new_fact', 'status', 'resolved_at'),
+    'skill_candidates': ('id', 'project', 'experience_key', 'content_hash', 'payload', 'created_at'),
+    'skill_versions': ('id', 'project', 'name', 'candidate_id', 'payload', 'created_at'),
+    'skill_active': ('project', 'name', 'version_id', 'enabled'),
+    'skill_titles': ('name', 'title', 'updated_at'),
+}
 SCHEMA_VERSION = 1
 MANIFEST_NAME = 'pair-manifest.json'
 IDENTITY_SQL = 'CREATE TABLE IF NOT EXISTS pair_identity (key TEXT PRIMARY KEY, value TEXT NOT NULL)'
@@ -83,6 +98,10 @@ def inspect_db(path, name):
                 return {'state': 'empty'}
             if not REQUIRED_TABLES[name] <= set(counts):
                 return {'state': 'foreign'}
+            for table in REQUIRED_TABLES[name]:
+                columns = {r[1] for r in db.execute('PRAGMA table_info("%s")' % table)}
+                if not set(REQUIRED_COLUMNS[table]) <= columns:
+                    return {'state': 'foreign'}
             identity = {}
             if 'pair_identity' in counts:
                 identity = dict(db.execute('SELECT key, value FROM pair_identity').fetchall())
@@ -216,7 +235,7 @@ COMMIT = re.compile(r'[0-9a-f]{40}')
 
 
 def excluded_reason(relative):
-    parts = relative.split('/')
+    parts = re.split(r'[\\/]', relative)
     name = parts[-1].lower()
     if EXCLUDED_PARTS & set(parts[:-1]) or name in EXCLUDED_PARTS:
         return 'excluded folder'
@@ -256,7 +275,8 @@ def verify_release_manifest(root, manifest):
         if relative in seen:
             problems.append('duplicate: ' + relative)
         seen.add(relative)
-        if Path(relative).is_absolute() or '..' in Path(relative).parts or excluded_reason(relative):
+        if (Path(relative).is_absolute() or '..' in Path(relative).parts or '\\' in relative
+                or relative.startswith('/') or excluded_reason(relative)):
             problems.append('not allowed: ' + relative)
             continue
         file = (root / relative).resolve()
