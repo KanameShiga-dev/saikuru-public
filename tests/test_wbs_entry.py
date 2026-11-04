@@ -83,6 +83,49 @@ class WbsEntryTests(unittest.TestCase):
             self.server.app.engine.tick()
         self.assertEqual(launched, [])
 
+    def test_v01_registered_wbs_job_reaches_a_wbs_plan_through_the_real_planner_with_a_fake_provider(self):
+        self.enable()
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        engine, job = self.server.app.engine, self.jobs()[0]
+        start = next(a for a in self.store.for_job('approval', job['id']) if a['kind'] == 'ai_start')
+        engine.decide(start['id'], True, '架空の開始承認')
+        self.assertEqual(self.store.get(job['id'], 'job')['status'], 'planning')
+        planner = next(t for t in self.store.for_job('task', job['id']) if t['role'] == 'planner')
+        task = self.store.reserve_attempt(planner['id'], planner['state_revision'])
+        engine.commands[task['profile']['adapter']] = ['fictional-never-executed-cli']
+        deliverable, criterion = '架空の成果物', '架空の受入条件'
+        plan = {'summary': '架空の計画', 'questions': [], 'context_updates': [], 'warnings': [],
+                'security_review_required': False, 'checkpoint_paths': ['output.txt'],
+                'code_test_plan': {'required': True, 'reason': '架空の試験', 'cases': ['架空の条件'],
+                                   'command': 'python -I run_fictional_tests.py', 'existing_tests': []},
+                'goal_contract': {'primary_goal': '架空の目的', 'deliverables': [deliverable],
+                                  'acceptance_criteria': [criterion], 'non_goals': [], 'constraints': []},
+                'work_packages': [{'wbs_id': 'WP1', 'title': '架空の機能', 'goal_links': [deliverable, criterion],
+                                   'done_when': ['架空の完了条件'], 'depends_on': [], 'input_artifacts': []}],
+                'tasks': [{'title': '架空の作業', 'instruction': '架空の指示', 'role': 'builder',
+                           'goal_links': [deliverable, criterion], 'wbs_id': 'WP1'}]}
+        seen = []
+
+        class FakeProvider:
+            def run(adapter, ctx, prompt, schema):
+                seen.append((prompt, schema))
+                return plan
+
+        with patch.dict('team_engine.ADAPTERS', {task['profile']['adapter']: FakeProvider}), \
+                patch('team_local_summary.review_plan', lambda *a, **k: {'status': 'skipped'}):
+            engine._run(task)
+        self.assertEqual(len(seen), 1)
+        self.assertIn('work_packages', seen[0][1]['properties'])
+        self.assertIn('work_packages', seen[0][0])
+        done = self.store.get(task['id'], 'task')
+        self.assertEqual(done['status'], 'succeeded', done.get('summary'))
+        after = self.store.get(job['id'], 'job')
+        self.assertEqual(after['workflow_contract_version'], 1)
+        self.assertEqual(after['g2_status'], 'consumed')
+        approval = next(a for a in self.store.for_job('approval', job['id']) if a['kind'] == 'plan')
+        self.assertEqual(approval['status'], 'pending')
+        self.assertEqual([p['wbs_id'] for p in approval['payload']['work_packages']], ['WP1'])
+
     def test_v10_default_standard_and_disabled_config_keep_legacy_jobs(self):
         for enabled in (False, True):
             self.enable(enabled)
