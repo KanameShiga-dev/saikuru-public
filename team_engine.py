@@ -2631,11 +2631,12 @@ class Engine:
         """Approved build instructions of the feature's planned builder tasks that have not succeeded yet, else None.
 
         A recheck replaces the queued original tasks; without this the unbuilt instructions would be lost.
-        A succeeded task carrying the marker already covered every then-unbuilt planned builder.
+        A succeeded replacement task (no plan_task_index) carrying the marker already covered every then-unbuilt
+        planned builder. Approved plan tasks are never checked for the marker: their text is free-form.
         """
         marker = '上流の機能が差し戻されたため、この機能は未着手のまま現行版の上で作成する。'
         tasks = [t for t in self.store.for_job('task',job['id']) if t.get('work_package_id') == wp['id'] and t['status'] == 'succeeded']
-        if any(marker in t['instruction'] for t in tasks): return None
+        if any(t.get('plan_task_index') is None and marker in t['instruction'] for t in tasks): return None
         built = {t.get('plan_task_index') for t in tasks if t['role'] == 'builder'}
         pending = [t['instruction'] for i,t in enumerate(plan['payload']['tasks'])
                    if t['wbs_id'] == wp['wbs_id'] and t['role'] == 'builder' and i not in built]

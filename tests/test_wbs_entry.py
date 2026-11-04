@@ -472,6 +472,11 @@ class UnbuiltInstructionTests(unittest.TestCase):
         first = self.call([self.task(0, 'queued'), self.task(1, 'queued')])
         self.assertIsNone(self.call([self.task(None, instruction=first)]))
 
+    def test_marker_text_in_an_approved_plan_instruction_does_not_hide_unbuilt_builders(self):
+        marker = '上流の機能が差し戻されたため、この機能は未着手のまま現行版の上で作成する。'
+        text = self.call([self.task(0, instruction='架空の作成A' + marker), self.task(1, 'queued')])
+        self.assertIn('架空の作成B', text); self.assertNotIn('架空の作成A', text)
+
 
 if __name__ == '__main__':
     unittest.main()
