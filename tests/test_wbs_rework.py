@@ -453,11 +453,27 @@ class TransferTests(unittest.TestCase):
 
     def test_invalid_or_foreign_evidence_cannot_be_reused(self):
         self.base.independent_features(); revised = self.revise()
+        # A second fictional job owns a complete, approved package and review record of its own.
+        mine = self.wps()['W1.01']; review = self.store.get(mine['feature_review_approval_id'])
+        other_id, job = 'fictional-other-job', self.job()
+        for name in ('plan_approval_id','requirements_approval_id'):
+            self.store.put('approval',dict(self.store.get(job[name]),id='fictional-other-'+name,job_id=other_id))
+        self.store.put('job',{k:v for k,v in dict(job,id=other_id,title='Fictional other job',
+            plan_approval_id='fictional-other-plan_approval_id',
+            requirements_approval_id='fictional-other-requirements_approval_id').items() if k != 'state_revision'})
+        foreign_review = dict(review,id='fictional-other-review',job_id=other_id)
+        foreign = {k:v for k,v in dict(mine,id='fictional-other-package',job_id=other_id,
+            spec_source_approval_id='fictional-other-plan_approval_id',
+            feature_review_approval_id=foreign_review['id']).items() if k != 'state_revision'}
+        self.store.put('approval',foreign_review); foreign = self.store.put('work_package',foreign)
+        self.assertEqual((foreign['review_status'],foreign_review['status']),('approved','approved'))
+        self.assertEqual(self.store.get(foreign_review['id'])['payload'],review['payload'])
         tampered = copy.deepcopy(revised['workflow_revision'])
-        tampered['transfer_candidates'][0]['source_work_package_id'] = 'fictional-other-job-package'
+        tampered['transfer_candidates'][0].update(source_work_package_id=foreign['id'],source_approval_id=foreign_review['id'])
         self.store.update(revised['id'],workflow_revision=tampered); before = self.state()
         with self.assertRaises(ValueError): self.approve(revised,{'W1.01':'reuse'})
         self.assertEqual(self.state(),before)
+        self.assertFalse(self.events('workflow_evidence_transferred'))
         self.store.update(revised['id'],workflow_revision=revised['workflow_revision'])
         self.engine.decide(revised['id'],False,'Fictional decline')
         self.store.update(self.wps()['W1.01']['feature_review_approval_id'],status='superseded')
@@ -478,11 +494,26 @@ class TransferTests(unittest.TestCase):
 
     def test_revision_after_acceptance_reuses_only_the_chosen_package_and_is_not_accepted(self):
         self.base.independent_features()
-        for task in self.base.tasks():
-            if task.get('workflow_job_task') and task['status'] == 'queued': self.store.update(task['id'],status='cancelled')
-        self.store.update(self.job_id,status='accepted')
+        for _ in range(8):
+            if self.job()['status'] == 'awaiting_acceptance': break
+            self.base.finish_next()
+        self.assertEqual(self.job()['status'],'awaiting_acceptance')
+        completion = next(a for a in self.store.for_job('approval',self.job_id) if a['kind'] == 'completion' and a['status'] == 'pending')
+        # The user's own operation checks are recorded one by one, exactly as the screen does.
+        while completion['payload'].get('pending_items'):
+            replaced = self.engine.record_completion_evidence(completion['id'],0,0,'Fictional local operation verified',True)
+            completion = self.store.get(replaced['approval_id'])
+        self.engine.acknowledge_completion_review(completion['id'],True)
+        self.engine.accept_completion(completion['id'],'正式受領')
+        self.assertEqual(self.job()['status'],'accepted')
+        receipt = self.events('formal_acceptance_decided')
+        self.assertEqual(len(receipt),1)
+        self.assertTrue(self.engine.workflow_progress(self.job_id)['formal_receipt'])
+        recorded = self.store.get(completion['id'])
         self.approve(self.revise(),{'W1.01':'reuse'})
         self.assertEqual(self.job()['status'],'running')
+        self.assertEqual(self.store.get(completion['id']),recorded)
+        self.assertEqual(self.events('formal_acceptance_decided'),receipt)
         packages = {p['wbs_id']:p for p in self.engine.workflow_progress(self.job_id)['packages']}
         self.assertEqual((packages['W1.01']['feature_approved'],packages['W1.02']['feature_approved']),(True,False))
         self.assertFalse(self.engine.workflow_progress(self.job_id)['formal_receipt'])
