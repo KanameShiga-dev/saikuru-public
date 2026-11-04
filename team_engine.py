@@ -1315,7 +1315,11 @@ class Engine:
     def create_job(self, title, goal, project, auto_execute, planner_profile=None, document_source=None, attachment_ids=None, document_format=None,
                    skill_mode='auto', skill_ids=None, evaluation_mode=None, evaluation_confirmed=False, role_profiles=None,
                    token_reduction=None, comparison_id=None, route='full', light_scope_file=None, light_acceptance=None,
-                   validation_commands=None, registration_actor=None):
+                   validation_commands=None, registration_actor=None, workflow='standard'):
+        if workflow not in ('standard', 'wbs'):
+            raise ValueError('進め方の指定が不正です。')
+        if workflow == 'wbs' and self.config.get('workflow_contract_enabled', False) is not True:
+            raise ValueError('機能ごとに分けて進める方式（WBS）は、設定で有効になっていないため選べません。')
         from team_validation_gate import validate_commands
         validation_commands = validate_commands(validation_commands)
         if validation_commands and document_source:
@@ -1407,7 +1411,7 @@ class Engine:
 
                 raise ValueError('台帳でアーカイブ・移動処理中、またはフォルダの復旧が必要なプロジェクトです。')
 
-            job = self.store.put('job', {'id': uid(), 'title': title[:160], 'goal': goal,
+            record = {'id': uid(), 'title': title[:160], 'goal': goal,
 
                 'project': str(Path(project).resolve()), 'auto_execute': bool(auto_execute),
                 'validation_commands': validation_commands,
@@ -1423,7 +1427,12 @@ class Engine:
                 'route': route, 'status': 'awaiting_approval', 'created_at': now(),
                 'g2_gate_version': 1, 'g2_status': 'pending', 'g2_revision': 0,
                 **({'p0_contract_version': 1, 'goal_contract': initial_p0_contract(goal)}
-                   if p0_development else {})})
+                   if p0_development else {})}
+            if workflow == 'wbs':
+                # Selected jobs carry the workflow marker and its initial revisions in their very first save.
+                from team_p0_contract import initial_workflow
+                record = initial_workflow(record, enabled=True)
+            job = self.store.put('job', record)
 
             self.store.update(job['id'], intake_classification=intake, skill_selection=skill_selection, evaluation=evaluation)
             job['evaluation'] = evaluation

@@ -904,6 +904,7 @@ class Handler(BaseHTTPRequestHandler):
                                                 light_acceptance=body.get('light_acceptance'),
                                                 validation_commands=validation_commands,
                                                 registration_actor='authenticated_local_app_session',
+                                                workflow=body.get('workflow', 'standard'),
                                                 **document)
                         self.app.store.event('new_request_harness', ' '.join(prepared), job_id=job['id'])
                         if found['confirm']:

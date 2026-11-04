@@ -125,8 +125,8 @@ def default_config():
         # Whether a new development request carries the P0 contract (a stopped P0 job needs a maintenance credential to
         # resume). Default on; a one-person production folder keeps it off until it can be resumed from the screen.
         'p0_contract_enabled': True,
-        # Reserved for explicit new-job selection; no Engine/server enrollment
-        # is wired yet, so true alone currently changes no runtime behavior.
+        # Allows the intake screen's explicit WBS selection for a new development request.
+        # Default off: true alone never changes a request that did not select it.
         'workflow_contract_enabled': False,
         'computer_use_allowed': False,
         'decision': {'provider': 'ollama', 'model': 'tev1:0.8b', 'shadow': True},
