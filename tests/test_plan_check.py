@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 from eval.development_readiness import reacceptance_fixture as fixture
 from eval.development_readiness.reacceptance_fixture import make_fixture
 from server import Handler
+from team_store import Store
 from team_plan_check import MAX_REPAIRS, repair_note, workflow_plan_error
 
 D1, D2 = '架空の成果物1', '架空の成果物2'
@@ -148,11 +149,19 @@ class PlanRepairLoopTests(unittest.TestCase):
 
     def test_v02_repair_count_is_kept_in_the_stored_task(self):
         self.run_planner(plan(links=(D1, D2, A1)))
-        # A restart reloads the task from storage; the counter lives there, not in memory.
-        reloaded = self.store.get(self.planner_id, 'task')
-        self.assertEqual(reloaded['plan_check_repairs'], 1)
-        self.run_planner(plan(links=(D1, D2, A1)))
-        self.assertEqual(self.store.get(self.planner_id, 'task')['plan_check_repairs'], 2)
+        # Restart: close the Store and open a new one on the same files. The counter must come from disk.
+        directory = self.store.directory
+        self.store.db.close()
+        reopened = Store(directory)
+        self.addCleanup(reopened.db.close)
+        self.assertIsNot(reopened, self.store)
+        self.assertEqual(reopened.get(self.planner_id, 'task')['plan_check_repairs'], 1)
+        # The runner continues on the reopened Store: the next failure counts 2, the one after is the third.
+        self.store = self.server.app.store = self.engine.store = reopened
+        done = self.run_planner(plan(links=(D1, D2, A1)))
+        self.assertEqual((done['status'], done['plan_check_repairs']), ('queued', 2))
+        done = self.run_planner(plan(links=(D1, D2, A1)))
+        self.assertEqual((done['status'], done['plan_check_repairs']), ('blocked', MAX_REPAIRS))
 
     def test_repair_note_for_plan_errors_names_the_reason_and_keeps_tool_text_out(self):
         note = repair_note([], False, 'work_package_goal_label_unknown')

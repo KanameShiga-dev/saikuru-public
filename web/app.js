@@ -614,6 +614,7 @@ function planRevisionView(a){
   const titles=Object.fromEntries((plan.work_packages||[]).map(w=>[w.wbs_id,w.title]));
   const name=id=>titles[id]||id;
   box.append(el('h4',`機能の分け方（${(plan.work_packages||[]).length}件）`));
+  box.append(el('p','AIが成果物を D1・D2…、受入条件を A1・A2… の番号で指定した場合も、下では番号を成果物・受入条件の本文に置き換えて表示しています。存在しない番号や言い換えは、AIへの差し戻しになり、ここには表示されません。','hint'));
   const list=el('ol',undefined,'wp-list');
   for(const w of plan.work_packages||[]){
     const item=el('li',undefined,'wp-item'),head=el('p',undefined,'wp-head');

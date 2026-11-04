@@ -25,6 +25,10 @@ GUIDE = ('\n新方式の計画はwork_packagesとcheckpoint_pathsを含める。
          '依存はパッケージのラベルで示す。checkpoint_pathsは承認を求める具体的な相対ファイルだけ。'
          '質問時はtasks/work_packages/checkpoint_pathsを空配列にし、未承認の実行はしない。')
 
+LINK_DESCRIPTION = ('goal_contractの成果物・受入条件の文字列そのもの、または成果物はD1,D2,...、'
+                    '受入条件はA1,A2,...の番号（配列順で1始まり、大文字・半角の完全一致のみ）。'
+                    '存在しない番号や言い換えは差し戻される。')
+
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -189,8 +193,9 @@ def plan_schema(base):
     """Opt-in schema only; caller keeps every existing G3/goal/test field."""
     schema = deepcopy(base)
     strings = {'type': 'array', 'maxItems': 20, 'items': {'type': 'string'}}
+    links = dict(deepcopy(strings), description=LINK_DESCRIPTION)
     properties = {'wbs_id': {'type': 'string'}, 'title': {'type': 'string'},
-                  'goal_links': deepcopy(strings), 'done_when': deepcopy(strings), 'depends_on': deepcopy(strings)}
+                  'goal_links': links, 'done_when': deepcopy(strings), 'depends_on': deepcopy(strings)}
     properties['input_artifacts'] = {'type': 'array', 'maxItems': 20, 'items': {'type': 'object',
         'properties': {name: {'type': 'string'} for name in ('job_id', 'path', 'sha256')},
         'required': ['job_id', 'path', 'sha256'], 'additionalProperties': False}}
@@ -200,6 +205,7 @@ def plan_schema(base):
     schema['properties']['checkpoint_paths'] = {'type': 'array', 'maxItems': MAX_FILES, 'items': {'type': 'string'}}
     schema['required'] += ['work_packages', 'checkpoint_paths']
     task = schema['properties']['tasks']['items']
+    task['properties']['goal_links'] = dict(task['properties'].get('goal_links') or strings, description=LINK_DESCRIPTION)
     task['properties']['wbs_id'] = {'type': 'string'}
     task['required'].append('wbs_id')
     return schema

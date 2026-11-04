@@ -132,6 +132,16 @@ class GoalLinkNormalizationTests(unittest.TestCase):
     def test_guide_documents_the_label_rule(self):
         self.assertIn('D1', wbs.GUIDE); self.assertIn('A1', wbs.GUIDE); self.assertIn('1始まり', wbs.GUIDE)
 
+    def test_schema_describes_the_label_rule_for_package_and_task_links(self):
+        base = {'properties': {'tasks': {'items': {'properties': {'goal_links': {'type': 'array'}}, 'required': []}}},
+                'required': []}
+        schema = wbs.plan_schema(base)
+        package = schema['properties']['work_packages']['items']['properties']['goal_links']
+        task = schema['properties']['tasks']['items']['properties']['goal_links']
+        for links in (package, task):
+            self.assertIn('D1', links['description']); self.assertIn('A1', links['description'])
+        self.assertNotIn('description', base['properties']['tasks']['items']['properties']['goal_links'])
+
 
 class WorkPackageStorageTests(unittest.TestCase):
     def setUp(self):
