@@ -49,14 +49,38 @@ def issues(result, document_job):
     return found
 
 
-def repair_note(found, document_job):
-    lines = ['計画の点検で、担当の道具に合わない作業が見つかりました。計画を作り直してください。']
+def workflow_plan_error(job, result):
+    """'' when a planner result may be offered for approval, else the reason it must be regenerated.
+
+    Workflow v1 only. The result is normalized in place (D/A labels become contract text), so what is
+    stored, hashed and shown to the user is one canonical form. Only plan-shape errors qualify here.
+    """
+    from team_p0_contract import workflow_version, normalize_plan, validate_plan
+    if workflow_version(job) != 1:
+        return ''
+    try:
+        result.update(normalize_plan(job, result))
+        validate_plan(job, result)
+    except ValueError as exc:
+        return str(exc)
+    return ''
+
+
+def repair_note(found, document_job, invalid=''):
+    lines = []
+    if invalid:
+        lines.append('計画の検査で不備が見つかりました。計画を作り直してください。')
+        lines.append(f'- 不備：{invalid}')
+        lines.append('goal_linksは成果物・受入条件の原文、またはD1..Dn・A1..An（goal_contractの配列順で1始まり）の番号だけで書き、'
+                     '全ての成果物・受入条件をいずれかの作業パッケージが参照するようにしてください。質問への回答や未決事項を作り話で埋めないでください。')
+    if found:
+        lines.append('計画の点検で、担当の道具に合わない作業が見つかりました。計画を作り直してください。')
     for number, role, title, hit in found:
         lines.append(f'- 作業{number}「{title}」（{ROLE_NAMES.get(role, role)}）：コマンドの実行（{hit}）が必要ですが、この担当はコマンドを使えません。')
-    if document_job:
+    if found and document_job:
         lines.append('資料作成の依頼では、どの担当もコマンドを使えません。確認は資料用の専用ツール（list_files・read_file・read_document・media_environment など）でできる方法に変えてください。'
                      'ツールで確認できないことは、未確認として報告する項目にしてください。')
-    else:
+    elif found:
         lines.append('調査担当とレビュー担当は読み取り専用です（ファイルの一覧・内容の読み取り・Web検索だけ）。'
                      'コマンドが必要な確認（版の確認、ハッシュの計算、テストの実行など）は、コマンドを使える作業担当（builder）の作業に含めてください。'
                      'または、読み取りで確認できる方法に変えてください。')

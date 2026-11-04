@@ -14,7 +14,9 @@ MAX_PACKAGES = 6  # Preserve the existing initial plan's 1..6 Task bound.
 GUIDE = ('\n新方式の計画はwork_packagesとcheckpoint_pathsを含める。work_packagesは'
          'wbs_id,title,goal_links,done_when,depends_onを持つ。wbs_idは英字始まりの一意のラベルで、'
          'Task/session/attemptのIDではない。各tasks項目に既存ラベルのwbs_idを付け、'
-         'goal_linksは承認対象の成果物・受入条件の文字列をそのまま参照する。'
+         'goal_linksは承認対象の成果物・受入条件の文字列をそのまま参照する。または、成果物はD1,D2,...、'
+         '受入条件はA1,A2,...（goal_contractの配列順で1始まり、最大各20）の番号だけで参照できる。'
+         '番号は大文字・半角の完全一致のみ有効で、存在しない番号や言い換えは差し戻される。'
          'done_whenはこの作業パッケージの完了条件で、本人の機能確認・正式受領とは別。'
          '各パッケージは成果物と受入条件の両方へ対応させ、全体の成果物・受入条件を漏らさない。'
          'input_artifactsは既に存在する同じ依頼の登録済み先行成果物のjob_id,path,sha256。'
@@ -35,6 +37,37 @@ def _texts(value, label, *, required=True):
                    or len(item) > 500 for item in value) or len(value) != len(set(value))):
         raise ValueError('work_package_invalid_' + label)
     return value
+
+
+_GOAL_LABEL = re.compile(r'[DA][1-9][0-9]*')
+
+
+def normalize_goal_links(payload):
+    """New proposals only: expand exact D<n>/A<n> labels in goal_links to contract text.
+
+    Numbers follow the contract array order (1-based). Exact contract text is kept,
+    any other string is left for validation to reject, and an unknown number is
+    refused here. Never applied to stored approvals, so their digests stay put.
+    """
+    contract = payload.get('goal_contract')
+    table = {}
+    if isinstance(contract, dict):
+        for prefix, key in (('D', 'deliverables'), ('A', 'acceptance_criteria')):
+            items = contract.get(key)
+            if isinstance(items, list):
+                table.update({f'{prefix}{n}': text for n, text in enumerate(items, 1) if isinstance(text, str)})
+    texts = set(table.values())
+    result = deepcopy(payload)
+    for spec in (result.get('work_packages') or []) + (result.get('tasks') or []):
+        links = spec.get('goal_links') if isinstance(spec, dict) else None
+        if not isinstance(links, list):
+            continue
+        for index, link in enumerate(links):
+            if isinstance(link, str) and link not in texts and _GOAL_LABEL.fullmatch(link):
+                if link not in table:
+                    raise ValueError('work_package_goal_label_unknown')
+                links[index] = table[link]
+    return result
 
 
 def validate_work_packages(payload, job=None, *, check_current_inputs=True):

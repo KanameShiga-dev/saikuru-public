@@ -91,6 +91,48 @@ class WorkPackageValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError): validate_plan(selected, value)
 
 
+class GoalLinkNormalizationTests(unittest.TestCase):
+    """M02-I: D<n>/A<n> labels expand to exact contract text; everything else stays untouched or is refused."""
+    def labelled(self):
+        value = proposal()
+        value['work_packages'][0]['goal_links'] = ['D1', 'A1']
+        value['tasks'][0]['goal_links'] = ['A1']
+        return value
+
+    def test_labels_expand_by_contract_order_in_tasks_and_packages_without_mutating_input(self):
+        value = self.labelled(); before = copy.deepcopy(value)
+        result = wbs.normalize_goal_links(value)
+        self.assertEqual(value, before)
+        self.assertEqual(result['work_packages'][0]['goal_links'], ['Fictional lookup app', 'Fictional lookup tested'])
+        self.assertEqual(result['tasks'][0]['goal_links'], ['Fictional lookup tested'])
+        self.assertEqual(wbs.validate_work_packages(result), result['work_packages'])
+
+    def test_normalizing_is_idempotent_and_leaves_exact_text_alone(self):
+        value = proposal()
+        self.assertEqual(wbs.normalize_goal_links(value), value)
+        once = wbs.normalize_goal_links(self.labelled())
+        self.assertEqual(wbs.normalize_goal_links(once), once)
+
+    def test_unknown_number_is_refused_and_inexact_forms_are_not_guessed(self):
+        for label in ('D2', 'A2', 'D10'):
+            value = self.labelled(); value['tasks'][0]['goal_links'] = [label]
+            with self.assertRaises(ValueError): wbs.normalize_goal_links(value)
+        for label in ('d1', 'D 1', 'D1 ', 'D01', 'A0', 'Fictional lookup'):
+            value = self.labelled(); value['tasks'][0]['goal_links'] = [label]
+            result = wbs.normalize_goal_links(value)
+            self.assertEqual(result['tasks'][0]['goal_links'], [label])
+            with self.assertRaises(ValueError): wbs.validate_work_packages(result)
+
+    def test_label_plus_its_own_text_is_a_duplicate_and_partial_coverage_still_fails(self):
+        value = self.labelled(); value['work_packages'][0]['goal_links'] = ['D1', 'Fictional lookup app', 'A1']
+        with self.assertRaises(ValueError): wbs.validate_work_packages(wbs.normalize_goal_links(value))
+        value = self.labelled(); value['work_packages'][0]['goal_links'] = ['D1']
+        with self.assertRaises(ValueError): wbs.validate_work_packages(wbs.normalize_goal_links(value))
+
+    def test_guide_documents_the_label_rule(self):
+        self.assertIn('D1', wbs.GUIDE); self.assertIn('A1', wbs.GUIDE); self.assertIn('1始まり', wbs.GUIDE)
+
+
 class WorkPackageStorageTests(unittest.TestCase):
     def setUp(self):
         from tests.test_versioned_context import VersionedContextTests

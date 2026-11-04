@@ -86,6 +86,14 @@ def _items(value, label, required=False):
     return clean
 
 
+def normalize_plan(job, result):
+    """Canonical form of a NEW workflow v1 proposal (labels expanded); anything else is returned as is."""
+    if workflow_version(job) != 1 or not isinstance(result.get('work_packages'), list):
+        return result
+    from team_wbs import normalize_goal_links
+    return normalize_goal_links(result)
+
+
 def validate_plan(job, result, *, check_current_inputs=True):
     """Validate planner linkage before a plan is offered to the user."""
     proposed = result.get('goal_contract')

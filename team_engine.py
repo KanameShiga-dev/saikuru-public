@@ -1570,7 +1570,7 @@ class Engine:
         """Authenticated user proposal only; no provider run or scope mutation."""
         if actor != 'authenticated_local_app_session' or getattr(self.store._worker, 'task', None) is not None:
             raise ValueError('workflow_revision_user_action_required')
-        from team_p0_contract import workflow_version, validate_plan
+        from team_p0_contract import workflow_version, validate_plan, normalize_plan
         with self.store.atomic():
             job = self.store.get(job_id, 'job')
             if (workflow_version(job) != 1 or job['plan_revision'] < 1
@@ -1584,6 +1584,7 @@ class Engine:
                 raise ValueError('workflow_revision_writer_not_stopped')
             if any(a['status'] == 'pending' and a['kind'] != 'completion' for a in self.store.for_job('approval', job_id)):
                 raise ValueError('workflow_revision_pending_decision')
+            payload = normalize_plan(job, payload)
             validate_plan(job, payload)
             if payload.get('questions'):
                 raise ValueError('workflow_revision_questions_unresolved')
@@ -4106,8 +4107,7 @@ class Engine:
             + ('\n\nこの依頼の達成条件を、元の依頼を変えずにgoal_contractへ整理する。'
                'primary_goalは利用者が達成したいこと、deliverablesは実際の完成物、'
                'acceptance_criteriaは完成物で観測できる条件にする。'
-               '各tasksのgoal_linksには対応するdeliverablesまたはacceptance_criteriaの文面を正確に記す。'
-               '目的に結び付かない最適化・内部改修は計画へ入れない。'
+               '各tasksのgoal_linksには対応するdeliverablesまたはacceptance_criteriaの文面を正確に記す。'               '目的に結び付かない最適化・内部改修は計画へ入れない。'
                if ctx.task['role'] == 'planner' and job.get('p0_contract_version') == 1 else '')
             + ('\n\n承認済みの完成条件: '
                + json.dumps(job.get('goal_contract') or {}, ensure_ascii=False)
@@ -4286,7 +4286,15 @@ class Engine:
 
                     raise ProviderError('計画に作業内容がありません。')
 
-            if self.store.get(task['job_id']).get('p0_contract_version') == 1:
+            if self.store.get(task['job_id']).get('workflow_contract_version') == 1:
+                # Plan-shape errors are repaired through the planner loop in _finish (bounded, persisted count);
+                # here only the canonical form is fixed so the stored result and the approval payload agree.
+                from team_p0_contract import normalize_plan
+                try:
+                    result.update(normalize_plan(self.store.get(task['job_id'], 'job'), result))
+                except ValueError:
+                    pass
+            elif self.store.get(task['job_id']).get('p0_contract_version') == 1:
                 from team_p0_contract import validate_plan as validate_p0_plan
                 try:
                     validate_p0_plan(self.store.get(task['job_id'], 'job'), result)
@@ -4561,22 +4569,25 @@ class Engine:
 
             elif task['role'] == 'planner':
                 from team_plan_check import issues as plan_issues, repair_note, MAX_REPAIRS
+                from team_plan_check import workflow_plan_error
                 found = plan_issues(result, bool(job.get('document_source')))
-                if found:
+                invalid = workflow_plan_error(job, result)
+                if found or invalid:
                     repairs = task.get('plan_check_repairs', 0)
-                    note = repair_note(found, bool(job.get('document_source')))
+                    note = repair_note(found, bool(job.get('document_source')), invalid)
                     if repairs < MAX_REPAIRS:
                         # The planner can fix a role/tool mismatch itself: send the plan back instead of failing later.
                         instruction = compact_instruction(task['instruction'], note)
                         self.store.update(task['id'], status='queued', instruction=instruction, result=None, summary='',
                                           plan_check_repairs=repairs + 1, attempt=task['attempt'] + (0 if task.get('current_attempt') else 1))
                         self.store.update(job['id'], status='planning')
-                        self.store.event('plan_check_repair', '計画の点検で担当の道具に合わない作業が見つかったため、計画担当に作り直しを依頼しました（'
-                                         + str(repairs + 1) + '回目）。', task['id'], job['id'])
+                        self.store.event('plan_check_repair', '計画の点検で' + ('計画の不備' if invalid else '担当の道具に合わない作業')
+                                         + 'が見つかったため、計画担当に作り直しを依頼しました（' + str(repairs + 1) + '回目）。', task['id'], job['id'])
                         return
                     self.store.update(task['id'], status='blocked', summary=note)
                     self.store.update(job['id'], status='blocked')
-                    self.store.event('plan_check_failed', '計画の点検：作り直しを' + str(MAX_REPAIRS) + '回依頼しても担当の道具に合わない作業が残りました。',
+                    self.store.event('plan_check_failed', '計画の点検：作り直しを' + str(MAX_REPAIRS) + '回依頼しても'
+                                     + ('計画の不備' if invalid else '担当の道具に合わない作業') + 'が残りました。利用者の判断を待っています。',
                                      task['id'], job['id'])
                     return
                 from team_document_capabilities import require_plan

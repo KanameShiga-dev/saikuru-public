@@ -53,6 +53,21 @@ class P0SwitchTests(unittest.TestCase):
         job = engine.create_job('sample', 'local goal', project, True)
         self.assertEqual(job.get('p0_contract_version'), 1)
 
+    def test_plan_normalization_applies_only_to_new_workflow_proposals(self):
+        """M02-I: legacy plans and stored approvals keep their exact payload (and so their digest)."""
+        from team_p0_contract import normalize_plan
+        plan = {'goal_contract': {'deliverables': ['x'], 'acceptance_criteria': ['y']},
+                'work_packages': [{'goal_links': ['D1', 'A1']}], 'tasks': [{'goal_links': ['D1']}]}
+        legacy = {'goal': 'g', 'p0_contract_version': 1}
+        self.assertIs(normalize_plan(legacy, plan), plan)
+        workflow = dict(legacy, workflow_contract_version=1, request_origin='new', route='full', document_source=None)
+        without_packages = {'tasks': plan['tasks']}
+        self.assertIs(normalize_plan(workflow, without_packages), without_packages)
+        expanded = normalize_plan(workflow, plan)
+        self.assertEqual(expanded['work_packages'][0]['goal_links'], ['x', 'y'])
+        self.assertEqual(plan['work_packages'][0]['goal_links'], ['D1', 'A1'])
+        self.assertEqual(normalize_plan(workflow, expanded), expanded)
+
     def test_a_non_boolean_value_is_refused(self):
         for value in ('false', 0, None, 'no'):
             with self.subTest(value=value):
