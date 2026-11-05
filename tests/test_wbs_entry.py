@@ -203,12 +203,33 @@ class WbsEntryTests(WbsFixture):
         # M09 live run: the plan was made, then the Claude builder stopped before its call for want of .local/test-tmp.
         self.enable()
         (self.root / '.local' / 'test-tmp').rmdir()
+        config = self.server.app.engine.config
+        builder = config['profiles'][config['roles']['builder']]
+        self.assertEqual(builder['adapter'], 'claude')
         status, result = self.post('/api/jobs', {'consent': True, 'title': '架空のWBS依頼', 'goal': '合成の依頼を登録する。',
                                                  'project': str(self.root), 'auto_execute': False, 'attachment_ids': [],
                                                  'skill_mode': 'auto', 'workflow': 'wbs'})
         self.assertEqual(status, 400)
         self.assertIn('.local/test-tmp', json.dumps(result, ensure_ascii=False))
         self.assertEqual(self.jobs(), [])
+
+    def test_wbs_with_a_non_claude_builder_does_not_need_the_claude_test_temp_folder(self):
+        # M09-Q review #29: only the Claude builder uses .local/test-tmp, so another builder must not be refused.
+        self.enable()
+        (self.root / '.local' / 'test-tmp').rmdir()
+        engine = self.server.app.engine
+        settings = dict(engine.config.get('provider_settings') or {}, enabled=['codex', 'claude'])
+        patcher = patch.dict(engine.config, {'provider_settings': settings})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        codex = {'adapter': 'codex', 'model': 'gpt-6-sol', 'effort': 'medium'}
+        # Called on the engine: the fixture App has no model catalogue for the HTTP handler's per-request check.
+        job = engine.create_job('架空のWBS依頼', '合成の依頼を登録する。', str(self.root), False, workflow='wbs',
+                                role_profiles={'builder': codex})
+        self.assertEqual(job['role_overrides']['builder']['adapter'], 'codex')
+        with self.assertRaisesRegex(ValueError, '.local/test-tmp'):
+            engine.create_job('架空のWBS依頼', '合成の依頼を登録する。', str(self.root), False, workflow='wbs',
+                              role_profiles={'builder': {'adapter': 'claude', 'model': 'sonnet', 'effort': 'medium'}})
 
     def test_invalid_selection_is_rejected_without_fallback(self):
         self.enable()
