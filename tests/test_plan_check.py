@@ -55,6 +55,7 @@ class PlanRepairLoopTests(unittest.TestCase):
         (root / 'SCOPE.md').write_text('# Synthetic scope\n', encoding='utf-8')
         workspace.git(root, 'add', '--', 'SCOPE.md')
         workspace.git(root, 'commit', '-m', 'Fictional scope')
+        (root / '.local' / 'test-tmp').mkdir(parents=True)  # the Claude builder's test temp (empty, so Git ignores it)
         app.engine.config['approved_roots'] = app.config['approved_roots'] = [str(root)]
         app.engine.config['workflow_contract_enabled'] = True
         self.store, self.engine = app.store, app.engine

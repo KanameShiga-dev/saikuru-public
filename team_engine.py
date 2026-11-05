@@ -1339,6 +1339,11 @@ class Engine:
             if problem:
                 raise ValueError('機能ごとに分けて進める方式（WBS）は、正式な Worktree のフォルダーでだけ選べます'
                                  f'（{problem}）。new_worktree.py などの正式な入口で作った Worktree を選んでください。')
+            # The Claude builder needs it before any provider call (team_adapters._set_scoped_test_temp).
+            from team_adapters import scoped_test_temp
+            if scoped_test_temp(project) is None:
+                raise ValueError('機能ごとに分けて進める方式（WBS）では、プロジェクトに試験の一時領域 .local/test-tmp が必要です'
+                                 '（リンクでない通常のフォルダー）。.local/ を Git の対象外にしてから作成し、もう一度登録してください。')
         from team_validation_gate import validate_commands
         validation_commands = validate_commands(validation_commands)
         if validation_commands and document_source:

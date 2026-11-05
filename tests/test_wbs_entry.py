@@ -39,6 +39,7 @@ class WbsFixture(unittest.TestCase):
         # Files outside the approved scope must not be dirty, so the scope file is committed in the fictional repository.
         self.workspace.git(root, 'add', '--', 'SCOPE.md')
         self.workspace.git(root, 'commit', '-m', 'Fictional scope')
+        (root / '.local' / 'test-tmp').mkdir(parents=True)  # the Claude builder's test temp (empty, so Git ignores it)
         return root
 
     def setUp(self):
@@ -197,6 +198,17 @@ class WbsEntryTests(WbsFixture):
         self.assertIn('workspace_formal_worktree_required', json.dumps(result, ensure_ascii=False))
         self.assertEqual(self.jobs(), [])
         self.assertEqual(self.register(workflow='wbs'), 200)  # the formal Worktree is still accepted
+
+    def test_wbs_without_the_builder_test_temp_folder_is_rejected_with_the_reason(self):
+        # M09 live run: the plan was made, then the Claude builder stopped before its call for want of .local/test-tmp.
+        self.enable()
+        (self.root / '.local' / 'test-tmp').rmdir()
+        status, result = self.post('/api/jobs', {'consent': True, 'title': '架空のWBS依頼', 'goal': '合成の依頼を登録する。',
+                                                 'project': str(self.root), 'auto_execute': False, 'attachment_ids': [],
+                                                 'skill_mode': 'auto', 'workflow': 'wbs'})
+        self.assertEqual(status, 400)
+        self.assertIn('.local/test-tmp', json.dumps(result, ensure_ascii=False))
+        self.assertEqual(self.jobs(), [])
 
     def test_invalid_selection_is_rejected_without_fallback(self):
         self.enable()

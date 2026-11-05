@@ -31,15 +31,24 @@ class ProviderError(Exception):
         self.model_call_state = model_call_state if model_call_state in ('not_started', 'started') else 'unknown'
 
 
-def _set_scoped_test_temp(ctx, env):
-    job = ctx.engine.store.get(ctx.task['job_id'], 'job')
-    if ctx.task.get('role') != 'builder':
-        return
-    project_root = Path(ctx.project).resolve()
+def scoped_test_temp(project):
+    """The project's .local/test-tmp folder for a Claude builder's test temp files, or None when it is missing,
+    a link, or resolves outside the project. The project prepares it; 采来 never creates it."""
+    project_root = Path(project).resolve()
     test_temp = project_root / '.local' / 'test-tmp'
     is_junction = getattr(test_temp, 'is_junction', lambda: False)
     if (test_temp.is_symlink() or is_junction() or not test_temp.is_dir()
             or not test_temp.resolve().is_relative_to(project_root)):
+        return None
+    return test_temp.resolve()
+
+
+def _set_scoped_test_temp(ctx, env):
+    job = ctx.engine.store.get(ctx.task['job_id'], 'job')
+    if ctx.task.get('role') != 'builder':
+        return
+    test_temp = scoped_test_temp(ctx.project)
+    if test_temp is None:
         raise ProviderError('指定テストの一時領域が許可範囲内にありません。テストは開始していません。',
                             'test_temp_scope')
     # Scope TEMP/TMP to the registered project for this Claude builder process and
