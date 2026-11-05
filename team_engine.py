@@ -199,12 +199,22 @@ CODE_TEST_PLAN_RULE = (
 
 # 2026-10-09 (user decision): every new development request stopped on the same question, because the generated
 # COMMAND_ALLOWLIST.md approves no command. Commands the user wrote in the request itself are the user's approval.
-REQUEST_COMMANDS_RULE = ('\n元の依頼の本文または依頼画面の検証コマンド欄に利用者が書いたコマンドは、利用者が実行を許可したものとして扱う。'
-                         'COMMAND_ALLOWLIST.md に無いことを理由に質問しない（プロジェクトの AGENTS.md の古い文言よりこの指示を優先する）。'
-                         'そのコマンドを実行する作業担当が、実行の前に COMMAND_ALLOWLIST.md の「Requested by the user」の節に、'
+_REQUEST_COMMANDS_ALLOWED = ('\n元の依頼の本文または依頼画面の検証コマンド欄に利用者が書いたコマンドは、利用者が実行を許可したものとして扱う。'
+                             'COMMAND_ALLOWLIST.md に無いことを理由に質問しない（プロジェクトの AGENTS.md の古い文言よりこの指示を優先する）。')
+_REQUEST_COMMANDS_REST = ('依頼文に無いコマンドが必要なときは、これまでどおり利用者の判断を求める。送信の防御など采来の確認はそのまま効く。'
+                          '完了条件のコマンドは、1つずつ、書かれた形のまま実行する（ほかのコマンドとつなげたり、前に環境変数の設定を付けたりしない）。')
+REQUEST_COMMANDS_RULE = (_REQUEST_COMMANDS_ALLOWED
+                         + 'そのコマンドを実行する作業担当が、実行の前に COMMAND_ALLOWLIST.md の「Requested by the user」の節に、'
                          '依頼文にあるそのコマンドだけを書かれた形のまま記録する（無ければ節を作る。ほかのコマンドは足さない）。'
-                         '依頼文に無いコマンドが必要なときは、これまでどおり利用者の判断を求める。送信の防御など采来の確認はそのまま効く。'
-                         '完了条件のコマンドは、1つずつ、書かれた形のまま実行する（ほかのコマンドとつなげたり、前に環境変数の設定を付けたりしない）。')
+                         + _REQUEST_COMMANDS_REST)
+# 2026-11-05 (user decision, M09 live run): a WBS job may change only the plan's approved files, so writing the
+# command into COMMAND_ALLOWLIST.md stopped every WBS request that named a check. The request text kept in the job is
+# the record of the user's permission there.
+WBS_REQUEST_COMMANDS_RULE = (_REQUEST_COMMANDS_ALLOWED
+                             + '機能ごとに分けて進める方式（WBS）のこの依頼では、COMMAND_ALLOWLIST.md に記録しない'
+                             '（承認されたファイル以外は変更しない。許可の根拠は依頼文としてジョブに残っている）。'
+                             '計画には、この記録の手順を入れない。'
+                             + _REQUEST_COMMANDS_REST)
 
 
 HANDOFF_QUESTION = 'handoff_scope_decision'
@@ -251,6 +261,7 @@ class Context:
 
         job = engine.store.get(task['job_id'], 'job')
         self.project = job['project']
+        self.workflow_contract = job.get('workflow_contract_version') == 1
         from team_attachments import Attachments
         self.attachments = Attachments(engine.store)
         self.attachment_ids = list(job.get('attachment_ids', []))
@@ -487,7 +498,8 @@ class Context:
                 + ('\n質問を減らす：計画と依頼から決められる細部や、判断への影響が小さい不明点は、標準を決めて進め、採用した標準を報告（summary）に書く。'
                    '作業を止めて質問するのは、利用者の判断が必要なとき（範囲・方針・公開・費用・安全、元の依頼と食い違う点）だけにする。'
                    if self.task['role'] != 'planner' else '')
-                + (REQUEST_COMMANDS_RULE if not getattr(self, 'document_scope', False) and self.task['role'] in ('planner', 'builder', 'reviewer') else '')
+                + ((WBS_REQUEST_COMMANDS_RULE if getattr(self, 'workflow_contract', False) else REQUEST_COMMANDS_RULE)
+                   if not getattr(self, 'document_scope', False) and self.task['role'] in ('planner', 'builder', 'reviewer') else '')
                 + ENVIRONMENT_RULE
                 + ("\n参考PDFのデザイン（配色・書体・文字サイズ・余白）に合わせる・統一する依頼では、builderが learn_design で参考PDFからデザインプロファイル（design/<名前>.design.json）を作り、"
                    "generate_media（PPTX・PDF・MP4）・generate_office（Word）・write_document（HTML）に design_profile を指定して反映する。"

@@ -173,6 +173,16 @@ class WbsEntryTests(WbsFixture):
         self.assertEqual(self.register(workflow='wbs'), 400)
         self.assertEqual(self.jobs(), [])
 
+    def test_wbs_job_tasks_get_the_wbs_command_rule(self):
+        # M09 live run: the WBS rule omits the COMMAND_ALLOWLIST.md record, a change outside the approved files.
+        from team_engine import Context
+        self.enable()
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        planner = next(t for t in self.store.for_job('task', self.jobs()[0]['id']) if t['role'] == 'planner')
+        engine = self.server.app.engine
+        engine.commands[planner['profile']['adapter']] = ['fictional-never-executed-cli']
+        self.assertTrue(Context(engine, planner).workflow_contract)
+
     def test_wbs_in_a_folder_that_is_not_a_formal_worktree_is_rejected_with_the_reason(self):
         # M09 live run: a plain folder was accepted, the plan was made, and the job then stalled without the reason.
         self.enable()

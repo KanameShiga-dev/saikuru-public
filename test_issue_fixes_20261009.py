@@ -49,7 +49,8 @@ class RequestCommandsTest(unittest.TestCase):
     def test_rule_reaches_planner_builder_reviewer_and_the_template(self):
         from team_engine import REQUEST_COMMANDS_RULE
         source = Path(__file__).with_name('team_engine.py').read_text(encoding='utf-8')
-        self.assertIn("(REQUEST_COMMANDS_RULE if not getattr(self, 'document_scope', False) and self.task['role'] in ('planner', 'builder', 'reviewer')",
+        self.assertIn("((WBS_REQUEST_COMMANDS_RULE if getattr(self, 'workflow_contract', False) else REQUEST_COMMANDS_RULE)\n"
+                      "                   if not getattr(self, 'document_scope', False) and self.task['role'] in ('planner', 'builder', 'reviewer')",
                       source)
         self.assertIn('質問しない', REQUEST_COMMANDS_RULE)
         self.assertIn('Requested by the user', REQUEST_COMMANDS_RULE)
@@ -84,6 +85,40 @@ class ReviewScopeAndEnvironmentTest(unittest.TestCase):
                         from team_common_agents import load_agent
                         ctx.prepare_agent(load_agent(role, 'claude'))
                         self.assertIn(ENVIRONMENT_RULE.strip()[:40], ctx.agent_system_instructions)
+            finally:
+                engine.shutdown.set()
+                engine.handoff.close()
+                store.db.close()
+
+    def test_wbs_job_is_not_asked_to_record_the_command_outside_its_approved_files(self):
+        # 2026-11-05 M09 live run: the record in COMMAND_ALLOWLIST.md is a change outside a WBS plan's approved files.
+        from team_config import default_config
+        from team_engine import Context, Engine, REQUEST_COMMANDS_RULE, WBS_REQUEST_COMMANDS_RULE
+        from team_store import Store
+        self.assertIn('質問しない', WBS_REQUEST_COMMANDS_RULE)
+        self.assertIn('1つずつ、書かれた形のまま', WBS_REQUEST_COMMANDS_RULE)
+        self.assertNotIn('Requested by the user', WBS_REQUEST_COMMANDS_RULE)
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp, 'p')
+            project.mkdir()
+            store = Store(temp)
+            config = default_config()
+            config['approved_roots'] = [str(project)]
+            engine = Engine(store, config, {'codex': ['fixture'], 'claude': ['fixture']}, 'http://127.0.0.1:1')
+            try:
+                from team_common_agents import load_agent
+                job = engine.create_job('開発', '作る', str(project), True)
+                for wbs in (False, True):
+                    for role in ('planner', 'builder', 'reviewer'):
+                        with self.subTest(wbs=wbs, role=role):
+                            ctx = Context(engine, engine.new_task(job, 'x', 'x', role))
+                            self.assertFalse(ctx.workflow_contract)  # read from the standard job
+                            # A WBS job needs a formal Worktree (tests/test_wbs_entry.py); only the flag matters here.
+                            ctx.workflow_contract = wbs
+                            ctx.prepare_agent(load_agent(role, 'claude'))
+                            expected = WBS_REQUEST_COMMANDS_RULE if wbs else REQUEST_COMMANDS_RULE
+                            self.assertIn(expected.strip(), ctx.agent_system_instructions)
+                            self.assertEqual('Requested by the user' in ctx.agent_system_instructions, not wbs)
             finally:
                 engine.shutdown.set()
                 engine.handoff.close()
