@@ -29,9 +29,16 @@ class WbsFixture(unittest.TestCase):
     """Real HTTP handler and engine on a temporary store; subclasses choose the project folder."""
 
     def make_root(self, base):
-        root = (base / 'project').resolve()
-        root.mkdir(parents=True, exist_ok=True)
+        # A WBS job is accepted only in a formal Worktree (M09 live run), so the fixture builds a fictional one.
+        from tests.test_workspace_boundary import WorkspaceTests
+        self.workspace = WorkspaceTests()
+        self.addCleanup(self.workspace.doCleanups)
+        self.workspace.setUp()  # skips when the formal worktree tools are not installed
+        root = self.workspace.project.resolve()
         (root / 'SCOPE.md').write_text('# Synthetic scope\n', encoding='utf-8')
+        # Files outside the approved scope must not be dirty, so the scope file is committed in the fictional repository.
+        self.workspace.git(root, 'add', '--', 'SCOPE.md')
+        self.workspace.git(root, 'commit', '-m', 'Fictional scope')
         return root
 
     def setUp(self):
@@ -166,6 +173,21 @@ class WbsEntryTests(WbsFixture):
         self.assertEqual(self.register(workflow='wbs'), 400)
         self.assertEqual(self.jobs(), [])
 
+    def test_wbs_in_a_folder_that_is_not_a_formal_worktree_is_rejected_with_the_reason(self):
+        # M09 live run: a plain folder was accepted, the plan was made, and the job then stalled without the reason.
+        self.enable()
+        plain = self.root.parent.parent.parent / 'plain-project'
+        plain.mkdir()
+        (plain / 'SCOPE.md').write_text('# Synthetic scope\n', encoding='utf-8')
+        self.server.app.engine.config['approved_roots'].append(str(plain))
+        status, result = self.post('/api/jobs', {'consent': True, 'title': '架空のWBS依頼', 'goal': '合成の依頼を登録する。',
+                                                 'project': str(plain), 'auto_execute': False, 'attachment_ids': [],
+                                                 'skill_mode': 'auto', 'workflow': 'wbs'})
+        self.assertEqual(status, 400)
+        self.assertIn('workspace_formal_worktree_required', json.dumps(result, ensure_ascii=False))
+        self.assertEqual(self.jobs(), [])
+        self.assertEqual(self.register(workflow='wbs'), 200)  # the formal Worktree is still accepted
+
     def test_invalid_selection_is_rejected_without_fallback(self):
         self.enable()
         for value in ('WBS', 'wbs ', '', 1, True, None, ['wbs']):
@@ -241,18 +263,6 @@ class WbsNormalPathTests(WbsFixture):
     Only the provider's answers and the person's clicks are simulated. Planner, scheduler (tick), worker (_run),
     plan validation, local test gate, reviews, feature decisions and acceptance are the product code.
     """
-
-    def make_root(self, base):
-        from tests.test_workspace_boundary import WorkspaceTests
-        self.workspace = WorkspaceTests()
-        self.addCleanup(self.workspace.doCleanups)
-        self.workspace.setUp()  # skips when the formal worktree tools are not installed
-        root = self.workspace.project.resolve()
-        (root / 'SCOPE.md').write_text('# Synthetic scope\n', encoding='utf-8')
-        # Files outside the approved scope must not be dirty, so the scope file is committed in the fictional repository.
-        self.workspace.git(root, 'add', '--', 'SCOPE.md')
-        self.workspace.git(root, 'commit', '-m', 'Fictional scope')
-        return root
 
     def setUp(self):
         super().setUp()

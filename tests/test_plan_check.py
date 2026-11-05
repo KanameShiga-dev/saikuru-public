@@ -46,9 +46,15 @@ class PlanRepairLoopTests(unittest.TestCase):
                                  self.server.app.store.db.close(), self.server.app.data_lock.close()))
         app = self.server.app
         app.attachments = SimpleNamespace(select=lambda ids: [])
-        root = (Path(temp.name) / 'project').resolve()
-        root.mkdir(parents=True, exist_ok=True)
+        # A WBS job is accepted only in a formal Worktree, so a fictional one is built (skips without the tools).
+        from tests.test_workspace_boundary import WorkspaceTests
+        workspace = WorkspaceTests()
+        self.addCleanup(workspace.doCleanups)
+        workspace.setUp()
+        root = workspace.project.resolve()
         (root / 'SCOPE.md').write_text('# Synthetic scope\n', encoding='utf-8')
+        workspace.git(root, 'add', '--', 'SCOPE.md')
+        workspace.git(root, 'commit', '-m', 'Fictional scope')
         app.engine.config['approved_roots'] = app.config['approved_roots'] = [str(root)]
         app.engine.config['workflow_contract_enabled'] = True
         self.store, self.engine = app.store, app.engine

@@ -52,9 +52,11 @@ def execution_workspace(project, approved_paths):
 
     Registration proves current Git membership, not historical invocation of
     an entry script. New checkouts must use the displayed formal entry.
+    approved_paths=None checks the layout only (job registration, before a plan
+    names the paths) and returns None instead of a boundary.
     """
     from team_checkpoint import _git, _status, _path, scope_paths
-    paths = scope_paths(approved_paths)
+    paths = None if approved_paths is None else scope_paths(approved_paths)
     execution = Path(os.path.abspath(project))
     if execution.parent.name == 'Worktrees':
         layout = 'saikuru_dedicated'
@@ -118,6 +120,8 @@ def execution_workspace(project, approved_paths):
     if (record.get('branch') != branch or record.get('HEAD') != head or branch == integration_branch
             or not all(re.fullmatch('[0-9a-f]{40,64}', value) for value in (head, integration_head))):
         raise ValueError('workspace_branch_or_head_invalid')
+    if paths is None:
+        return None
     for name in paths: _path(execution, name)
     if any(row.startswith(b'160000 ') for row in _git(execution, ['ls-files','--stage','-z']).split(b'\0')):
         raise ValueError('workspace_submodule_unsupported')
@@ -141,6 +145,17 @@ def workspace_projection(project, approved_paths):
         known = str(error)
         reason = known if re.fullmatch('workspace_[a-z_]+', known) else 'workspace_identity_unavailable'
         return {'schema_version':1,'status':'blocked','reason':reason,'permission_effect':'none','automatic_git_mutation':False}
+
+
+def workspace_registration_problem(project):
+    """Why a WBS job cannot run in this folder ('workspace_...'), or None when its layout is a formal Worktree.
+    The plan's paths and dirty files are checked later, when the plan binds the boundary."""
+    try:
+        execution_workspace(project, None)
+    except (ValueError, OSError, UnicodeError, TypeError) as error:
+        known = str(error)
+        return known if re.fullmatch('workspace_[a-z_]+', known) else 'workspace_identity_unavailable'
+    return None
 
 
 def workspace_identity(boundary):

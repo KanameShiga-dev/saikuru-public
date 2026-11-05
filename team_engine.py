@@ -1320,6 +1320,13 @@ class Engine:
             raise ValueError('進め方の指定が不正です。')
         if workflow == 'wbs' and self.config.get('workflow_contract_enabled', False) is not True:
             raise ValueError('機能ごとに分けて進める方式（WBS）は、設定で有効になっていないため選べません。')
+        if workflow == 'wbs':
+            # Checked before any record or provider call; the plan would otherwise be made and then stall.
+            from team_harness import workspace_registration_problem
+            problem = workspace_registration_problem(project)
+            if problem:
+                raise ValueError('機能ごとに分けて進める方式（WBS）は、正式な Worktree のフォルダーでだけ選べます'
+                                 f'（{problem}）。new_worktree.py などの正式な入口で作った Worktree を選んでください。')
         from team_validation_gate import validate_commands
         validation_commands = validate_commands(validation_commands)
         if validation_commands and document_source:
