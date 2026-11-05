@@ -21,6 +21,9 @@ from pathlib import Path
 
 
 SKIP_DIRECTORIES = {'.git'}
+# 2026-11-05 (M09 live run, user decision): the Claude builder's TEMP points here (team_adapters.scoped_test_temp)
+# and the CLI rewrites its own cache files in it after every run, so counting it expired every evidence.
+SCRATCH_DIRECTORIES = {'.local/test-tmp'}
 SKIP_SUFFIXES = set()
 MAX_FILES = 5000
 MAX_BYTES = 256_000_000
@@ -212,6 +215,7 @@ def snapshot(project, exclude_directory=None, validation_commands=None):
         current = Path(base)
         directories[:] = sorted(name for name in directories
                                 if name not in SKIP_DIRECTORIES
+                                and (current / name).relative_to(root).as_posix() not in SCRATCH_DIRECTORIES
                                 and (excluded is None or (current / name).relative_to(root).as_posix() != excluded))
         if any((current / name).is_symlink() for name in directories):
             raise ValueError('検証対象にシンボリックリンクが含まれます。')
