@@ -165,6 +165,22 @@ class ReleaseManifest(unittest.TestCase):
             self.assertEqual(caught.exception.code, 'excluded_path', path)
             self.assertEqual(deploy.excluded_reason(path), 'excluded folder', path)
 
+    def test_aliases_of_an_excluded_folder_are_refused_by_the_resolved_path(self):
+        # M10-Q review #32: Win32 strips trailing dots and spaces, so data./x.txt opens data/x.txt. The resolved path is
+        # checked too, which also covers other spellings of the same folder (short names, case).
+        aliases = [p for p in ('data./x.txt', 'data /x.txt', 'Data./x.txt')
+                   if (self.root / p).resolve() == (self.root / 'data' / 'x.txt').resolve()]
+        if not aliases:
+            self.skipTest('this filesystem does not resolve trailing dots or spaces')
+        body = (self.root / 'data' / 'x.txt').read_bytes()
+        for path in aliases:
+            with self.assertRaises(deploy.DeploymentError, msg=path) as caught:
+                deploy.build_release_manifest(self.root, ['app.py', path], COMMIT)
+            self.assertEqual(caught.exception.code, 'excluded_path', path)
+            forged = {'format': 1, 'commit': COMMIT, 'files': [
+                {'path': path, 'size': len(body), 'sha256': hashlib.sha256(body).hexdigest(), 'kind': 'txt'}]}
+            self.assertEqual(deploy.verify_release_manifest(self.root, forged), ['not allowed: ' + path], path)
+
     def test_bad_paths_and_commits_are_refused(self):
         for path, code in (('../outside.py', 'bad_path'), (str(self.root / 'app.py'), 'bad_path'),
                            ('docs\\guide.md', 'bad_path'), ('nope.py', 'missing_path')):

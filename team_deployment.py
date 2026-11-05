@@ -296,6 +296,12 @@ def excluded_reason(relative):
     return None
 
 
+def resolved_excluded_reason(root, file):
+    """excluded_reason of the path the filesystem actually opens (M10-Q review #32): Windows strips trailing dots and
+    spaces and accepts short names and any case, so data./x.txt can open data/x.txt. resolve() gives the real names."""
+    return excluded_reason(file.relative_to(root).as_posix())
+
+
 def build_release_manifest(root, allowlist, commit):
     """Deterministic manifest from an explicit allowlist. An excluded or missing path is an error, never skipped."""
     root = Path(root).resolve()
@@ -312,6 +318,9 @@ def build_release_manifest(root, allowlist, commit):
         file = (root / relative).resolve()
         if not file.is_relative_to(root) or not file.is_file():
             raise DeploymentError('missing_path', '配布候補のファイルが見つかりません: ' + relative)
+        reason = resolved_excluded_reason(root, file)
+        if reason:
+            raise DeploymentError('excluded_path', f'{relative}: 実際の場所が{reason}のため配布候補にできません。')
         files.append({'path': relative, 'size': file.stat().st_size, 'sha256': _sha256(file),
                       'kind': file.suffix.lstrip('.').lower() or 'none'})
     return {'format': 1, 'commit': commit, 'files': files}
@@ -334,6 +343,8 @@ def verify_release_manifest(root, manifest):
         file = (root / relative).resolve()
         if not file.is_relative_to(root) or not file.is_file():
             problems.append('missing: ' + relative)
+        elif resolved_excluded_reason(root, file):
+            problems.append('not allowed: ' + relative)
         elif file.stat().st_size != entry['size'] or _sha256(file) != entry['sha256']:
             problems.append('changed: ' + relative)
     return problems
