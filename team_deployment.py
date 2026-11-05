@@ -286,8 +286,9 @@ COMMIT = re.compile(r'[0-9a-f]{40}')
 
 
 def excluded_reason(relative):
-    parts = re.split(r'[\\/]', relative)
-    name = parts[-1].lower()
+    # Compared without case: on Windows, Data/x.txt resolves to the data/ folder (M10-Q review #31).
+    parts = [part.lower() for part in re.split(r'[\\/]', relative)]
+    name = parts[-1]
     if EXCLUDED_PARTS & set(parts[:-1]) or name in EXCLUDED_PARTS:
         return 'excluded folder'
     if name.startswith('.env') or Path(name).suffix in EXCLUDED_SUFFIXES or any(w in name for w in EXCLUDED_NAME_WORDS):

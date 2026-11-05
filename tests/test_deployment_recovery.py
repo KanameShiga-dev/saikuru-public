@@ -157,6 +157,14 @@ class ReleaseManifest(unittest.TestCase):
                 deploy.build_release_manifest(self.root, ['app.py', path], COMMIT)
             self.assertEqual(caught.exception.code, 'excluded_path', path)
 
+    def test_excluded_folders_are_matched_without_case_on_windows(self):
+        # M10-Q review #31: a case-insensitive filesystem resolves Data/x.txt to data/x.txt.
+        for path in ('Data/x.txt', 'DATA/team.txt', '.GIT/config', '.Local/test-tmp/x.json', 'docs/__PYCACHE__/m.pyc'):
+            with self.assertRaises(deploy.DeploymentError, msg=path) as caught:
+                deploy.build_release_manifest(self.root, ['app.py', path], COMMIT)
+            self.assertEqual(caught.exception.code, 'excluded_path', path)
+            self.assertEqual(deploy.excluded_reason(path), 'excluded folder', path)
+
     def test_bad_paths_and_commits_are_refused(self):
         for path, code in (('../outside.py', 'bad_path'), (str(self.root / 'app.py'), 'bad_path'),
                            ('docs\\guide.md', 'bad_path'), ('nope.py', 'missing_path')):
