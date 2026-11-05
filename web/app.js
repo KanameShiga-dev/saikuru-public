@@ -528,6 +528,9 @@ function featureDecisionForm(approval,job){
   const criteria=target.criteria||{};
   if(criteria.done_when?.length)form.append(progressList('この機能の完了の条件',criteria.done_when,'○','todo'));
   if(criteria.goal_links?.length)form.append(progressList('対応する目標・受入条件',criteria.goal_links,'・',''));
+  const pendingChecks=Array.isArray(target.pending_checks)?target.pending_checks.map(p=>p.check).filter(Boolean):[];
+  if(pendingChecks.length){form.append(progressList('AIのレビューが確かめられなかった点（あなたが確かめてください）',pendingChecks,'!','unmet'));
+    form.append(el('p','下の「表示された版の内容を確認しました」は、この点を確かめたことも含みます。確かめられない場合は差し戻してください。','hint'));}
   const artifacts=Array.isArray(target.artifacts)?target.artifacts:[];
   const files=el('div',undefined,'progress-group');files.append(el('h4',`確認する成果物の版（${artifacts.length}件）`));
   const list=el('ul');for(const row of artifacts)list.append(versionLine(row.path,row.sha256));files.append(list);form.append(files);

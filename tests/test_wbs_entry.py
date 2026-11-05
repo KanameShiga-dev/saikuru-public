@@ -344,6 +344,8 @@ class WbsNormalPathTests(WbsFixture):
                 report.update(status='needs_changes', stage_complete=False)
         else:
             report.update(summary='架空の独立確認：完了条件と記録を読み取り専用で確認した')
+            if task.get('agent_name') == 'common-security-reviewer' and getattr(self, 'reviewer_pending', None):
+                report.update(pending_checks=[self.reviewer_pending])
         return {key: report[key] for key in schema['properties']}
 
     # --- ordinary operations ------------------------------------------------------------------------------------
@@ -400,6 +402,32 @@ class WbsNormalPathTests(WbsFixture):
             'approval_id': prepared['approval_id'], 'allow': allow, 'note': note, 'action': 'decide_feature_review',
             'confirmation': {'action': 'feature_review_confirmation', 'target_digest': prepared['target_digest'],
                              'decision': 'approved' if allow else 'rejected'}})
+
+    def test_reviewer_pending_check_goes_to_the_feature_review_instead_of_stalling(self):
+        # M09 live run: a read-only reviewer could not verify one condition, and no one could start the feature review.
+        self.reviewer_pending = '架空の未確認：変更が2つのファイルだけか（Gitの差分を読めない）'
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        job = self.jobs()[0]
+        self.decide(self.approval('ai_start'), True, '架空の開始承認')
+        self.drain()
+        plan = self.approval('plan')
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.drain()
+        first = self.packages()['W1.01']
+        self.assertEqual((first['execution_state'], first['review_status']), ('succeeded', 'not_requested'), self.dump())
+        view = self.server.app.engine.workflow_view(job['id'])
+        actions = next(w for w in view['work_packages'] if w['id'] == first['id'])['available_actions']
+        self.assertIn('request_feature_review', actions, self.dump())
+        prepared = self.ok('/api/workflow/feature-review/prepare', {
+            'job_id': job['id'], 'work_package_id': first['id'], 'work_package_revision': first['state_revision'],
+            'action': 'request_feature_review'})
+        target = self.store.get(prepared['approval_id'], 'approval')['payload']['feature_target']
+        self.assertEqual([p['check'] for p in target['pending_checks']], [self.reviewer_pending])
+        self.ok('/api/workflow/feature-review/decide', {
+            'approval_id': prepared['approval_id'], 'allow': True, 'note': '', 'action': 'decide_feature_review',
+            'confirmation': {'action': 'feature_review_confirmation', 'target_digest': prepared['target_digest'],
+                             'decision': 'approved'}})
+        self.assertEqual(self.packages()['W1.01']['review_status'], 'approved')
 
     def test_two_dependent_features_run_from_normal_registration_to_simulated_receipt(self):
         # 1. Registration and start approval through the ordinary API (V01, U1).

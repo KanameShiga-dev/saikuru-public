@@ -416,8 +416,11 @@ def feature_basis(store, job_id, wp_id):
     if any(t['status'] in ('running','awaiting_approval') or (t.get('current_attempt') or {}).get('status') == 'running' for t in tasks):
         raise ValueError('workflow_writer_not_stopped')
     members = package_members(store,job_id,wp)
+    # A reviewer's pending checks go to the person in the feature review (reviewer_pending_checks); blocking reasons
+    # and a builder's unverified items still stop it.
     if (not members or any(t['status'] != 'succeeded' or (t.get('result') or {}).get('status') != 'done'
-                           or (t.get('result') or {}).get('pending_checks') or (t.get('result') or {}).get('blocking_reasons') for t in members)
+                           or (t['role'] != 'reviewer' and (t.get('result') or {}).get('pending_checks'))
+                           or (t.get('result') or {}).get('blocking_reasons') for t in members)
             or not any(t['role'] == 'reviewer' for t in members)):
         raise ValueError('work_package_technical_review_required')
     builders = [t for t in members if t['role'] == 'builder']
@@ -436,6 +439,13 @@ def feature_basis(store, job_id, wp_id):
             'dependencies':dependencies,'dependency_files':files,
             'signature':digest({'job':job,'plan':plan,'requirements':requirements,'wp':wp,'tasks':tasks,
                                 'packages':rows,'approvals':store.for_job('approval',job_id)})}
+
+
+def reviewer_pending_checks(members):
+    """What the package's reviewers could not verify, for the person to check in the feature review
+    (as the standard workflow hands them to the completion approval)."""
+    return [{'task_id':t['id'],'title':t['title'],'check':check} for t in members if t['role'] == 'reviewer'
+            for check in (t.get('result') or {}).get('pending_checks') or []]
 
 
 def feature_target(basis):
@@ -464,7 +474,10 @@ def feature_target(basis):
     for path, sha in dict(tests,**basis['dependency_files']).items():
         if artifact_records(job['project'],[path]) != [{'path':path,'sha256':sha}]:
             raise ValueError('dependency_artifact_changed')
-    return {'schema_version':1,'job_id':job['id'],'work_package_id':wp['id'],
+    pending = reviewer_pending_checks(basis['members'])
+    # Only present when there are any, so targets without pending checks keep their earlier digest.
+    return {**({'pending_checks':pending} if pending else {}),
+            'schema_version':1,'job_id':job['id'],'work_package_id':wp['id'],
             'workflow_generation':wp.get('workflow_generation',0),
             'requirement_revision':job['requirement_revision'],'plan_revision':job['plan_revision'],
             'requirements_approval_digest':basis['requirements']['digest'],'plan_approval_digest':plan['digest'],

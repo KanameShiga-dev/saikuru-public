@@ -259,7 +259,9 @@ def _workflow_task_state(task):
     if task.get('recovery_check_required'): return 'blocked'
     if task.get('status') == 'succeeded':
         if result.get('status') != 'done': return 'needs_changes'
-        if result.get('pending_checks') or result.get('blocking_reasons'): return 'unconfirmed'
+        # A reviewer's pending checks are handed to the person in the feature review (team_wbs.reviewer_pending_checks).
+        if result.get('blocking_reasons') or (result.get('pending_checks') and task.get('role') != 'reviewer'):
+            return 'unconfirmed'
         return 'execution_succeeded'
     return task.get('status') if task.get('status') in ('queued','running','awaiting_approval','blocked','failed','cancelled') else 'unconfirmed'
 

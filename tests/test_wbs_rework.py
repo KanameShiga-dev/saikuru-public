@@ -162,16 +162,31 @@ class ReworkTests(unittest.TestCase):
         self.store.update(review['id'],instruction='Fictional unrecorded replacement')
         self.assertNotEqual(self.engine.workflow_dispatch_view(self.job_id)['status'],'ready')
 
-    def test_pending_checks_never_become_feature_approval(self):
+    def pending_on(self, role):
+        """A ready feature whose current-generation task of this role reports one unverified item."""
         self.ready_feature()
         approval = next(a for a in self.store.for_job('approval',self.job_id) if a['kind'] == 'feature_review')
         self.store.update(approval['id'],status='superseded')
         wp = self.store.update(self.wp()['id'],review_status='not_requested')
-        task = next(t for t in self.tasks() if t.get('workflow_authority'))
+        task = next(t for t in self.tasks() if t.get('work_package_id') == wp['id'] and t['role'] == role
+                    and t['status'] == 'succeeded')
         self.store.update(task['id'],result=dict(task['result'],pending_checks=['Fictional missing check']))
+        return wp
+
+    def test_builder_pending_checks_never_become_feature_approval(self):
+        wp = self.pending_on('builder')
         before = self.state()
         with self.assertRaises(ValueError): self.engine.request_feature_review(self.job_id,wp['id'],expected_wp_revision=wp['state_revision'])
         self.assertEqual(self.state(),before)
+
+    def test_reviewer_pending_checks_are_shown_to_the_person_in_the_feature_review(self):
+        # 2026-11-05 (user decision, M09 live run): what a read-only reviewer could not verify is handed to the person,
+        # bound to the target digest, as the standard workflow does at completion. It is never approved silently.
+        wp = self.pending_on('reviewer')
+        review = self.engine.request_feature_review(self.job_id,wp['id'],expected_wp_revision=wp['state_revision'])
+        target = self.store.get(review['approval_id'])['payload']['feature_target']
+        self.assertEqual([p['check'] for p in target['pending_checks']],['Fictional missing check'])
+        self.assertEqual(self.wp()['review_status'],'pending')
 
     def test_independent_approved_feature_and_receipt_are_preserved(self):
         reviews = self.independent_features()
