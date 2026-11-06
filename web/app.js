@@ -335,6 +335,14 @@ function stalledValidation(job){
 }
 function isStalledValidation(task){return stalledValidation(state.jobs.find(j=>j.id===task.job_id))?.id===task.id;}
 function stalledWork(job){return stalledValidation(job)||stalledReview(job);}
+// 機能の確認を始められるのは利用者だけ。待っているのに「実行中」「判断 0件」に見えないよう、判断として出す。
+// 始められるかはサーバーの投影（available_actions）の値だけで決める。カードには、その機能の最後のレビューを使う。
+function featureReviewsToStart(job){
+  return (job?.workflow?.work_packages||[]).filter(wp=>(wp.available_actions||[]).includes('request_feature_review')).map(wp=>({wp,
+    task:state.tasks.filter(t=>(wp.task_ids||[]).includes(t.id)&&t.role==='reviewer'&&t.status==='succeeded')
+      .sort((a,b)=>(a.finished_at||0)-(b.finished_at||0)).pop()})).filter(row=>row.task);
+}
+function isFeatureReviewToStart(task){return featureReviewsToStart(state.jobs.find(j=>j.id===task.job_id)).some(row=>row.task.id===task.id);}
 function isStalledWork(task){return stalledWork(state.jobs.find(j=>j.id===task.job_id))?.id===task.id;}
 // 停止理由の欄の先頭に出す、止まった原因の一文（担当の報告の前に、何が止めたのかを示す）。
 function stopCause(task,job){
@@ -346,7 +354,7 @@ function stopCause(task,job){
   if(task.status==='interrupted')return '原因：担当の実行が中断されました。';
   return '原因：依頼が停止しています（'+jobStatusLabel(job)+'）。';
 }
-function group(task) { if(endedJob(task))return 3; const phase=p0Phase(state.jobs.find(j=>j.id===task.job_id));if(phase&&!pendingUser(task.id).length)return phase.key==='retrying'&&!phase.waiting_for_unpause?1:0; if(maintenanceHeld(task)||workflowMaintenanceWait(task))return 0; if(isStalledWork(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
+function group(task) { if(endedJob(task))return 3; const phase=p0Phase(state.jobs.find(j=>j.id===task.job_id));if(phase&&!pendingUser(task.id).length)return phase.key==='retrying'&&!phase.waiting_for_unpause?1:0; if(maintenanceHeld(task)||workflowMaintenanceWait(task))return 0; if(isStalledWork(task)||isFeatureReviewToStart(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
 const completedFolds=new Map();
 function completedTime(task){
   const job=state.jobs.find(j=>j.id===task.job_id);
@@ -444,8 +452,9 @@ function renderDecisionBanner(items){
     what.append(el('strong',item.label),el('span',(job?.title?job.title+' ／ ':'')+item.task.title));
     if(item.detail)what.append(el('small',item.detail));
     if(item.completion)what.append(el('small','工程終了は実機検証済みの保証ではありません。成果物と検証結果を確認してください。'));
-    const open=el('button','内容を確認','primary');open.type='button';open.onclick=()=>openNotifiedTask(item.task.id);
-    open.setAttribute('aria-label','内容を確認：'+(job?.title?job.title+'、':'')+item.task.title);open.dataset.focusKey='banner:'+item.task.id;
+    const open=item.start?button('確認を始める',item.start,'primary'):el('button','内容を確認','primary');
+    if(!item.start){open.type='button';open.onclick=()=>openNotifiedTask(item.task.id);}
+    open.setAttribute('aria-label',(item.start?'確認を始める：':'内容を確認：')+(job?.title?job.title+'、':'')+item.task.title);open.dataset.focusKey='banner:'+item.task.id;
     li.append(what,open);return li;
   }));
 }
@@ -733,10 +742,7 @@ function workflowPanel(job){
     if(st.key==='approved'&&wp.feature_target_digest)item.append(el('p','確認した版 '+shortVersion(wp.feature_target_digest),'hint tech-only'));
     const actions=el('div',undefined,'actions');
     if((wp.available_actions||[]).includes('request_feature_review')){
-      const b=button(`確認を始める（${wp.title}）`,async()=>{
-        await api('/api/workflow/feature-review/prepare',{job_id:job.id,work_package_id:wp.id,work_package_revision:wp.state_revision,action:'request_feature_review'});
-        notice('確認する内容を用意しました。まだ確認済みにはなっていません。内容を見て判断してください。');
-      },'secondary');b.dataset.focusKey='wp-prepare:'+wp.id;actions.append(b);
+      const b=button(`確認を始める（${wp.title}）`,()=>startFeatureReview(job,wp),'secondary');b.dataset.focusKey='wp-prepare:'+wp.id;actions.append(b);
       item.append(el('p','技術の確認が終わりました。「確認を始める」を押すと、確認する成果物の版を用意します（まだ承認にはなりません）。','hint'));
     }
     const approval=st.key==='review'?featureApproval(wp):null;
@@ -859,7 +865,11 @@ function jobCounts(job){
   const tasks=(state.tasks||[]).filter(t=>t.job_id===job.id&&t.status!=='cancelled');
   return tasks.length?{done:tasks.filter(t=>t.status==='succeeded').length,total:tasks.length}:null;
 }
-function needsUserDecision(job){return !!stalledWork(job)||(state.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a));}
+async function startFeatureReview(job,wp){
+  await api('/api/workflow/feature-review/prepare',{job_id:job.id,work_package_id:wp.id,work_package_revision:wp.state_revision,action:'request_feature_review'});
+  notice('確認する内容を用意しました。まだ確認済みにはなっていません。内容を見て判断してください。');
+}
+function needsUserDecision(job){return !!stalledWork(job)||featureReviewsToStart(job).length>0||(state.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a));}
 function deliverableGroup(job,access){
   const group=el('details',undefined,'job-deliverables');
   group.append(el('summary',`登録済みファイル（${access.length}件）`));
@@ -2436,7 +2446,8 @@ function decisionItems(){
     const review=stalledWork(job);
     return review&&!p0Phase(job)?[{task:review,key:'repair-limit:'+review.id,label:'自動修正の上限に達し、判断が必要です',
       detail:isStalledValidation(review)?'検証指摘が残り、レビューは未実施です。最後の検証結果を確認し、範囲を指定して修正を依頼するか、中止を選んでください。':'レビュー指摘が残っています。修正範囲を指定して再依頼するか、成果の扱いを判断してください。',voice:'自動修正の上限に達しました。判断が必要です。'}]:[];
-  }));
+  })).concat(state.jobs.flatMap(job=>featureReviewsToStart(job).map(({wp,task})=>({task,key:`feature-review-start:${wp.id}:${wp.state_revision}`,
+    label:'機能の確認を始めてください',detail:wp.title+'。技術の確認が終わり、あなたの確認を待っています。',voice:'機能の確認をお願いします。',start:()=>startFeatureReview(job,wp)}))));
 }
 function openNotifiedTask(id){
   const task=state?.tasks.find(t=>t.id===id);

@@ -4,6 +4,7 @@ Synthetic data only. Requests go through the real /api/jobs handler; no provider
 """
 import copy
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -261,6 +262,39 @@ class WbsEntryTests(WbsFixture):
         self.assertIn("f.get('workflow')==='wbs'?{workflow:'wbs'}", script)
         self.assertIn("docs?{kind:'documentation',document_format:f.get('document_format')}:f.get", script)
         self.assertIn("$('job-workflow-box').hidden=$('job-workflow-hint').hidden=docs", script)
+
+    def test_feature_review_to_start_is_shown_as_the_users_decision(self):
+        # Live run: the job waited for the person while the screen said "running" and "your decisions: 0".
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node.js is required for JavaScript behavior checks')
+        check = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync(process.argv[1],'utf8');
+const piece=(from,to)=>source.slice(source.indexOf(from),source.indexOf(to));
+const wp={id:'wp1',title:'架空の機能',state_revision:3,task_ids:['b','r1','r2'],available_actions:['request_feature_review']};
+const job={id:'j',title:'架空の依頼',status:'running',workflow_contract_version:1,workflow:{work_packages:[wp]}};
+const task=(id,role,status,finished_at)=>({id,role,status,finished_at,job_id:'j',title:id,attempt:1});
+const context={state:{tasks:[task('b','builder','succeeded',1),task('r1','reviewer','succeeded',2),task('r2','reviewer','succeeded',3),task('later','reviewer','queued')],jobs:[job],approvals:[],config:{max_repairs:2}},
+  endedJob:()=>false,p0Phase:()=>null,userDecision:()=>true,stopReason:()=>null,startFeatureReview:()=>'started',
+  isWorkflowJob:()=>true,needsMaintenance:()=>false};
+vm.createContext(context);
+vm.runInContext(piece('function pending(id)','function stopReason(')+piece('function stalledReview(','const completedFolds')
+  +piece('function needsUserDecision(','function deliverableGroup(')+piece('function decisionItems(','function openNotifiedTask('),context);
+const items=context.decisionItems();
+assert.equal(items.length,1);
+assert.equal(items[0].task.id,'r2');
+assert.match(items[0].detail,/架空の機能/);
+assert.equal(items[0].start(),'started');
+assert.equal(context.needsUserDecision(job),true);
+assert.deepEqual(context.state.tasks.filter(t=>context.group(t)===2).map(t=>t.id),['r2']);
+wp.available_actions=[];
+assert.equal(context.decisionItems().length,0);
+assert.equal(context.needsUserDecision(job),false);
+assert.deepEqual(context.state.tasks.filter(t=>context.group(t)===2).map(t=>t.id),[]);
+"""
+        ran = subprocess.run([node, '-e', check, str(ROOT / 'web' / 'app.js')], capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
 
 
 CHECK = 'python -B -m unittest discover -s tests'
