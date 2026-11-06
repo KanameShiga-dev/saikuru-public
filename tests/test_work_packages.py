@@ -32,6 +32,13 @@ def proposal(two=False):
     return result
 
 
+def owned_proposal():
+    result = proposal(two=True)
+    result['work_packages'][0]['owned_paths'] = ['app.py']
+    result['work_packages'][1]['owned_paths'] = []
+    return result
+
+
 class WorkPackageValidationTests(unittest.TestCase):
     def test_complete_proposal_does_not_mutate_input(self):
         value = proposal(two=True); before = copy.deepcopy(value)
@@ -72,12 +79,45 @@ class WorkPackageValidationTests(unittest.TestCase):
             value = proposal(); value['checkpoint_paths'] = paths
             with self.assertRaises(ValueError): wbs.validate_work_packages(value)
 
+    def test_owned_paths_stop_shared_or_unassigned_files_at_plan_time(self):
+        cases = {'work_package_owned_path_shared': (['app.py'], ['app.py']),
+                 'work_package_owned_path_outside_scope': (['app.py'], ['other.py']),
+                 'work_package_owned_path_missing': ([], [])}
+        for code, (first, second) in cases.items():
+            with self.subTest(code=code):
+                value = owned_proposal()
+                value['work_packages'][0]['owned_paths'] = first
+                value['work_packages'][1]['owned_paths'] = second
+                with self.assertRaisesRegex(ValueError, code): wbs.validate_work_packages(value)
+
+    def test_shared_file_is_rejected_for_independent_features_too(self):
+        # The job-level step needs every feature's confirmed version, so any overlap would stall it later.
+        value = owned_proposal()
+        value['work_packages'][1].update(depends_on=[], owned_paths=['app.py'])
+        with self.assertRaisesRegex(ValueError, 'work_package_owned_path_shared'): wbs.validate_work_packages(value)
+
+    def test_owned_paths_may_name_an_existing_test_outside_the_checkpoint_list(self):
+        value = owned_proposal()
+        value['code_test_plan']['existing_tests'] = ['tests/test_app.py']
+        value['work_packages'][1]['owned_paths'] = ['tests/test_app.py']
+        wbs.validate_work_packages(value)
+
+    def test_partial_owned_paths_are_rejected_and_approved_plans_without_them_stay_valid(self):
+        value = owned_proposal(); value['work_packages'][1].pop('owned_paths')
+        with self.assertRaisesRegex(ValueError, 'work_package_invalid_owned_paths'): wbs.validate_work_packages(value)
+        wbs.validate_work_packages(proposal(two=True))
+
+    def test_new_schema_requires_owned_paths(self):
+        from team_engine import PLAN_SCHEMA_P0_TESTS
+        item = wbs.plan_schema(PLAN_SCHEMA_P0_TESTS)['properties']['work_packages']['items']
+        self.assertIn('owned_paths', item['required'])
+
     def test_schema_is_opt_in_and_base_is_unchanged(self):
         from team_engine import PLAN_SCHEMA_P0_TESTS
         from team_adapters import schema_errors
         before = copy.deepcopy(PLAN_SCHEMA_P0_TESTS)
         extended = wbs.plan_schema(PLAN_SCHEMA_P0_TESTS)
-        self.assertEqual(schema_errors(proposal(), extended), [])
+        self.assertEqual(schema_errors(owned_proposal(), extended), [])
         self.assertNotIn('work_packages', PLAN_SCHEMA_P0_TESTS['properties'])
         self.assertEqual(PLAN_SCHEMA_P0_TESTS, before)
         self.assertIn('goal_contract', extended['required'])

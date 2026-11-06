@@ -20,6 +20,8 @@ GUIDE = ('\n新方式の計画はwork_packagesとcheckpoint_pathsを含める。
          'done_whenはこの作業パッケージの完了条件で、本人の機能確認・正式受領とは別。'
          '後続のパッケージは依存先の成果物とテストを変更しない。同じファイルを複数の機能で変更する必要があるときは、'
          'ファイルを分けるか1つのパッケージにまとめる。'
+         'owned_pathsはこのパッケージが変更するファイルの相対パス。checkpoint_pathsの全ファイルをいずれかのパッケージへ割り当て、'
+         '同じファイルを複数のパッケージに割り当てない。変更するファイルがなければ空配列。実行時に担当外のファイルは変更できない。'
          '各パッケージは成果物と受入条件の両方へ対応させ、全体の成果物・受入条件を漏らさない。'
          'input_artifactsは既に存在する同じ依頼の登録済み先行成果物のjob_id,path,sha256。'
          'これから作る成果物はここへ捏造せずdepends_onで示し、既存入力がなければ空配列。'
@@ -138,10 +140,10 @@ def validate_work_packages(payload, job=None, *, check_current_inputs=True):
         raise ValueError('work_package_count_invalid')
     labels, folded = {}, set()
     for spec in packages:
-        # Older approved W04.01 payloads lack input_artifacts; do not rewrite
-        # their authority/digest. Newly generated schemas require the field.
+        # Older approved payloads lack input_artifacts and owned_paths; do not rewrite
+        # their authority/digest. Newly generated schemas require both fields.
         required = {'wbs_id', 'title', 'goal_links', 'done_when', 'depends_on'}
-        if not isinstance(spec, dict) or not required <= set(spec) or set(spec) - required - {'input_artifacts'}:
+        if not isinstance(spec, dict) or not required <= set(spec) or set(spec) - required - {'input_artifacts', 'owned_paths'}:
             raise ValueError('work_package_fields_invalid')
         label = spec['wbs_id']
         if (not isinstance(label, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9._-]{0,63}', label)
@@ -190,7 +192,19 @@ def validate_work_packages(payload, job=None, *, check_current_inputs=True):
     if any(max(positions[dependency]) >= min(positions[label])
            for label, spec in labels.items() for dependency in spec['depends_on']):
         raise ValueError('work_package_after_order_conflict')
-    scope_paths(payload.get('checkpoint_paths'))
+    paths = scope_paths(payload.get('checkpoint_paths'))
+    if any('owned_paths' in spec for spec in packages):
+        # One owner per file: a feature's confirmation binds its files' versions, so a later change by
+        # any other feature would stall the job after the AI work was spent.
+        allowed = set(paths) | set((payload.get('code_test_plan') or {}).get('existing_tests') or [])
+        owned = set()
+        for spec in packages:
+            if 'owned_paths' not in spec: raise ValueError('work_package_invalid_owned_paths')
+            for path in _texts(spec['owned_paths'], 'owned_paths', required=False):
+                if path not in allowed: raise ValueError('work_package_owned_path_outside_scope')
+                if path in owned: raise ValueError('work_package_owned_path_shared')
+                owned.add(path)
+        if set(paths) - owned: raise ValueError('work_package_owned_path_missing')
     return deepcopy(packages)
 
 
@@ -246,7 +260,8 @@ def plan_schema(base):
     strings = {'type': 'array', 'maxItems': 20, 'items': {'type': 'string'}}
     links = dict(deepcopy(strings), description=LINK_DESCRIPTION)
     properties = {'wbs_id': {'type': 'string'}, 'title': {'type': 'string'},
-                  'goal_links': links, 'done_when': deepcopy(strings), 'depends_on': deepcopy(strings)}
+                  'goal_links': links, 'done_when': deepcopy(strings), 'depends_on': deepcopy(strings),
+                  'owned_paths': deepcopy(strings)}
     properties['input_artifacts'] = {'type': 'array', 'maxItems': 20, 'items': {'type': 'object',
         'properties': {name: {'type': 'string'} for name in ('job_id', 'path', 'sha256')},
         'required': ['job_id', 'path', 'sha256'], 'additionalProperties': False}}

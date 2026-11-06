@@ -8510,6 +8510,12 @@ class Engine:
                     target = target.resolve()
                     if not target.is_relative_to(root) or target.relative_to(root).as_posix() not in workspace['approved_paths']:
                         return {'allow':False,'note':'承認済みのファイル範囲外です。計画の再確認が必要です。'}
+                    if ctx.task.get('work_package_id'):
+                        job = self.store.get(ctx.task['job_id'], 'job')
+                        label = self.store.get(ctx.task['work_package_id'], 'work_package')['wbs_id']
+                        spec = {s['wbs_id']: s for s in self.store.get(job['plan_approval_id'], 'approval')['payload']['work_packages']}[label]
+                        if 'owned_paths' in spec and target.relative_to(root).as_posix() not in spec['owned_paths']:
+                            return {'allow':False,'note':f'この機能（{label}）の担当ファイルではありません。変更が必要なら計画の改訂を利用者に確認してください。'}
             except (ValueError, OSError, ProviderError):
                 return {'allow':False,'note':'作業領域の同一性を確認できません。変更を止めて再確認してください。'}
         if tool in ('Edit', 'Write') and ctx.task.get('role') == 'builder':

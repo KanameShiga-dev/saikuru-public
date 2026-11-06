@@ -36,7 +36,8 @@ def plan(links=(D1, D2, A1, A2), task_links=None):
             'goal_contract': {'primary_goal': '架空の目的', 'deliverables': [D1, D2],
                               'acceptance_criteria': [A1, A2], 'non_goals': [], 'constraints': []},
             'work_packages': [{'wbs_id': 'WP1', 'title': '架空の機能', 'goal_links': links,
-                               'done_when': ['架空の完了条件'], 'depends_on': [], 'input_artifacts': []}],
+                               'done_when': ['架空の完了条件'], 'depends_on': [], 'input_artifacts': [],
+                               'owned_paths': ['output.txt']}],
             'tasks': [{'title': '架空の作業', 'instruction': '架空の指示', 'role': 'builder',
                        'goal_links': list(task_links or links), 'wbs_id': 'WP1'}]}
 

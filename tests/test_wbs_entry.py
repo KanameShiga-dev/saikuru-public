@@ -138,7 +138,8 @@ class WbsEntryTests(WbsFixture):
                 'goal_contract': {'primary_goal': '架空の目的', 'deliverables': [deliverable],
                                   'acceptance_criteria': [criterion], 'non_goals': [], 'constraints': []},
                 'work_packages': [{'wbs_id': 'WP1', 'title': '架空の機能', 'goal_links': [deliverable, criterion],
-                                   'done_when': ['架空の完了条件'], 'depends_on': [], 'input_artifacts': []}],
+                                   'done_when': ['架空の完了条件'], 'depends_on': [], 'input_artifacts': [],
+                                   'owned_paths': ['output.txt']}],
                 'tasks': [{'title': '架空の作業', 'instruction': '架空の指示', 'role': 'builder',
                            'goal_links': [deliverable, criterion], 'wbs_id': 'WP1'}]}
         seen = []
@@ -298,9 +299,11 @@ PLAN = {'summary': '架空の二機能計画', 'questions': [], 'context_updates
                           'acceptance_criteria': CRITERIA, 'non_goals': [], 'constraints': ['架空のデータだけを使う']},
         'work_packages': [
             {'wbs_id': 'W1.01', 'title': '一覧・検索', 'goal_links': [DELIVERABLES[0], CRITERIA[0]],
-             'done_when': ['一覧と検索が動く'], 'depends_on': [], 'input_artifacts': []},
+             'done_when': ['一覧と検索が動く'], 'depends_on': [], 'input_artifacts': [],
+             'owned_paths': ['catalog.py', 'tests/test_catalog.py']},
             {'wbs_id': 'W1.02', 'title': '詳細・編集', 'goal_links': [DELIVERABLES[1], CRITERIA[1]],
-             'done_when': ['詳細表示と編集が動く'], 'depends_on': ['W1.01'], 'input_artifacts': []}],
+             'done_when': ['詳細表示と編集が動く'], 'depends_on': ['W1.01'], 'input_artifacts': [],
+             'owned_paths': ['detail.py', 'tests/test_detail.py']}],
         'tasks': [
             {'title': '一覧・検索を作る', 'instruction': '一覧と検索を作り、試験を書いて実行する。', 'role': 'builder',
              'goal_links': [DELIVERABLES[0], CRITERIA[0]], 'wbs_id': 'W1.01'},
@@ -490,6 +493,59 @@ class WbsNormalPathTests(WbsFixture):
             self.assertNotIn(other['wbs_id'], section)
             self.assertNotIn(other['done_when'][0], section)
         self.assertEqual(seen, {'W1.01': {'builder', 'reviewer'}, 'W1.02': {'builder', 'reviewer'}})
+
+    def attempted_writes(self, planned, label, paths):
+        """Run the flow up to the builder of `label`; what that builder's Write requests get back, per path."""
+        results, simulated = {}, self.answer
+        engine = self.server.app.engine
+
+        def answer(ctx, prompt, schema):
+            task = self.store.get(ctx.task['id'], 'task')
+            wbs = self.store.get(task['work_package_id'], 'work_package')['wbs_id'] if task.get('work_package_id') else None
+            if wbs == label and task['role'] == 'builder':
+                stub = SimpleNamespace(task=task, project=ctx.project, writable=True, context_files=[],
+                                       approve=lambda *a, **k: {'allow': False, 'note': 'ordinary approval reached'})
+                with patch('team_auto_edit.approved_scope_edit', return_value=False):
+                    for path in paths:
+                        results[path] = engine._tool_request_context(stub, {'tool': 'Write', 'input': {'file_path': path}})['note']
+            return simulated(ctx, prompt, schema)
+
+        self.answer = answer
+        with patch(f'{__name__}.PLAN', planned):
+            self.assertEqual(self.register(workflow='wbs'), 200)
+            self.decide(self.approval('ai_start'), True, '架空の開始承認')
+            self.drain()
+            plan = self.approval('plan')
+            self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+            self.drain()
+            if label != 'W1.01':
+                self.feature_decision('W1.01', True, '架空の確認')
+                self.drain()
+        return results
+
+    def test_builder_cannot_write_another_features_file(self):
+        notes = self.attempted_writes(copy.deepcopy(PLAN), 'W1.02', ['catalog.py', 'detail.py'])
+        self.assertIn('W1.02', notes['catalog.py'])
+        self.assertEqual(notes['detail.py'], 'ordinary approval reached')
+
+    def test_plan_without_owned_paths_keeps_the_plan_wide_scope(self):
+        # Plans approved before the field existed: reproduce them with the schema of that time.
+        import team_wbs
+        current = team_wbs.plan_schema
+
+        def earlier_schema(base):
+            schema = current(base)
+            item = schema['properties']['work_packages']['items']
+            del item['properties']['owned_paths']
+            item['required'].remove('owned_paths')
+            return schema
+
+        planned = copy.deepcopy(PLAN)
+        for spec in planned['work_packages']:
+            del spec['owned_paths']
+        with patch('team_wbs.plan_schema', earlier_schema):
+            notes = self.attempted_writes(planned, 'W1.01', ['detail.py'])
+        self.assertEqual(notes['detail.py'], 'ordinary approval reached')
 
     def test_two_dependent_features_run_from_normal_registration_to_simulated_receipt(self):
         # 1. Registration and start approval through the ordinary API (V01, U1).
