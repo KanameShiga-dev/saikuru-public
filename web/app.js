@@ -782,6 +782,11 @@ function transferChoiceView(a,rev,name){
   }
   return group;
 }
+// 機能ごとの担当ファイル。実行時に、ここにないファイルは変更できない。項目がない古い計画では、行を出さない。
+function ownedPathsLine(w){
+  if(!w.owned_paths)return null;
+  return el('p','担当するファイル：'+(w.owned_paths.length?w.owned_paths.join('、'):'なし（ファイルを変更しない）'),'hint');
+}
 // 新方式の計画の確認（承認前）。機能の分け方・完了の条件・使う既存の成果物・作業場所・変更の要点を表示する。
 // 承認では、表示した分析の digest をそのまま送る（workflow_confirmation）。非開発者に内部の設計判断を求めない。
 function planRevisionView(a){
@@ -797,6 +802,7 @@ function planRevisionView(a){
     if(w.done_when?.length)item.append(el('p','完了の条件：'+w.done_when.join('／'),'hint'));
     if(w.goal_links?.length)item.append(el('p','対応する目標・受入条件：'+w.goal_links.join('／'),'hint'));
     item.append(el('p',w.depends_on?.length?'先に必要な機能：'+w.depends_on.map(name).join('、'):'先に必要な機能：なし','hint'));
+    const owned=ownedPathsLine(w);if(owned)item.append(owned);
     const inputs=w.input_artifacts||[];
     if(inputs.length){const g=el('ul');for(const r of inputs)g.append(versionLine(r.path,r.sha256));item.append(el('p','使う既存の成果物：','hint'),g);}
     list.append(item);

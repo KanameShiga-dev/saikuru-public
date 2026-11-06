@@ -263,6 +263,24 @@ class WbsEntryTests(WbsFixture):
         self.assertIn("docs?{kind:'documentation',document_format:f.get('document_format')}:f.get", script)
         self.assertIn("$('job-workflow-box').hidden=$('job-workflow-hint').hidden=docs", script)
 
+    def test_plan_screen_shows_each_features_files(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node.js is required for JavaScript behavior checks')
+        check = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync(process.argv[1],'utf8');
+const context={el:(tag,text)=>text};
+vm.createContext(context);
+vm.runInContext(source.slice(source.indexOf('function ownedPathsLine('),source.indexOf('// 新方式の計画の確認（承認前）。')),context);
+assert.match(context.ownedPathsLine({owned_paths:['架空.py','tests/test_架空.py']}),/架空\.py、tests\/test_架空\.py/);
+assert.match(context.ownedPathsLine({owned_paths:[]}),/なし/);
+assert.equal(context.ownedPathsLine({}),null);
+assert.ok(source.includes('const owned=ownedPathsLine(w);if(owned)item.append(owned);'));
+"""
+        ran = subprocess.run([node, '-e', check, str(ROOT / 'web' / 'app.js')], capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+
     def test_feature_review_to_start_is_shown_as_the_users_decision(self):
         # Live run: the job waited for the person while the screen said "running" and "your decisions: 0".
         node = shutil.which('node')
