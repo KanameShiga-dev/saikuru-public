@@ -145,6 +145,19 @@ class CodeTestContractTests(unittest.TestCase):
         ctx.command_result(COMMAND, completed.returncode, completed.stdout + completed.stderr)
         return completed.returncode
 
+    def test_plan_schema_lists_every_property_as_required_for_strict_providers(self):
+        # Codex rejects a response schema whose object does not require every property.
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get('type') == 'object':
+                    self.assertEqual(set(node['required']), set(node['properties']))
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+        walk(PLAN_SCHEMA_TESTS)
+
     def test_new_job_requires_structured_plan_but_legacy_does_not(self):
         created = self.engine.create_job('架空の新規依頼', '架空の計算コードを修正する',
                                          str(self.root), False)

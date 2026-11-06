@@ -127,10 +127,6 @@ _CODE_TEST_PLAN_SCHEMA = object_schema({
     'ui_test_tool': {'type': 'string', 'enum': ['playwright', 'manual_fallback', 'not_applicable']},
     'ui_test_reason': STR, 'ui_test_command': STR,
     'cleanup_steps': {'type': 'array', 'maxItems': 20, 'items': STR}})
-# Keep the schema tolerant of historical planner fixtures while requiring the
-# planner gate to insist on the new execution details for every new code plan.
-_CODE_TEST_PLAN_SCHEMA['required'] = [
-    'required', 'reason', 'cases', 'command', 'existing_tests']
 PLAN_SCHEMA_TESTS = object_schema(dict(PLAN_SCHEMA['properties'], code_test_plan=_CODE_TEST_PLAN_SCHEMA))
 
 P0_CONTRACT_SCHEMA = object_schema({
