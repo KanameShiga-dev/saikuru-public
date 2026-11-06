@@ -458,6 +458,39 @@ class WbsNormalPathTests(WbsFixture):
                              'decision': 'approved'}})
         self.assertEqual(self.packages()['W1.01']['review_status'], 'approved')
 
+    def test_each_package_task_is_told_which_feature_it_is_on(self):
+        # The whole plan reaches every assignee as history, but a review's "this feature" named no feature.
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        job = self.jobs()[0]
+        self.decide(self.approval('ai_start'), True, '架空の開始承認')
+        self.drain()
+        plan = self.approval('plan')
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.drain()
+        self.feature_decision('W1.01', True, '架空の確認')
+        self.drain()
+        self.feature_decision('W1.02', True, '架空の確認')
+        self.drain()
+        specs = {s['wbs_id']: s for s in PLAN['work_packages']}
+        seen = {}
+        for task in self.store.for_job('task', job['id']):
+            prompt = self.prompts.get(task['id'])
+            if prompt is None:
+                continue
+            if not task.get('work_package_id'):
+                self.assertNotIn('今回の機能:', prompt, task['title'])
+                continue
+            label = self.store.get(task['work_package_id'], 'work_package')['wbs_id']
+            seen.setdefault(label, set()).add(task['role'])
+            section = prompt.split('今回の機能:', 1)[1].split('今回の担当:', 1)[0]
+            self.assertIn(f"{label}「{specs[label]['title']}」", section)
+            for text in specs[label]['done_when'] + specs[label]['goal_links']:
+                self.assertIn(text, section)
+            other = next(s for name, s in specs.items() if name != label)
+            self.assertNotIn(other['wbs_id'], section)
+            self.assertNotIn(other['done_when'][0], section)
+        self.assertEqual(seen, {'W1.01': {'builder', 'reviewer'}, 'W1.02': {'builder', 'reviewer'}})
+
     def test_two_dependent_features_run_from_normal_registration_to_simulated_receipt(self):
         # 1. Registration and start approval through the ordinary API (V01, U1).
         self.assertEqual(self.register(workflow='wbs'), 200)

@@ -4799,6 +4799,7 @@ class Engine:
                '計画のテストコマンドは記載どおりに最後に実行し、その実行より後は他のコマンドを一切実行しない'
                '（後からコマンドを実行すると、采来はテストの実行記録を無効にして未実行と判定する）。'
                if ctx.task['role'] == 'builder' and (job.get('code_test_plan') or {}).get('required') else '')
+            + self._package_focus(ctx.task)
             + '\n\n今回の担当:\n' + ctx.task['instruction']
 
             + ('\n\n利用者が承認した検証コマンドの変更（過去の指示・報告にある旧コマンドより優先）：\n'
@@ -5319,6 +5320,16 @@ class Engine:
         if task.get('work_package_id'):
             return list(self.store.get(task['work_package_id'], 'work_package')['done_when'])
         return list((job.get('goal_contract') or {}).get('acceptance_criteria') or [])
+
+    def _package_focus(self, task):
+        """Name the task's feature: the plan reaches every assignee only as history covering all features."""
+        if not task.get('work_package_id'):
+            return ''
+        wp = self.store.get(task['work_package_id'], 'work_package')
+        return (f"\n\n今回の機能: {wp['wbs_id']}「{wp['title']}」"
+                '\nこの機能の完了条件:\n' + '\n'.join('- ' + text for text in wp['done_when'])
+                + '\n対応する成果物・受入条件:\n' + '\n'.join('- ' + text for text in wp['goal_links'])
+                + '\n計画にある他の機能の完了条件は、この担当の判定に使わない。')
 
     def _finish(self, task, result):
 
