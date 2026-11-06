@@ -261,6 +261,33 @@ class RevisionTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.approve(revised)
         self.assertEqual(self.state(), before)
 
+    def stale_target(self, **change):
+        from team_plan_revision import approval_digest
+        target = dict(copy.deepcopy(self.approval['workflow_revision']), **change)
+        return self.store.update(self.approval['id'], workflow_revision=target, workflow_revision_digest=approval_digest(target))
+
+    def test_changed_folder_observation_is_shown_again_and_needs_a_new_confirmation(self):
+        current = self.approval['workflow_revision']['workspace_boundary']
+        stale = self.stale_target(workspace_boundary={'schema_version': 1, 'status': 'blocked', 'reason': 'workspace_identity_unavailable',
+                                                      'permission_effect': 'none', 'automatic_git_mutation': False})
+        with self.assertRaisesRegex(ValueError, 'workflow_revision_confirmation_not_current'):
+            self.approve(stale)
+        fresh = self.store.get(self.approval['id'], 'approval')
+        self.assertEqual(fresh['status'], 'pending')
+        self.assertEqual(fresh['workflow_revision']['workspace_boundary'], current)
+        self.assertNotEqual(fresh['workflow_revision_digest'], stale['workflow_revision_digest'])
+        self.assertIsNone(self.job()['plan_approval_id'])
+        with self.assertRaisesRegex(ValueError, 'workflow_revision_confirmation_not_current'):
+            self.approve(stale)
+        self.approve(fresh)
+        self.assertEqual(self.job()['plan_approval_id'], self.approval['id'])
+
+    def test_any_other_stale_analysis_field_is_not_refreshed(self):
+        stale = self.stale_target(affected_work_packages=['Fictional other package'])
+        with self.assertRaisesRegex(ValueError, 'workflow_revision_confirmation_not_current'):
+            self.approve(stale)
+        self.assertEqual(self.store.get(self.approval['id'], 'approval')['workflow_revision_digest'], stale['workflow_revision_digest'])
+
     def test_real_finish_path_attaches_initial_g3_revision_confirmation(self):
         self.store.update(self.approval['id'], status='superseded')
         self.store.update(self.planner['id'], status='queued', result=None)

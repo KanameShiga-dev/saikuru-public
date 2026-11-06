@@ -303,6 +303,25 @@ class ReworkTests(unittest.TestCase):
         self.assertEqual(self.state(),before)
         self.assertNotEqual(self.engine.workflow_dispatch_view(self.job_id)['status'],'ready')
 
+    def test_downstream_change_to_a_confirmed_upstream_file_stops_with_the_reason(self):
+        self.approve(self.ready_feature())
+        reserve = self.engine._reserve_workflow_attempt
+        def build_over_upstream(task, view):
+            reserved = reserve(task, view)
+            (self.workspace.project/'app.py').write_text('Fictional downstream edit\n', encoding='utf-8')
+            return reserved
+        with patch.object(self.engine, '_reserve_workflow_attempt', build_over_upstream):
+            builder = self.finish_next()
+        self.assertEqual(builder['role'], 'builder')
+        self.assertEqual(self.job()['status'], 'blocked')
+        wp = self.store.get(builder['work_package_id'], 'work_package')
+        self.assertEqual((wp['execution_state'], wp['review_status']), ('blocked', 'changes_requested'))
+        self.assertEqual(self.wp()['review_status'], 'approved')
+        self.assertFalse([t for t in self.tasks() if t.get('work_package_id') == wp['id'] and t['role'] == 'reviewer'])
+        event = self.store.job_events(self.job_id, 'feature_repair_plan_revision_required')[-1]
+        self.assertEqual(event['details']['changed_paths'], ['app.py'])
+        self.assertIn('app.py', event['message'])
+
     def test_upstream_shared_file_impact_holds_with_plan_revision_reason(self):
         first_review = self.ready_feature(); self.approve(first_review)
         for _ in range(3): self.finish_next()

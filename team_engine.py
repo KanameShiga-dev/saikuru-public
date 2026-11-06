@@ -1811,9 +1811,18 @@ class Engine:
         context = approval.get('workflow_revision_context')
         if (job['status'] != proposal_status(context) or task.get('role') != 'planner'
                 or not isinstance(target, dict) or confirmation != approval.get('workflow_revision_digest')
-                or confirmation != approval_digest(target) or target != analysis(self.store, job, approval['payload'], context)
+                or confirmation != approval_digest(target)
                 or approval.get('digest') != approval_digest(approval['payload'])
                 or approval_digest(task.get('result')) != approval['digest']):
+            raise ValueError('workflow_revision_confirmation_not_current')
+        current = analysis(self.store, job, approval['payload'], context)
+        if target != current:
+            if {key for key in target.keys() | current.keys() if target.get(key) != current.get(key)} == {'workspace_boundary'}:
+                # Only the folder observation moved on. Show the new one; the person still has to confirm its digest.
+                self.store.update(approval['id'], workflow_revision=current, workflow_revision_digest=approval_digest(current))
+                self.store.event('workflow_boundary_refreshed', '作業場所の確認結果が変わったため、計画の確認内容を更新しました。表示を読み直して確認してください。',
+                                 task['id'], job['id'], {'before': target['workspace_boundary'].get('status'),
+                                                         'after': current['workspace_boundary'].get('status')})
             raise ValueError('workflow_revision_confirmation_not_current')
         if any(a['id'] != approval['id'] and a['status'] == 'pending' and a['kind'] != 'completion'
                for a in self.store.for_job('approval', job['id'])):
@@ -3185,6 +3194,18 @@ class Engine:
         if task['role'] != 'reviewer':
             if (task.get('workflow_authority') or {}).get('kind') == 'package_repair':
                 if not self._expand_package_repair_impact(job,wp,task): return
+            else:
+                from team_wbs import upstream_file_changes
+                changed = upstream_file_changes(self.store,job,self.store.get(job['plan_approval_id'],'approval'),wp)
+                if changed:
+                    # Without this the package's reviews wait for a confirmation that can no longer be valid.
+                    self.store.update(wp['id'],execution_state='blocked',review_status='changes_requested')
+                    self.store.update(job['id'],status='blocked')
+                    self.store.event('feature_repair_plan_revision_required',
+                        '確認済みの前の機能のファイルをこの機能が変更したため、進められません（' + '、'.join(changed) + '）。'
+                        '計画を改訂するか、機能のファイルを分けるか1つにまとめて依頼し直してください。',
+                        task['id'],job['id'],{'work_package_id':wp['id'],'changed_paths':changed})
+                    return
             self._queue_package_reviews(job,wp,task)
         else:
             self.store.update(wp['id'],execution_state='succeeded',review_status='not_requested')

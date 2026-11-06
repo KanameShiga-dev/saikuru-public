@@ -18,6 +18,8 @@ GUIDE = ('\n新方式の計画はwork_packagesとcheckpoint_pathsを含める。
          '受入条件はA1,A2,...（goal_contractの配列順で1始まり、最大各20）の番号だけで参照できる。'
          '番号は大文字・半角の完全一致のみ有効で、存在しない番号や言い換えは差し戻される。'
          'done_whenはこの作業パッケージの完了条件で、本人の機能確認・正式受領とは別。'
+         '後続のパッケージは依存先の成果物とテストを変更しない。同じファイルを複数の機能で変更する必要があるときは、'
+         'ファイルを分けるか1つのパッケージにまとめる。'
          '各パッケージは成果物と受入条件の両方へ対応させ、全体の成果物・受入条件を漏らさない。'
          'input_artifactsは既に存在する同じ依頼の登録済み先行成果物のjob_id,path,sha256。'
          'これから作る成果物はここへ捏造せずdepends_onで示し、既存入力がなければ空配列。'
@@ -515,6 +517,27 @@ def plan_instruction_matches(task, expected):
             return False
         expected = compact_instruction(expected,row['submitted_note'])
     return task.get('instruction') == expected
+
+
+def upstream_file_changes(store, job, plan, wp):
+    """Files of the features this one depends on that no longer match the version the person confirmed."""
+    from team_p0_contract import artifact_records
+    specs = {s['wbs_id']:s for s in plan['payload']['work_packages']}
+    rows = {w['wbs_id']:w for w in store.for_job('work_package',job['id']) if w.get('plan_revision') == job['plan_revision']}
+    changed, seen, pending = set(), set(), list(specs[wp['wbs_id']]['depends_on'])
+    while pending:
+        label = pending.pop()
+        if label in seen: continue
+        seen.add(label); pending.extend(specs[label]['depends_on'])
+        review_id = rows[label].get('feature_review_approval_id')
+        target = (store.get(review_id,'approval').get('payload') or {}).get('feature_target') or {} if review_id else {}
+        for path, sha in {**(target.get('source_snapshot') or {}), **(target.get('test_snapshot') or {})}.items():
+            try:
+                same = artifact_records(job['project'],[path]) == [{'path':path,'sha256':sha}]
+            except ValueError:
+                same = False
+            if not same: changed.add(path)
+    return sorted(changed)
 
 
 def feature_review_receipt(store, job, plan, requirements, wp, specs, records, cache, *, decision_lookup=None):
