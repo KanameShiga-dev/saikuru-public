@@ -494,6 +494,33 @@ class WbsNormalPathTests(WbsFixture):
             self.assertNotIn(other['done_when'][0], section)
         self.assertEqual(seen, {'W1.01': {'builder', 'reviewer'}, 'W1.02': {'builder', 'reviewer'}})
 
+    def test_reviews_receive_the_changed_files_they_cannot_read_from_git(self):
+        # M09 live run: a read-only reviewer left "only two files changed?" unverified.
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        job = self.jobs()[0]
+        self.decide(self.approval('ai_start'), True, '架空の開始承認')
+        self.drain()
+        plan = self.approval('plan')
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.drain()
+        self.feature_decision('W1.01', True, '架空の確認')
+        self.drain()
+        marker = '采来がGitで確認した作業状態'
+        checked = 0
+        for task in self.store.for_job('task', job['id']):
+            prompt = self.prompts.get(task['id'])
+            if prompt is None:
+                continue
+            if task['role'] != 'reviewer':
+                self.assertNotIn(marker, prompt, task['title'])
+                continue
+            section = prompt.split(marker, 1)[1].split('今回の担当:', 1)[0]
+            self.assertIn('catalog.py', section)
+            self.assertIn('tests/test_catalog.py', section)
+            self.assertNotIn('SCOPE.md', section)
+            checked += 1
+        self.assertGreaterEqual(checked, 4, self.dump())
+
     def attempted_writes(self, planned, label, paths):
         """Run the flow up to the builder of `label`; what that builder's Write requests get back, per path."""
         results, simulated = {}, self.answer

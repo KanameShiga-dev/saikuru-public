@@ -4800,6 +4800,7 @@ class Engine:
                '（後からコマンドを実行すると、采来はテストの実行記録を無効にして未実行と判定する）。'
                if ctx.task['role'] == 'builder' and (job.get('code_test_plan') or {}).get('required') else '')
             + self._package_focus(ctx.task)
+            + self._workspace_facts(ctx.task)
             + '\n\n今回の担当:\n' + ctx.task['instruction']
 
             + ('\n\n利用者が承認した検証コマンドの変更（過去の指示・報告にある旧コマンドより優先）：\n'
@@ -5330,6 +5331,15 @@ class Engine:
                 '\nこの機能の完了条件:\n' + '\n'.join('- ' + text for text in wp['done_when'])
                 + '\n対応する成果物・受入条件:\n' + '\n'.join('- ' + text for text in wp['goal_links'])
                 + '\n計画にある他の機能の完了条件は、この担当の判定に使わない。')
+
+    def _workspace_facts(self, task):
+        """Give read-only reviewers the Git state they cannot observe; execution_workspace refuses out-of-scope changes."""
+        workspace = self._execution_workspace(task) if task['role'] == 'reviewer' else None
+        if not workspace:
+            return ''
+        rows = '\n'.join(f"- {row['status'].strip()} {row['path']}" for row in workspace['dirty_changes']) or '- 変更なし'
+        return ('\n\n采来がGitで確認した作業状態（現時点の未コミットの変更。依頼全体の分）:\n' + rows
+                + '\n承認されたファイル範囲の外に未コミットの変更はない。変更範囲の確認はこの一覧で行い、未確認として残さない。')
 
     def _finish(self, task, result):
 
