@@ -573,6 +573,27 @@ class WbsNormalPathTests(WbsFixture):
             checked += 1
         self.assertGreaterEqual(checked, 4, self.dump())
 
+    def test_web_rule_is_left_out_only_after_a_clearly_non_web_plan(self):
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        job = self.jobs()[0]
+        self.decide(self.approval('ai_start'), True, '架空の開始承認')
+        self.drain()
+        plan = self.approval('plan')
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.drain()
+        rule = 'Webサーバーを作成・変更する依頼では'
+        for task in self.store.for_job('task', job['id']):
+            prompt = self.prompts.get(task['id'])
+            if prompt is None:
+                continue
+            if task['role'] == 'planner':
+                self.assertIn(rule, prompt)
+            else:
+                self.assertNotIn(rule, prompt, task['title'])
+            # What protects the user stays for every assignee.
+            for kept in ('情報の取り扱い（Security by Default）', '公開・push・課金は禁止', '【依頼条件を代用品へ置き換えない】'):
+                self.assertIn(kept, prompt, task['title'])
+
     def attempted_writes(self, planned, label, paths):
         """Run the flow up to the builder of `label`; what that builder's Write requests get back, per path."""
         results, simulated = {}, self.answer

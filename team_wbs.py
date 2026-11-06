@@ -93,6 +93,17 @@ def _texts(value, label, *, required=True):
 
 
 _GOAL_LABEL = re.compile(r'[DA][1-9][0-9]*')
+_WEB_PATH = re.compile(r'(?i)\.(html?|css|jsx?|tsx?|vue|svelte|ps1)$'
+                       r'|(^|[/_.-])(server|web|app|api|routes?|views?|wsgi|asgi|flask|django|fastapi)([/_.-]|$)')
+_WEB_TEXT = re.compile(r'(?i)ウェブ|サーバ|画面|ページ|ブラウザ|ポート|サイト|フロント'
+                       r'|(?<![a-z])(web\w*|server|browser|html|https?|flask|django|fastapi|api|port|site|front\w*)(?![a-z])')
+
+
+def may_touch_web(goal, plan):
+    """False only when the request and the approved plan show no sign of a Web page or server; when unsure, True."""
+    test_plan = plan.get('code_test_plan') or {}
+    names = list(plan.get('checkpoint_paths') or []) + list(test_plan.get('existing_tests') or [])
+    return bool(test_plan.get('ui_test_required') or any(_WEB_PATH.search(name) for name in names) or _WEB_TEXT.search(goal))
 
 
 def normalize_goal_links(payload):

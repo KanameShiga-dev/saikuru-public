@@ -4736,7 +4736,7 @@ class Engine:
 
             + STAGE_COMPLETION_RULE +
             (REQUIREMENT_FIDELITY_RULE if not getattr(ctx, 'document_scope', False) else '') +
-            (WEB_DELIVERY_RULE if not getattr(ctx, 'document_scope', False) else '') +
+            (WEB_DELIVERY_RULE if not getattr(ctx, 'document_scope', False) and self._web_rule_applies(job, ctx.task) else '') +
 
             '依頼全体に後続作業があるだけでblockedにしない。handoffは承認済みの未完了範囲を移管する場合のみ。'
 
@@ -5331,6 +5331,13 @@ class Engine:
                 '\nこの機能の完了条件:\n' + '\n'.join('- ' + text for text in wp['done_when'])
                 + '\n対応する成果物・受入条件:\n' + '\n'.join('- ' + text for text in wp['goal_links'])
                 + '\n計画にある他の機能の完了条件は、この担当の判定に使わない。')
+
+    def _web_rule_applies(self, job, task):
+        """Only a WBS assignee working from an approved file list can be told the Web rule is not needed."""
+        if job.get('workflow_contract_version') != 1 or task['role'] == 'planner' or not job.get('plan_approval_id'):
+            return True
+        from team_wbs import may_touch_web
+        return may_touch_web(job['goal'], self.store.get(job['plan_approval_id'], 'approval')['payload'])
 
     def _workspace_facts(self, task):
         """Give read-only reviewers the Git state they cannot observe; execution_workspace refuses out-of-scope changes."""

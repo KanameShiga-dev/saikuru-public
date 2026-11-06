@@ -107,6 +107,23 @@ class WorkPackageValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'work_package_invalid_owned_paths'): wbs.validate_work_packages(value)
         wbs.validate_work_packages(proposal(two=True))
 
+    def test_web_rule_stays_unless_the_approved_plan_is_clearly_not_web(self):
+        goal = 'Fictional lookup module'
+        def plan():
+            return dict(proposal(), checkpoint_paths=['lookup.py'])
+        self.assertFalse(wbs.may_touch_web(goal, plan()))
+        for changed in (lambda p: p.update(checkpoint_paths=['index.html']),
+                        lambda p: p.update(checkpoint_paths=['pkg/server.py']),
+                        lambda p: p.update(checkpoint_paths=['routes.py']),
+                        lambda p: p.update(checkpoint_paths=['app.py']),
+                        lambda p: p['code_test_plan'].update(ui_test_required=True),
+                        lambda p: p['code_test_plan'].update(existing_tests=['tests/test_api.py'])):
+            value = plan(); changed(value)
+            self.assertTrue(wbs.may_touch_web(goal, value))
+        for text in ('Fictional Web app', 'のWebページを直す', 'サーバーを追加する', '画面を直す', 'Fictional HTTP handler', 'APIを足す'):
+            self.assertTrue(wbs.may_touch_web(text, plan()), text)
+        self.assertFalse(wbs.may_touch_web('Fictional report and support module', plan()))
+
     def test_new_schema_requires_owned_paths(self):
         from team_engine import PLAN_SCHEMA_P0_TESTS
         item = wbs.plan_schema(PLAN_SCHEMA_P0_TESTS)['properties']['work_packages']['items']
