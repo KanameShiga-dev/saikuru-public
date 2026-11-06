@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from team_p0_contract import artifact_records
-from team_web_trial import WebTrials
+from team_web_trial import WebTrials, listening_rows
 
 
 class WebTrialTests(unittest.TestCase):
@@ -126,13 +126,21 @@ class WebTrialTests(unittest.TestCase):
 
     def test_listener_must_belong_to_managed_process_and_use_loopback(self):
         entry = {'port': self.port, 'process': SimpleNamespace(pid=123)}
-        for rows in ([{'LocalAddress': '0.0.0.0', 'OwningProcess': 123}],
-                     [{'LocalAddress': '127.0.0.1', 'OwningProcess': 999}], []):
+        for rows in ([('0.0.0.0', 123)], [('::1', 123)], [('127.0.0.1', 999)], [('127.0.0.1', 123), ('::', 123)], []):
             with self.subTest(rows=rows), patch('team_web_trial.os.name', 'nt'), \
-                    patch('team_web_trial.subprocess.run',
-                          return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))):
+                    patch('team_web_trial.listening_rows', return_value=rows):
                 with self.assertRaises(ValueError):
                     self.trials.check_listener(entry)
+        with patch('team_web_trial.os.name', 'nt'), patch('team_web_trial.listening_rows', return_value=[('127.0.0.1', 123)]):
+            self.trials.check_listener(entry)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows only')
+    def test_listening_rows_finds_real_loopback_and_ipv6_listeners(self):
+        with socket.socket() as ipv4, socket.socket(socket.AF_INET6) as ipv6:
+            ipv4.bind(('127.0.0.1', 0)); ipv4.listen()
+            ipv6.bind(('::1', 0)); ipv6.listen()
+            self.assertEqual(listening_rows(ipv4.getsockname()[1]), [('127.0.0.1', os.getpid())])
+            self.assertEqual(listening_rows(ipv6.getsockname()[1]), [('::1', os.getpid())])
 
     def test_http_routes_require_browser_auth_and_preserve_acceptance_state(self):
         from server import Handler

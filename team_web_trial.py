@@ -1,10 +1,12 @@
 """User-approved local Web trials, independent of the model worker lifetime."""
+import ctypes
 import hashlib
 import json
 import os
 from pathlib import Path
 import secrets
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -12,6 +14,28 @@ import urllib.request
 
 from consultation_read_tools import safe_path, screen_model_read
 from team_p0_contract import artifact_records
+
+TCP_TABLE_OWNER_PID_LISTENER = 3
+
+
+def listening_rows(port):
+    """(address, pid) of every TCP listener on the port. Asks Windows directly: on some PCs
+    Get-NetTCPConnection and netstat leave out listeners that are really there."""
+    rows = []
+    # row size and offsets of MIB_TCPROW_OWNER_PID / MIB_TCP6ROW_OWNER_PID
+    for family, size, address_at, address_size, port_at, pid_at in ((socket.AF_INET, 24, 4, 4, 8, 20),
+                                                                    (socket.AF_INET6, 56, 0, 16, 20, 52)):
+        needed = ctypes.c_ulong(0)
+        ctypes.WinDLL('iphlpapi').GetExtendedTcpTable(None, ctypes.byref(needed), False, family, TCP_TABLE_OWNER_PID_LISTENER, 0)
+        table = ctypes.create_string_buffer(needed.value)
+        if ctypes.WinDLL('iphlpapi').GetExtendedTcpTable(table, ctypes.byref(needed), False, family, TCP_TABLE_OWNER_PID_LISTENER, 0):
+            raise ValueError('待ち受けの一覧を取得できません。')
+        for index in range(struct.unpack_from('<I', table, 0)[0]):
+            row = 4 + index * size
+            if socket.ntohs(struct.unpack_from('<I', table, row + port_at)[0] & 0xffff) == port:
+                rows.append((socket.inet_ntop(family, table[row + address_at:row + address_at + address_size]),
+                             struct.unpack_from('<I', table, row + pid_at)[0]))
+    return rows
 
 
 class WebTrials:
@@ -186,15 +210,8 @@ class WebTrials:
     def check_listener(entry):
         if os.name != 'nt':
             raise ValueError('この確認用サーバー管理はWindows専用です。')
-        command = f'Get-NetTCPConnection -State Listen -LocalPort {entry["port"]} | Select-Object LocalAddress,OwningProcess | ConvertTo-Json -Compress'
-        result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', command],
-                                capture_output=True, text=True, timeout=10,
-                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        rows = json.loads(result.stdout or '[]')
-        if isinstance(rows, dict):
-            rows = [rows]
-        if result.returncode or not rows or any(
-                r.get('LocalAddress') != '127.0.0.1' or r.get('OwningProcess') != entry['process'].pid for r in rows):
+        rows = listening_rows(entry['port'])
+        if not rows or any(address != '127.0.0.1' or pid != entry['process'].pid for address, pid in rows):
             raise ValueError('この起動プロセスによる127.0.0.1限定の待ち受けを確認できません。')
 
     def probe(self, entry):
