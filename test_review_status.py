@@ -17,7 +17,10 @@ PLAN = {'summary': '計画', 'tasks': [{'title': '作る', 'instruction': '作�
         'security_review_required': False, 'warnings': [],
         # Plans for new development jobs must carry a code-test decision; these jobs change no real code.
         'code_test_plan': {'required': False, 'reason': '架空のテスト用の計画。実コードの変更なし。',
-                           'cases': [], 'command': '', 'existing_tests': []}}
+                           'cases': [], 'command': '', 'existing_tests': [],
+                           'test_methods': [], 'preconditions': [], 'setup_steps': [], 'synthetic_accounts': [],
+                           'ui_test_required': False, 'ui_test_tool': 'not_applicable', 'ui_test_reason': '',
+                           'ui_test_command': '', 'cleanup_steps': []}}
 DONE = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格'], 'pending_checks': [], 'pending_check_details': [], 'question': '',
         'warnings': [], 'stage_complete': True, 'blocking_reasons': []}
 NO_EVIDENCE = {'status': 'blocked', 'summary': '修正後のテスト結果がないため完了と判定できない。',
