@@ -13,7 +13,7 @@ import uuid
 def screen_model_read(value):
     """Keep detected restricted content out of project-read results sent to a model."""
     from team_dlp import scan_input
-    from team_egress_guard import findings, sanitize_tool_output
+    from team_egress_guard import tool_output_findings, sanitize_tool_output
     def content_only(item):
         if isinstance(item, dict):
             return {key: content_only(part) for key, part in item.items()
@@ -31,7 +31,7 @@ def screen_model_read(value):
     clean, labels, _changed = sanitize_tool_output(scanned)
     if labels and any(label not in ('user_profile_path', 'home_path', 'user_profile_variable') for label in labels):
         raise ValueError('読み取り結果に保護対象の情報が含まれるためモデルへ渡せません。')
-    if findings(clean):
+    if tool_output_findings(clean):
         raise ValueError('読み取り結果を送信前に安全と確認できないためモデルへ渡せません。')
     # Only user-profile components are safely replaceable in a source excerpt; never return raw values.
     return clean
@@ -96,17 +96,29 @@ BLOCKED = {'.git', '.env', '.ssh', '.aws', '.azure', '.codex', '.claude', '.loca
            'data', 'backups', 'logs', 'recordings', 'records', 'profiles', 'certs',
            'engines', '.venv', '.offline_stage', 'credentials', 'secrets', 'dist', 'build'}
 TEXT = {'.py', '.js', '.ts', '.tsx', '.jsx', '.html', '.css', '.md', '.json', '.toml',
-        '.yaml', '.yml', '.txt', '.cs', '.xml', '.ps1', '.sh', '.sql', '.ini', '.cfg'}
+        '.yaml', '.yml', '.txt', '.cs', '.xml', '.ps1', '.psm1', '.psd1', '.sh', '.sql', '.ini', '.cfg'}
 
-def safe_path(root, name):
+def safe_path(root, name, *, allow_data=False):
     path = (root / name).resolve()
+    if allow_data:
+        if path.is_relative_to(Path(__file__).resolve().parent / 'data'):
+            raise ValueError('采来の運用データは読み取り対象外です。')
+        lexical = Path(os.path.abspath(root / name))
+        lexical.relative_to(root)
+        for candidate in (lexical, *lexical.parents):
+            info = candidate.lstat()
+            if candidate.is_symlink() or getattr(info, 'st_file_attributes', 0) & 0x400:
+                raise ValueError('リンク経由のデータは読み取れません。')
     if path.name.casefold() == 'config.yaml':
         raise ValueError('実設定は読み取り対象外です。設定テンプレートを指定してください。')
     relative = path.relative_to(root)
     for part in relative.parts:
         lowered = part.casefold()
-        if lowered in BLOCKED or re.search(r'(^\.env|credential|secret|token|cookie|private.key)', lowered):
+        if (lowered in BLOCKED and not (allow_data and lowered == 'data')) or re.search(r'(^\.env|credential|secret|token|cookie|private.key)', lowered):
             raise ValueError('認証情報・個人データ・生成物は読み取り対象外です。')
+    if allow_data and (path.name.casefold() in ('config.json', 'config.yml', 'auth.json', 'settings.json')
+                       or path.suffix.casefold() in ('.ini', '.cfg')):
+        raise ValueError('実設定は読み取り対象外です。')
     if path.suffix.casefold() not in TEXT:
         raise ValueError('対応するテキストファイルを指定してください。')
     if not path.is_file() or path.stat().st_size > 200000:
@@ -175,7 +187,7 @@ def files(root):
             except (ValueError, OSError):
                 continue
 
-def execute(root, name, args):
+def execute(root, name, args, *, allow_data=False):
     if name == 'list_files':
         output=[]
         for path in files(root):
@@ -185,7 +197,7 @@ def execute(root, name, args):
     if name == 'read_document':
         return read_document(root, args.get('path', ''))
     if name == 'read_file':
-        path = safe_path(root, args.get('path', ''))
+        path = safe_path(root, args.get('path', ''), allow_data=allow_data)
         start = max(1, min(100000, int(args.get('start_line', 1))))
         count = max(1, min(150, int(args.get('line_count', 100))))
         lines = path.read_text(encoding='utf-8-sig', errors='replace').splitlines()
@@ -213,7 +225,7 @@ def execute(root, name, args):
 TOOLS = [
  {'name':'web_search','description':'Search public technical information through a fail-closed egress check. Never include internal names, paths, personal data, secrets or pasted documents. Returns bounded Bing search snippets, never fetches pages.', 'inputSchema':{'type':'object','properties':{'query':{'type':'string','maxLength':200}},'required':['query'],'additionalProperties':False}},
  {'name':'list_files','description':'List bounded non-sensitive project text files.', 'inputSchema':{'type':'object','properties':{},'additionalProperties':False}},
- {'name':'read_file','description':'Read a project-relative text file, bounded lines; never writes.', 'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'start_line':{'type':'integer'},'line_count':{'type':'integer'}},'required':['path'],'additionalProperties':False}},
+ {'name':'read_file','description':'Read a project-relative text file, bounded lines; never writes. In project_work only, data text requires explicit per-file consent; protected runtime data and secrets stay denied.', 'inputSchema':{'type':'object','properties':{'path':{'type':'string'},'start_line':{'type':'integer'},'line_count':{'type':'integer'}},'required':['path'],'additionalProperties':False}},
  {'name':'search_files','description':'Search a literal term in project text files.', 'inputSchema':{'type':'object','properties':{'query':{'type':'string'}},'required':['query'],'additionalProperties':False}},
  {'name':'read_document','description':'Read a project PDF/PPTX/DOCX/XLSX as text (PDF pages; picture-only pages via local OCR; PPTX slides, tables, notes). list_files returns their paths under documents. Visual layout is checked by the user at acceptance.', 'inputSchema':{'type':'object','properties':{'path':{'type':'string'}},'required':['path'],'additionalProperties':False}},
 ]

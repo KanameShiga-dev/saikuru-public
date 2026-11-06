@@ -13,6 +13,63 @@ from team_p0_contract import initial
 
 
 class UserRecoveryTests(unittest.TestCase):
+    def command_change_question(self):
+        old = r'powershell -NoProfile -File .\tests\Run-Tests.ps1'
+        new = r'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1'
+        self.store.update(self.job_id, code_test_plan={'required': True, 'command': old},
+                          validation_commands=[old], validation_evidence={'0': {'command': old}})
+        approval = self.maintenance_question()
+        self.store.update(self.task_id, validation_runs=[{'index': 0, 'exit_code': 1}])
+        return approval, {'before': old, 'after': new}
+
+    def test_explicit_command_change_updates_contract_and_invalidates_old_evidence(self):
+        from team_code_test_contract import commands
+        approval, change = self.command_change_question()
+        target = self.target()
+        answers = {'q': {'option_id': 'yes', 'text': ''}}
+        self.assertEqual(self.engine.user_recovery_question(self.job_id, target)['command_changes'], [change])
+        self.engine.user_recovery_answer(self.job_id, target, answers, True, change)
+        job = self.store.get(self.job_id)
+        self.assertEqual(commands(job), [change['after']])
+        self.assertEqual(job['code_test_plan']['command'], change['after'])
+        self.assertEqual(job['validation_evidence'], {})
+        self.assertEqual(job['validation_command_history'][-1]['before'], change['before'])
+        self.assertEqual(job['validation_command_history'][-1]['previous_runs'][0]['exit_code'], 1)
+        self.assertEqual(self.store.get(approval['id'])['command_change'], change)
+        task = self.store.get(self.task_id)
+        self.assertEqual(task['validation_runs'], [])
+        self.assertTrue(task['requires_validation_run'])
+        self.assertEqual(task['status'], 'queued')
+        with self.assertRaises(ValueError):
+            self.engine.user_recovery_answer(self.job_id, target, answers, True, change)
+
+    def test_answer_text_alone_does_not_change_verification_command(self):
+        approval, change = self.command_change_question()
+        self.engine.user_recovery_answer(self.job_id, self.target(),
+            {'q': {'option_id': 'yes', 'text': change['after']}}, True)
+        job = self.store.get(self.job_id)
+        self.assertEqual(job['code_test_plan']['command'], change['before'])
+        self.assertNotIn('validation_command_history', job)
+        self.assertNotIn('command_change', self.store.get(approval['id']))
+
+    def test_command_change_cannot_replace_script_or_skip_confirmation(self):
+        approval, change = self.command_change_question()
+        target = self.target()
+        answers = {'q': {'option_id': 'yes', 'text': ''}}
+        for bad in (dict(change, after=change['after'] + '; Remove-Item x'),
+                    dict(change, before='powershell -NoProfile -File .\\other.ps1'),
+                    dict(change, after=change['after'].replace('Run-Tests.ps1', 'other.ps1'))):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.engine.user_recovery_answer(self.job_id, target, answers, True, bad)
+        with self.assertRaises(ValueError):
+            self.engine.user_recovery_answer(self.job_id, target, answers, False, change)
+        with self.assertRaises(ValueError):
+            self.engine.user_recovery_answer(self.job_id, target, {}, True, change)
+        job = self.store.get(self.job_id)
+        self.assertEqual(job['code_test_plan']['command'], change['before'])
+        self.assertNotIn('validation_command_history', job)
+        self.assertEqual(self.store.get(approval['id'])['status'], 'pending')
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

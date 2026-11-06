@@ -24,8 +24,32 @@ class EgressGuardTests(unittest.TestCase):
         self.assertNotIn('fictional.user', str(caught.exception))
 
     def test_other_absolute_project_paths_are_not_rejected(self):
-        self.assertEqual(findings(r'Inspect C:\Projects\demo\src\main.py'), [])
-        require_safe_egress(r'Inspect C:\Projects\demo\src\main.py')
+        self.assertEqual(findings(r'Inspect C:\AI_Work\demo\src\main.py'), [])
+        require_safe_egress(r'Inspect C:\AI_Work\demo\src\main.py')
+        slash = chr(92)
+        project_path = 'C:' + slash + 'Projects' + slash + 'demo'
+        self.assertNotIn('network_path', findings(json.dumps({'path': project_path})))
+
+    def test_json_escaped_newline_is_not_mistaken_for_unc_path(self):
+        value = 'count: "1' + chr(92) + 'n"'
+        serialized = json.dumps({'content': value})
+        self.assertNotIn('network_path', findings(serialized))
+
+    def test_serialized_project_path_in_japanese_plan_is_not_unc(self):
+        instruction = '対象はC:\\AI_Work\\PrefectureSearchのみ。外部公開しない。'
+        for value in (instruction, json.dumps(instruction, ensure_ascii=False),
+                      json.dumps({'instruction': instruction}, ensure_ascii=False)):
+            with self.subTest(value=value):
+                self.assertNotIn('network_path', findings(value))
+        shared = '\\\\server\\share\\sample'
+        for value in (shared, json.dumps({'instruction': shared})):
+            self.assertIn('network_path', findings(value))
+
+    def test_unc_paths_are_detected_in_plain_and_json_text(self):
+        slash = chr(92)
+        unc_path = slash * 2 + 'server' + slash + 'share'
+        self.assertIn('network_path', findings(unc_path))
+        self.assertIn('network_path', findings(json.dumps({'path': unc_path})))
 
     def test_local_launch_url_is_redacted_before_model_input(self):
         source = 'Launch http://127.0.0.1:8000/?token=fictional and https://localhost:8877/api.'
@@ -164,6 +188,12 @@ class EgressGuardTests(unittest.TestCase):
         self.assertNotIn('fictional', clean['content'])
         with self.assertRaises(ValueError):
             screen_model_read({'path': 'src/config.py', 'content': 'api_key=synthetic_secret_value_123'})
+
+    def test_project_read_accepts_loopback_launch_instructions(self):
+        value = {'path': 'README.md', 'content': 'Open http://127.0.0.1:8765/ or http://localhost:8765/.'}
+        self.assertEqual(screen_model_read(value), value)
+        with self.assertRaises(ValueError):
+            screen_model_read({'content': 'api_key=synthetic_secret_value_123 http://127.0.0.1:8765/'})
 
     def test_dot_local_is_not_exposed_by_project_read_broker(self):
         self.assertIn('.local', BLOCKED)

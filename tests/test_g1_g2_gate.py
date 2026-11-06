@@ -177,6 +177,121 @@ class G1G2GateTests(unittest.TestCase):
         self.assertIn('分離しました', note[0])
         self.assertEqual(before, after)
 
+    def test_missing_scope_is_prepared_before_separate_start_approval(self):
+        scope = self.project / 'SCOPE.md'
+        scope.unlink()
+        job = self.create_job()
+        old = self.g2(job['id'])
+        self.assertFalse(scope.exists())
+        preparation = old['payload']['target']['scope_preparation']
+        self.assertEqual(Path(preparation['path']), scope)
+        with self.assertRaisesRegex(ValueError, 'SCOPE.md'):
+            self.engine.decide(old['id'], True, 'Cannot start before preparation')
+        result = self.engine.prepare_plan_start(old['id'], old['payload']['fingerprint'], True)
+        self.assertEqual(scope.read_text(encoding='utf-8'), preparation['content'])
+        self.assertIn(str(self.project.resolve()), preparation['content'])
+        fresh = self.g2(job['id'])
+        self.assertEqual(result['approval_id'], fresh['id'])
+        self.assertEqual(self.store.get(old['id'])['status'], 'superseded')
+        self.assertEqual(fresh['payload']['target']['scope_status'], 'ready')
+        self.assertNotEqual(old['payload']['fingerprint'], fresh['payload']['fingerprint'])
+        self.assertEqual(self.store.get(job['id'])['g2_status'], 'pending')
+        launched = []
+        self.engine.paused = False
+        self.engine._run = lambda task: launched.append(task['id'])
+        self.engine.tick()
+        self.assertEqual(launched, [])
+        self.engine.decide(fresh['id'], True, 'Start separately')
+        self.assertEqual(self.store.get(job['id'])['g2_status'], 'approved')
+
+    def test_scope_preparation_requires_confirmation_and_current_target(self):
+        scope = self.project / 'SCOPE.md'
+        scope.unlink()
+        job = self.create_job()
+        approval = self.g2(job['id'])
+        fingerprint = approval['payload']['fingerprint']
+        for confirmed, token in ((False, fingerprint), (True, 'stale')):
+            with self.assertRaises(ValueError):
+                self.engine.prepare_plan_start(approval['id'], token, confirmed)
+            self.assertFalse(scope.exists())
+        self.store.update(self.planner(job['id'])['id'], instruction='Changed input')
+        with self.assertRaises(ValueError):
+            self.engine.prepare_plan_start(approval['id'], fingerprint, True)
+        self.assertFalse(scope.exists())
+
+    def test_scope_preparation_preserves_existing_files(self):
+        job = self.create_job()
+        approval = self.g2(job['id'])
+        scope = self.project / 'SCOPE.md'
+        before = scope.read_bytes()
+        with self.assertRaises(ValueError):
+            self.engine.prepare_plan_start(approval['id'], approval['payload']['fingerprint'], True)
+        self.assertEqual(scope.read_bytes(), before)
+        scope.unlink()
+        self.engine._request_g2(job['id'], self.planner(job['id'])['id'], 'Missing scope')
+        missing = self.g2(job['id'])
+        scope.write_text('# Created elsewhere\n', encoding='utf-8')
+        with self.assertRaises(ValueError):
+            self.engine.prepare_plan_start(missing['id'], missing['payload']['fingerprint'], True)
+        self.assertEqual(scope.read_text(encoding='utf-8'), '# Created elsewhere\n')
+
+    def test_old_pending_gate_gets_preparation_action_without_dispatch(self):
+        (self.project / 'SCOPE.md').unlink()
+        job = self.create_job()
+        old = self.g2(job['id'])
+        payload = dict(old['payload'])
+        payload['target'] = dict(payload['target'])
+        payload['target'].pop('scope_preparation')
+        self.store.update(old['id'], payload=payload, digest=self.engine._g2_payload_digest(payload))
+        self.engine.paused = False
+        launched = []
+        self.engine._run = lambda task: launched.append(task['id'])
+        self.engine.tick()
+        self.assertEqual(launched, [])
+        self.assertIn('scope_preparation', self.g2(job['id'])['payload']['target'])
+        self.assertEqual(self.store.get(old['id'])['status'], 'superseded')
+
+    def test_scope_creation_refuses_existing_path_and_linked_root(self):
+        from team_harness import create_start_scope, start_scope_content
+        scope = self.project / 'SCOPE.md'
+        before = scope.read_bytes()
+        content = start_scope_content(self.project)
+        with self.assertRaises(ValueError):
+            create_start_scope(self.project, content)
+        self.assertEqual(scope.read_bytes(), before)
+        scope.unlink()
+        with patch('team_harness._is_reparse', side_effect=lambda path: path == self.project):
+            with self.assertRaisesRegex(ValueError, 'ジャンクション'):
+                create_start_scope(self.project, content)
+        self.assertFalse(scope.exists())
+
+    def test_preparation_api_requires_local_auth_and_does_not_start_ai(self):
+        from server import Handler
+        from eval.development_readiness import reacceptance_fixture as fixture
+        scope = self.project / 'SCOPE.md'
+        scope.unlink()
+        job = self.create_job()
+        approval = self.g2(job['id'])
+        body = {'approval_id': approval['id'], 'fingerprint': approval['payload']['fingerprint'],
+                'confirmed': True}
+        with patch.object(fixture.FixtureHandler, 'do_POST', Handler.do_POST):
+            self.assertEqual(self.api('/api/jobs/prepare-start', body, authenticated=False), 403)
+            self.assertFalse(scope.exists())
+            self.assertEqual(self.api('/api/jobs/prepare-start', body, origin='http://example.invalid'), 403)
+            self.assertFalse(scope.exists())
+            self.assertEqual(self.api('/api/jobs/prepare-start', body), 200)
+        self.assertTrue(scope.is_file())
+        self.assertEqual(self.store.get(job['id'])['g2_status'], 'pending')
+
+    def test_readonly_recovery_does_not_offer_scope_creation(self):
+        (self.project / 'SCOPE.md').unlink()
+        job = self.create_job(recovery_policy={'source_job_id': 'synthetic-source', 'read_only': True})
+        approval = self.g2(job['id'])
+        self.assertNotIn('scope_preparation', approval['payload']['target'])
+        with self.assertRaises(ValueError):
+            self.engine.prepare_plan_start(approval['id'], approval['payload']['fingerprint'], True)
+        self.assertFalse((self.project / 'SCOPE.md').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

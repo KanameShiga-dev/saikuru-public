@@ -33,6 +33,7 @@ GENERIC_FOLDER_NAMES = {
 
 # Detectors are shared with the Input Guard and the outbound Tool Guard (team_dlp).
 from team_dlp import SECRET, EMAIL, PHONE, PRIVATE_IP, INTERNAL_HOST, LOCAL_PATH, MY_NUMBER
+from team_dlp import has_personal_number
 
 
 def load_policy():
@@ -89,7 +90,6 @@ def check_query(query, project=None):
             (SECRET, '認証情報・秘密情報らしき文字列'),
             (EMAIL, 'メールアドレス'),
             (PHONE, '電話番号'),
-            (MY_NUMBER, '12桁の番号（個人番号等の可能性）'),
             (PRIVATE_IP, '社内IPアドレス'),
             (INTERNAL_HOST, '社内ホスト名・ドメイン'),
             (LOCAL_PATH, 'PC内・社内共有のパス'),
@@ -97,6 +97,8 @@ def check_query(query, project=None):
         for pattern, label in checks:
             if pattern.search(text):
                 return False, label
+        if has_personal_number(text):
+            return False, '12桁の番号（個人番号等の可能性）'
         lowered = text.casefold()
         for domain in policy['blocked_domains']:
             d = str(domain).strip().casefold().lstrip('.')

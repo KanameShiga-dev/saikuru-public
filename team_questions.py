@@ -4,9 +4,13 @@ import re
 
 _TECHNICAL_QUESTION = re.compile(
     r'(?i)(?:TEMP/TMP|\bTMPDIR\b|\bPython\s*\d|\bPID\b|\bport\s*\d|ポート\s*\d|'
-    r'サンドボックス|sandbox|環境変数|実行環境|プロセス|スタックトレース|'
+    r'サンドボックス|sandbox|環境変数|プロセス|スタックトレース|'
     r'依存パッケージ|モデル設定|Provider設定|承認Revision|ACL|フック設定|'
     r'どの(?:コード|ファイル|Agent|モデル|Provider|バージョン).{0,16}(?:修正|変更|選択))')
+
+_ENVIRONMENT_MAINTENANCE = re.compile(
+    r'実行環境(?:[のを](?:確認|調査|修復|修正|変更|設定|再起動)|'
+    r'[でがはに][^。！？\n]{0,24}(?:障害|故障|失敗|壊れ|起動でき|期限[がの]?切れ))')
 
 
 def decision_metadata(kind, payload):
@@ -18,7 +22,10 @@ def decision_metadata(kind, payload):
         return 'RISK', 'authorized_person', summary or 'AI利用または操作の範囲を確認してください。'
     questions = payload.get('questions') or []
     wording = '\n'.join(str(q.get('text') or '') for q in questions if isinstance(q, dict))
-    if _TECHNICAL_QUESTION.search(summary + '\n' + wording):
+    text = summary + '\n' + wording
+    if kind == 'question' and re.search(r'(?i)ExecutionPolicy|実行ポリシー', text):
+        return 'RISK', 'authorized_person', summary or 'スクリプトの実行方法を確認してください。'
+    if _TECHNICAL_QUESTION.search(text) or _ENVIRONMENT_MAINTENANCE.search(text):
         return 'MAINTENANCE', 'maintainer', '開発エンジンの確認が必要です。途中成果は保存されています。'
     return 'BUSINESS', 'end_user', summary or '依頼内容を確認してください。'
 

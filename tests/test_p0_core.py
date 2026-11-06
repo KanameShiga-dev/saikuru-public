@@ -10,12 +10,49 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from eval.development_readiness.reacceptance_fixture import close, make_fixture
-from team_p0_contract import artifact_records, current_artifacts, initial, p0_artifact_text, progress, validate_plan
+from team_p0_contract import (
+    artifact_records,
+    current_artifacts,
+    initial,
+    p0_artifact_text,
+    progress,
+    selected_project_context,
+    validate_plan,
+)
 from team_recovery import p0_failure_category, p0_interruption, retry_local_read
 from team_store import Store
 
 
 class P0ContractTests(unittest.TestCase):
+    def test_environment_background_is_not_a_maintenance_request(self):
+        from team_questions import decision_metadata
+        for background in (
+                'Playwright実行環境は未準備です。',
+                '実行環境の有無は未確認です。',
+                'Pythonの実行環境がありません。',
+        ):
+            with self.subTest(background=background):
+                category, role, _ = decision_metadata('question', {
+                    'summary': '画面の確認方法に利用者の判断が必要です。',
+                    'questions': [{'text': 'Web画面の確認方法を選んでください。' + background}]})
+                self.assertEqual((category, role), ('BUSINESS', 'end_user'))
+
+    def test_environment_repair_and_risk_routes_are_preserved(self):
+        from team_questions import decision_metadata
+        for text in ('実行環境を確認しますか？', '架空の実行環境の確認',
+                     '実行環境で承認の期限が切れました。',
+                     'TEMP/TMPを変更しますか？', 'サンドボックスの設定を修正しますか？'):
+            with self.subTest(text=text):
+                self.assertEqual(decision_metadata('question', {'summary': text})[:2],
+                                 ('MAINTENANCE', 'maintainer'))
+        self.assertEqual(decision_metadata('tool', {'summary': '画面を確認する'})[:2],
+                         ('RISK', 'authorized_person'))
+        self.assertEqual(decision_metadata('question', {'reference_guard': True})[:2],
+                         ('RISK', 'authorized_person'))
+        self.assertEqual(decision_metadata('question', {
+            'summary': '実行ポリシーの対応をプロセス内だけに限定するか選んでください。'})[:2],
+                         ('RISK', 'authorized_person'))
+
     def test_shared_fixture_matches_server_progress(self):
         fixture = json.loads((Path(__file__).parent / 'fixtures' / 'p0' / 'state.json').read_text(encoding='utf-8'))
         for job in fixture['jobs']:
@@ -91,6 +128,38 @@ class P0ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '対応しない'):
             validate_plan(job, plan)
 
+    def test_verification_only_plan_can_mark_code_tests_not_required(self):
+        job = {'goal': 'Verify a fictional project without changing files',
+               'code_test_contract_version': 1}
+        plan = {
+            'goal_contract': {'primary_goal': 'Verify existing behavior',
+                              'deliverables': ['Verification report'],
+                              'acceptance_criteria': ['Existing commands complete and results are reported'],
+                              'non_goals': ['Changing project files'], 'constraints': ['No file changes']},
+            'tasks': [{'title': 'Run existing checks', 'instruction': 'Run only requested checks.',
+                       'role': 'builder', 'goal_links': ['Verification report']}],
+            'code_test_plan': {
+                'required': False,
+                'reason': 'This request verifies existing files and explicitly forbids code changes.',
+                'cases': [], 'command': '', 'existing_tests': [],
+                'test_methods': [], 'preconditions': [], 'setup_steps': [],
+                'synthetic_accounts': [], 'ui_test_required': False,
+                'ui_test_tool': 'not_applicable', 'ui_test_reason': '',
+                'ui_test_command': '', 'cleanup_steps': [],
+            },
+        }
+
+        self.assertEqual(validate_plan(job, plan)['primary_goal'], 'Verify existing behavior')
+
+    def test_selected_project_context_carries_authoritative_root(self):
+        with tempfile.TemporaryDirectory() as folder:
+            context = selected_project_context(folder)
+
+        self.assertIn(str(Path(folder).resolve()), context)
+        self.assertIn('正本', context)
+        self.assertIn('移転前の記録', context)
+        self.assertIn('自動修正しない', context)
+
     def test_artifact_is_current_and_contained_in_project(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -104,6 +173,28 @@ class P0ContractTests(unittest.TestCase):
             (root / '.env').write_text('FICTIONAL_SETTING=placeholder\n', encoding='utf-8')
             with self.assertRaisesRegex(ValueError, '機密設定'):
                 artifact_records(folder, ['.env'])
+
+    def test_development_data_artifact_is_hashed_without_granting_read_access(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'data').mkdir()
+            path = root / 'data' / 'regional-info.json'
+            path.write_text('{"region":"fictional"}', encoding='utf-8')
+            job = {'project': folder, 'p0_contract_version': 1,
+                   'p0_artifacts': artifact_records(folder, ['data/regional-info.json'])}
+            self.assertEqual(current_artifacts(job), (True, ''))
+            with self.assertRaises(ValueError):
+                p0_artifact_text(job, 'data/regional-info.json')
+            path.write_text('{"region":"changed"}', encoding='utf-8')
+            self.assertFalse(current_artifacts(job)[0])
+            for name in ('config.json', 'auth.json', 'secret.json', 'team.sqlite3'):
+                (root / 'data' / name).write_text('{}', encoding='utf-8')
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    artifact_records(folder, ['data/' + name])
+            from unittest.mock import patch
+            with patch('consultation_read_tools.screen_model_read', side_effect=ValueError('protected')):
+                with self.assertRaises(ValueError):
+                    artifact_records(folder, ['data/regional-info.json'])
 
     def test_local_read_retries_only_transient_sqlite_lock(self):
         calls = []
@@ -154,6 +245,38 @@ class P0ContractTests(unittest.TestCase):
 
 
 class P0ApiTests(unittest.TestCase):
+    def test_process_command_change_is_explicit_local_user_risk_decision(self):
+        store, engine = self.server.app.store, self.server.app.engine
+        job = store.all('job')[0]
+        old = r'powershell -NoProfile -File .\tests\Run-Tests.ps1'
+        new = r'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1'
+        store.update(job['id'], p0_contract_version=1, goal_contract=initial(job['goal']),
+                     status='blocked', code_test_plan={'required': True, 'command': old},
+                     validation_commands=[], validation_evidence={'0': {'command': old}})
+        task = next(t for t in store.for_job('task', job['id']) if t['role'] == 'builder')
+        task = store.update(task['id'], status='blocked')
+        approval = engine.new_approval(task, 'question', {
+            'summary': '実行ポリシーへの対応を確認してください。',
+            'questions': [{'id': 'policy', 'text': 'プロセス内だけの実行方法を承認しますか？',
+                           'options': [{'id': 'process', 'label': 'プロセス限定実行を承認する',
+                                        'input_required': False, 'input_label': ''}]}]})
+        self.assertEqual(approval['intended_role'], 'authorized_person')
+        status, public = self.request('/api/state')
+        shown = next(a for a in public['approvals'] if a['id'] == approval['id'])
+        self.assertEqual(status, 200)
+        change = {'before': old, 'after': new}
+        self.assertEqual(shown['command_changes'], [change])
+        payload = {'id': approval['id'], 'allow': True,
+                   'answers': {'policy': {'option_id': 'process', 'text': ''}},
+                   'command_change': change}
+        self.assertEqual(self.request('/api/decide', dict(payload, allow=False))[0], 400)
+        self.assertEqual(store.get(job['id'])['code_test_plan']['command'], old)
+        self.assertEqual(self.request('/api/decide', payload)[0], 200)
+        self.assertEqual(store.get(job['id'])['code_test_plan']['command'], new)
+        self.assertEqual(store.get(task['id'])['status'], 'queued')
+        self.assertEqual(store.get(job['id'])['validation_evidence'], {})
+        self.assertEqual(self.request('/api/decide', payload)[0], 400)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -199,6 +322,43 @@ class P0ApiTests(unittest.TestCase):
         self.assertEqual(self.request(address.replace('lookup.py', 'other.py'))[0], 400)
         path.write_bytes(b'print("changed")\n')
         self.assertEqual(self.request(address)[0], 400)
+
+    def test_pending_user_question_route_is_repaired_without_execution(self):
+        store, engine = self.server.app.store, self.server.app.engine
+        job = store.all('job')[0]
+        store.update(job['id'], p0_contract_version=1, status='blocked',
+                     goal_contract=initial(job['goal']),
+                     p0_interruption={'recovery_status': 'retrying'})
+        task = store.for_job('task', job['id'])[0]
+        task = store.update(task['id'], status='blocked')
+        payload = {'summary': '画面の確認方法を選んでください。',
+                   'questions': [{'id': 'ui', 'text': 'Playwright実行環境は未準備です。確認方法を選んでください。',
+                                  'options': [{'id': 'manual', 'label': '利用者がブラウザーで確認する',
+                                               'input_required': False, 'input_label': ''}]}]}
+        approval = engine.new_approval(task, 'question', payload)
+        store.update(approval['id'], category='MAINTENANCE', intended_role='maintainer',
+                     business_summary='開発エンジンの確認が必要です。')
+        technical = engine.new_approval(task, 'question', {
+            'summary': 'TEMP/TMPの設定を修正しますか？', 'questions': []})
+        engine._refresh_pending_question_routes()
+        saved = store.get(approval['id'])
+        self.assertEqual((saved['category'], saved['intended_role']), ('BUSINESS', 'end_user'))
+        self.assertEqual(saved['payload'], payload)
+        self.assertEqual(saved['digest'], approval['digest'])
+        self.assertEqual(saved['status'], 'pending')
+        self.assertEqual(store.get(task['id'])['status'], 'blocked')
+        self.assertEqual(store.get(job['id'])['p0_interruption']['recovery_status'], 'retrying')
+        self.assertEqual(store.get(technical['id'])['intended_role'], 'maintainer')
+        engine._refresh_pending_question_routes()
+        self.assertEqual(len([e for e in store.events()
+                              if e['type'] == 'question_route_corrected']), 1)
+        # A separate maintenance question still masks this task; only remove the fixture decision.
+        store.update(technical['id'], status='superseded', intended_role='end_user')
+        status, state = self.request('/api/state')
+        self.assertEqual(status, 200)
+        public = next(a for a in state['approvals'] if a['id'] == approval['id'])
+        self.assertEqual(public['payload']['questions'], payload['questions'])
+        self.assertEqual(public['intended_role'], 'end_user')
 
     def test_maintenance_question_is_not_a_user_approval(self):
         job = self.server.app.store.all('job')[0]

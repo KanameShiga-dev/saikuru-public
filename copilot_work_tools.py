@@ -10,6 +10,7 @@ Usage: python copilot_work_tools.py <project> <token-file>
 The token file holds {"endpoint", "task_id", "token"}; it is read once at start (the token is never on a command line).
 """
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -152,6 +153,59 @@ class Server:
     def __init__(self, root, config):
         self.root, self.config = root, dict(config, root=str(root))
         self.cancelled, self.lock, self.reads = set(), threading.Lock(), 0
+        self.data_read_approvals = {}
+        self.data_read_lock = threading.Lock()
+
+    def data_files(self):
+        found = []
+        scanned = 0
+        for directory, dirs, names in os.walk(self.root, followlinks=False):
+            dirs[:] = [d for d in dirs if (d.casefold() not in reader.BLOCKED or d.casefold() == 'data')
+                       and not (Path(directory) / d).is_symlink()
+                       and not (getattr((Path(directory) / d).lstat(), 'st_file_attributes', 0) & 0x400)
+                       and (Path(directory) / d).resolve() != Path(reader.__file__).resolve().parent / 'data']
+            for name in names:
+                scanned += 1
+                if scanned > 5000:
+                    return found
+                relative = (Path(directory) / name).relative_to(self.root)
+                if 'data' not in [part.casefold() for part in relative.parts]:
+                    continue
+                try:
+                    reader.safe_path(self.root, str(relative), allow_data=True)
+                except (OSError, ValueError):
+                    continue
+                found.append(str(relative))
+                if len(found) >= 400:
+                    return found
+        return found
+
+    def read_data(self, request_id, args):
+        with self.data_read_lock:
+            return self._read_data(request_id, args)
+
+    def _read_data(self, request_id, args):
+        if request_id in self.cancelled:
+            raise Denied('取り消された要求のため実行しません。')
+        path = reader.safe_path(self.root, args.get('path', ''), allow_data=True)
+        before = path.read_bytes()
+        reader.screen_model_read(before.decode('utf-8-sig'))
+        digest = hashlib.sha256(before).hexdigest()
+        if self.data_read_approvals.get(str(path)) != digest:
+            ask(self.config, 'ReadProjectData', {'file_path': str(path), 'sha256': digest})
+            if request_id in self.cancelled:
+                raise Denied('取り消された要求のため実行しません。')
+            self.data_read_approvals[str(path)] = digest
+        if (reader.safe_path(self.root, args['path'], allow_data=True) != path
+                or path.read_bytes() != before):
+            self.data_read_approvals.pop(str(path), None)
+            raise Denied('承認したデータが変更されました。再確認が必要です。')
+        value = reader.execute(self.root, 'read_file', args, allow_data=True)
+        value = reader.screen_model_read(value)
+        if request_id in self.cancelled or path.read_bytes() != before:
+            self.data_read_approvals.pop(str(path), None)
+            raise Denied('読み取りが取り消されたか、データが変更されました。再確認が必要です。')
+        return value
 
     def send(self, answer):
         with self.lock:
@@ -164,7 +218,14 @@ class Server:
                 self.reads += 1
                 if self.reads > 200:
                     raise Denied('読み取り呼出上限に達しました。')
-                value = reader.execute(self.root, name, args)
+                if name == 'read_file' and 'data' in [
+                        part.casefold() for part in Path(args.get('path', '')).parts]:
+                    value = self.read_data(request_id, args)
+                else:
+                    value = reader.execute(self.root, name, args)
+                if name == 'list_files':
+                    value['approval_required_files'] = self.data_files()
+                    value['data_read_policy'] = 'data内のテキストはread_fileで指定し、ファイルごとに利用者の承認が必要です。検索は対象外です。'
             elif name == 'write_file':
                 path, content = target(self.root, args.get('path')), args.get('content')
                 if not isinstance(content, str):
@@ -204,6 +265,9 @@ class Server:
             result = {'content': [{'type': 'text', 'text': json.dumps(value, ensure_ascii=False)}]}
         except Denied as exc:
             result = {'content': [{'type': 'text', 'text': '拒否: ' + str(exc)}], 'isError': True}
+        except (ValueError, OSError, UnicodeError) as exc:
+            result = {'content': [{'type': 'text', 'text': '読み取り・操作を完了できません: ' + str(exc)[:500]}],
+                      'isError': True}
         except Exception:
             result = {'content': [{'type': 'text', 'text': '拒否: 対象外のパス・操作、または上限です。'}], 'isError': True}
         # Tool results are returned to Copilot. Apply the same last-boundary output

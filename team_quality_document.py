@@ -15,7 +15,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from team_dlp import EMAIL, MY_NUMBER, PHONE, SECRET, confidential_terms, has_card_number
+from team_dlp import EMAIL, PHONE, SECRET, confidential_terms, has_card_number, has_personal_number
 
 MAX_BYTES = 2_000_000
 EXTENSIONS = {'.md': 'markdown', '.markdown': 'markdown', '.html': 'html', '.htm': 'html'}
@@ -204,7 +204,7 @@ def _sensitive(text):
         strict.append('メールアドレス')
     if PHONE.search(text):
         strict.append('電話番号')
-    if MY_NUMBER.search(text):
+    if has_personal_number(text):
         weak.append('12桁の番号らしき数字')
     if has_card_number(text):
         weak.append('カード番号らしき数字')

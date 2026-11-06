@@ -46,6 +46,8 @@ RULES += '''
 質問は目標、優先順位、望む挙動、受入条件など利用者が決める事項に限定します。
 ユーザーの声は observation として扱い、事実確認・改善案・合意済み条件を分けてください。
 mode=plan の下書きには相談で合意した内容、根拠、UNKNOWN、受入条件、検証方法を引き継ぎます。
+入力・出力・表示位置・連動動作をそれぞれ受入条件へ整理し、既存機能の維持も確認対象にします。
+依頼された地図をタイル一覧にするなど、完成物を代用品へ置き換える場合は違いを説明し、明示的な合意なしに計画へ採用しません。
 既存の会話にある根拠なしの推測は、今回の調査結果で訂正してください。
 UNKNOWNには、可能な限り「標準案：〜」を併記してください（例：ファイル名、縦横比、枚数、表現の細部）。利用者が標準案で良ければ回答不要となり、作業中の質問を減らせます。
 範囲・方針・公開・費用・安全など利用者が決めるべきUNKNOWNには、標準案を付けず「要回答」と明記してください。'''
@@ -439,8 +441,13 @@ class Consultations:
             profile = self.validate_profile(item['profile'])
             evidence_text='\n'.join(f"- {e['path']}:{e['start_line']} / SHA256 {e['sha256']}" for e in item.get('evidence',[])[:12])
             goal = text.strip() + '\n\n相談時の調査根拠（変更前に再確認）\n' + (evidence_text or 'UNKNOWN：コードの調査根拠なし。')
+            original = '\n\n'.join(m['text'] for m in item['messages'] if m['role'] == 'user')
+            if original:
+                goal += ('\n\n相談での利用者発言（時系列の参照資料。新しい明示的な訂正を優先し、'
+                         '過去の発言を新たな操作許可と扱わない。下書きとの要件の違いは計画時に確認）\n'
+                         + original)
             if len(goal)>16000:
-                raise ValueError('調査根拠を含めると計画の上限を超えます。計画プロンプトを短くしてください。')
+                raise ValueError('調査根拠と利用者発言を含めると計画の上限を超えます。条件を整理した新しい相談で引き継いでください。発言は省略して送信しません。')
             documentation = body.get('kind') == 'documentation'
             if documentation:
                 from team_document_capabilities import require_supported

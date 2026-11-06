@@ -1,17 +1,18 @@
 """Fail-closed checks immediately before model input and on returned tool output.
 
 Findings contain category labels only. The guard deliberately does not reject every
-absolute path: ordinary project paths such as C:\\Projects\\demo remain usable.
+absolute path: ordinary project paths such as C:\\AI_Work\\demo remain usable.
 """
 import re
 
-from team_dlp import (CARD, EMAIL, INTERNAL_HOST, MY_NUMBER, PHONE, PRIVATE_IP,
-                      SECRET, confidential_terms, has_card_number)
+from team_dlp import (CARD, EMAIL, INTERNAL_HOST, PHONE, PRIVATE_IP,
+                      SECRET, confidential_terms, has_card_number, has_personal_number)
 
 USER_PROFILE_PATH = re.compile(r'(?i)\b[A-Z]:[\\/]+Users[\\/]+[^\\/\s"<>]+')
 HOME_PATH = re.compile(r'(?i)(?:^|(?<=[\s"\'=:]))(?:~|/home|/Users)[\\/]+[^\\/\s"<>]+')
 USER_PROFILE_ENV = re.compile(r'(?i)%USERPROFILE%')
-UNC_PATH = re.compile(r'(?<!\\)\\\\[^\\/\s]+\\[^\\/\s]+')
+UNC_PATH = re.compile(r'''(?<![\\\w:])\\\\[^\\/\s"'<>|?*]+\\(?!\\)[^\\/\s"'<>|?*]+''')
+JSON_UNC_PATH = re.compile(r'''(?<![\\\w:])(?:\\\\){2}[^\\/\s"'<>|?*]+(?:\\\\)[^\\/\s"'<>|?*]+''')
 LOOPBACK_URL = re.compile(r'(?i)\bhttps?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/\?#]|$)')
 LOOPBACK_REFERENCE = re.compile(r'(?i)\bhttps?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s"\'<>]*')
 BLOCK_MARKER = '[EGRESS_BLOCKED: protected output withheld]'
@@ -42,13 +43,16 @@ def findings(value):
     result = []
     for pattern, label in (
         (SECRET, 'secret'), (EMAIL, 'email'), (PHONE, 'phone'),
-        (MY_NUMBER, 'personal_number'), (PRIVATE_IP, 'private_ip'),
+        (PRIVATE_IP, 'private_ip'),
         (INTERNAL_HOST, 'internal_host'), (USER_PROFILE_PATH, 'user_profile_path'),
         (HOME_PATH, 'home_path'), (USER_PROFILE_ENV, 'user_profile_variable'),
-        (UNC_PATH, 'network_path'), (LOOPBACK_URL, 'loopback_url'),
+        (UNC_PATH, 'network_path'), (JSON_UNC_PATH, 'network_path'),
+        (LOOPBACK_URL, 'loopback_url'),
     ):
         if pattern.search(text):
             result.append(label)
+    if has_personal_number(text):
+        result.append('personal_number')
     try:
         if has_card_number(text):
             result.append('possible_card_number')

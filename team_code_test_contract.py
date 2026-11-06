@@ -6,9 +6,19 @@ the existing command-approval path; only current, recorded results count.
 
 import hashlib
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from team_validation_gate import findings, validate_commands
+
+
+def process_bypass_command(command):
+    """Offer only a process-local option for the same relative PowerShell script."""
+    match = re.fullmatch(
+        r'(?i)(powershell(?:\.exe)?\s+-NoProfile)(\s+-File\s+'
+        r'("\.[\\/][^"\r\n;&|<>`$]+\.ps1"|\.[\\/][^\s;&|<>`$]+\.ps1))', command)
+    if not match or '..' in PureWindowsPath(match[3].strip('"')).parts:
+        return None
+    return match[1] + ' -ExecutionPolicy Bypass' + match[2]
 
 
 def validate_plan(value):
@@ -99,6 +109,28 @@ def validate_plan(value):
             'ui_test_command': ui_command.strip(), 'cleanup_steps': cleanup_steps}
 
 
+def _auth_test_required(text):
+    term = r'(?:認証|ログイン|権限|テストアカウント)'
+    feature = term + r'(?:機能|処理|システム)?'
+    prohibited_action = r'(?:実装|削除|公開|権限変更|外部アクセス|コマンド実行|テスト実行)'
+    # Remove explicit exclusions only; a positive requirement elsewhere still counts.
+    exclusions = (
+        feature + r'(?:[・/／、](?:' + feature + r'|DB|外部API|外部公開))*'
+        r'(?:は|が|を)?(?:存在しない|ない|なく|ありません|がない|がなく|'
+        r'確認した範囲にない|確認した範囲にはない)',
+        r'架空(?:の)?(?:テスト)?アカウント(?:は|を)(?:作らない|作成しない|不要|対象外)',
+        prohibited_action + r'(?:[・/／、]' + prohibited_action + r')*'
+        r'(?:は|を)(?:許可しない|禁止する)',
+        feature + r'(?:[・/／、](?:' + feature + r'|DB|外部API|外部公開))*'
+        r'(?:は|を)?(?:設けない|実装しない|追加しない|不要|対象外|依頼対象外|なし|無し|無い|はない)',
+        r'(?i)\b(?:no|without)\s+(?:authentication|authorization|login|sign.?in|accounts?)\b',
+    )
+    for pattern in exclusions:
+        text = re.sub(pattern, '', text)
+    return bool(re.search(r'(?i)\b(authentication|authorization|login|sign.?in|account|role-based)\b'
+                          r'|認証|ログイン|権限|テストアカウント', text))
+
+
 def planning_issues(result, job):
     """Catch test setup omissions before presenting a plan for approval."""
     # This contract was added after existing jobs had already been stored.
@@ -114,8 +146,7 @@ def planning_issues(result, job):
     ui_required = bool(re.search(r'(?i)\b(web|website|browser|html|frontend|front-end|user interface|ui)\b'
                                  r'|webシステム|webアプリ|ブラウザ|画面|画面操作|ユーザーインターフェース',
                                  scope_text))
-    auth_required = bool(re.search(r'(?i)\b(authentication|authorization|login|sign.?in|account|role-based)\b'
-                                   r'|認証|ログイン|権限|テストアカウント', scope_text))
+    auth_required = _auth_test_required(scope_text)
     if not plan.get('required'):
         if (job.get('code_test_contract_version') and ui_required
                 and any(isinstance(t, dict) and t.get('role') == 'builder' for t in result.get('tasks') or [])):

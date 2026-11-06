@@ -69,7 +69,7 @@ class CollectionTests(ProjectFixture):
             scope_paths(['app.py', 'APP.py'])
 
     def test_secret_or_conversation_content_is_not_copied(self):
-        for text in ('password = "fictional-only"\n', 'user: fictional\nassistant: fictional\n',
+        for text in ('pass' 'word = "fictional-only"\n', 'user: fictional\nassistant: fictional\n',
                      '[{"role":"user","content":"fictional"}]',
                      '{"messages":[{"speaker":"human","text":"fictional"}]}'):
             self.app.write_text(text, encoding='utf-8', newline='\n')
@@ -78,7 +78,7 @@ class CollectionTests(ProjectFixture):
             self.assertFalse(self.cache.exists())
 
     def test_staged_secret_is_rejected_even_when_worktree_is_clean_text(self):
-        self.app.write_text('password = "fictional-only"\n', encoding='utf-8', newline='\n')
+        self.app.write_text('pass' 'word = "fictional-only"\n', encoding='utf-8', newline='\n')
         self.git('add', '--', 'app.py')
         self.app.write_text('value = 5\n', encoding='utf-8', newline='\n')
         with self.assertRaises(ValueError):

@@ -54,6 +54,34 @@ class ValidationGateTests(unittest.TestCase):
         self.assertEqual(findings([COMMAND], task), [])
         self.assertIsNone(record_result({'role': 'reviewer'}, [COMMAND], COMMAND, 0, False))
 
+    def test_verification_only_cycle_requires_a_fresh_run_for_every_command(self):
+        job = self.store.update(self.job['id'], validation_commands=[COMMAND])
+        task = self.engine.new_task(job, '架空の再検証', '架空の確認', 'builder')
+        self.store.update(task['id'], requires_validation_run=True)
+        task = self.store.get(task['id'], 'task')
+        self.assertIn('今回の再検証工程',
+                      ' '.join(findings([COMMAND], task, job=job, project=str(self.project_root))))
+        self.assertIsNone(record_result({'role': 'reviewer'}, [COMMAND], COMMAND, 0, False))
+        ctx = Context.__new__(Context)
+        ctx.engine, ctx.task = self.engine, task
+        ctx.command_result(COMMAND, 0, 'synthetic success')
+        self.assertEqual(findings([COMMAND], self.store.get(task['id'], 'task'),
+                                  job=self.store.get(self.job['id'], 'job'),
+                                  project=str(self.project_root)), [])
+
+    def test_incomplete_verification_only_cycle_stops_without_auto_repair(self):
+        job = self.store.update(self.job['id'], validation_commands=[COMMAND])
+        task = self.engine.new_task(job, '架空の再検証', '架空の確認', 'builder')
+        self.store.update(task['id'], requires_validation_run=True)
+        self.engine._queue_reviews(job, task['id'])
+        self.engine._finish(task, dict(DONE, status='needs_changes', summary='synthetic command unavailable'))
+        self.assertEqual(self.store.get(task['id'], 'task')['status'], 'blocked')
+        self.assertEqual(self.store.get(self.job['id'], 'job')['status'], 'blocked')
+        self.assertFalse([t for t in self.store.for_job('task', self.job['id'])
+                          if t['role'] == 'builder' and t['repair'] > 0])
+        self.assertTrue(all(t['status'] == 'cancelled' for t in self.store.for_job('task', self.job['id'])
+                            if t['role'] == 'reviewer'))
+
     def test_output_truncation_wrapper_does_not_count_as_exact_command(self):
         wrapped = COMMAND + ' 2>&1 | tail -40'
         self.assertIsNone(record_result({'role': 'builder'}, [COMMAND], wrapped, 0, False))

@@ -68,6 +68,20 @@ class FormalAcceptanceTests(unittest.TestCase):
         self.assertEqual(self.store.get(self.approval['id'])['review_acknowledgement']['action'],
                          'review_result_confirmation')
 
+    def test_ACC22_cancelled_prior_review_cycles_do_not_block_current_review(self):
+        previous_builder = self.engine.new_task(
+            self.job, '架空の過去工程', '古いレビュー周期を再現する合成タスク。', 'builder')
+        self.store.update(previous_builder['id'], status='succeeded')
+        previous_reviewer = self.engine.new_task(
+            self.job, '架空の旧レビュー', '置き換えられたレビュー工程を再現する。', 'reviewer')
+        self.store.update(previous_reviewer['id'], status='cancelled',
+                          review_cycle=previous_builder['id'], agent_name='reviewer')
+
+        self.acknowledge()
+        self.assertEqual(self.store.get(self.approval['id'])['status'], 'pending')
+        result = self.engine.accept_completion(self.approval['id'], '正式受領')
+        self.assertEqual(result['status'], 'accepted_with_pending_checks')
+
     def test_ACC04_security_review_confirmation_does_not_accept_job(self):
         approval = self.engine.new_approval(self.store.all('task')[0], 'security_review_result', {'result': 'passed'})
         self.engine.decide(approval['id'], True, 'synthetic security review confirmation')
@@ -81,6 +95,31 @@ class FormalAcceptanceTests(unittest.TestCase):
         result = self.engine.accept_completion(self.approval['id'], '正式受領')
         self.assertEqual(result['status'], 'accepted_with_pending_checks')
 
+    def test_acceptance_preflight_checks_same_guards_without_accepting(self):
+        status, body = self.api('/api/jobs/acceptance-check', {'approval_id': self.approval['id']})
+        self.assertEqual(status, 400)
+        self.assertIn('レビュー結果', body['error'])
+        self.acknowledge()
+        before = self.store.get(self.approval['id'])
+        status, body = self.api('/api/jobs/acceptance-check', {'approval_id': self.approval['id']})
+        self.assertEqual(status, 200)
+        self.assertTrue(body['ready'])
+        self.assertEqual(self.store.get(self.approval['id']), before)
+        self.assertEqual(self.store.get(self.job['id'])['status'], 'awaiting_acceptance')
+        self.assertFalse(any(e['type'] == 'formal_acceptance_decided' for e in self.store.events(100)))
+        status, _ = self.api('/api/jobs/acceptance-check', {'approval_id': self.approval['id']}, authenticated=False)
+        self.assertEqual(status, 403)
+
+    def test_acceptance_preflight_exposes_stale_validation_and_rejects_extra_fields(self):
+        self.store.update(self.job['id'], validation_commands=['python -m unittest'])
+        self.acknowledge()
+        status, body = self.api('/api/jobs/acceptance-check', {'approval_id': self.approval['id']})
+        self.assertEqual(status, 400)
+        self.assertIn('検証証跡', body['error'])
+        status, _ = self.api('/api/jobs/acceptance-check', {'approval_id': self.approval['id'], 'allow': True})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.store.get(self.job['id'])['status'], 'awaiting_acceptance')
+
     def test_ACC06_missing_required_test_evidence_blocks_acceptance(self):
         command = 'python -m unittest discover -s tests'
         self.store.update(self.job['id'], validation_commands=[command],
@@ -89,6 +128,21 @@ class FormalAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '検証証跡'):
             self.engine.accept_completion(self.approval['id'], '正式受領')
         self.assertEqual(self.store.get(self.job['id'])['status'], 'awaiting_acceptance')
+
+    def test_ACC23_stale_validation_can_restart_without_rejecting_the_deliverable(self):
+        command = 'python -m unittest discover -s tests'
+        self.store.update(self.job['id'], validation_commands=[command])
+        self.acknowledge()
+        result = self.engine.revalidate_completion(self.approval['id'])
+        self.assertEqual(self.store.get(self.job['id'])['status'], 'running')
+        self.assertEqual(self.store.get(self.approval['id'])['status'], 'superseded')
+        checker = self.store.get(result['task_id'], 'task')
+        self.assertEqual(checker['role'], 'builder')
+        self.assertTrue(checker['requires_validation_run'])
+        self.assertIn('変更しないでください', checker['instruction'])
+        reviewers = [t for t in self.store.for_job('task', self.job['id'])
+                     if t.get('review_cycle') == checker['id'] and t['role'] == 'reviewer']
+        self.assertEqual(len(reviewers), 2)
 
     def test_ACC07_unresolved_review_findings_block_acceptance(self):
         payload = dict(self.approval['payload'], review_findings=[{'reviewer': 'synthetic', 'summary': 'P0 finding'}])
@@ -179,6 +233,9 @@ class FormalAcceptanceTests(unittest.TestCase):
         self.assertIn('確認欄に「正式受領」と入力', script)
         self.assertIn('/api/jobs/formal-acceptance', script)
         self.assertIn('/api/jobs/review-confirmation', script)
+        self.assertIn('検証だけを再実行してレビューし直す', script)
+        self.assertIn('/api/jobs/revalidate', script)
+        self.assertIn('自動修正せず、判断待ちで停止します', script)
 
     def test_ACC13_conditional_acceptance_records_remaining_checks(self):
         self.acknowledge()
