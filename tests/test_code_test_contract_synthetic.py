@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from team_code_test_contract import commands, snapshot_files, validate_plan, verify_snapshot
+from team_code_test_contract import commands, snapshot_files, validate_plan, verify_snapshot, _auth_test_required, process_bypass_command
 from team_adapters import schema_errors
 from team_config import default_config
 from team_engine import Context, Engine, PLAN_SCHEMA_TESTS, RESULT_SCHEMA_TESTS
@@ -16,13 +16,103 @@ COMMAND = 'python -B -X utf8 -m unittest test_calc'
 PLAN = {'required': True, 'reason': '架空の計算コードを変更する',
         'cases': ['二つの数量を正しく足す'], 'command': COMMAND, 'existing_tests': []}
 DONE = {'status': 'done', 'summary': '架空の作業が完了', 'checks': [],
-        'pending_checks': [], 'question': '', 'questions': [], 'context_updates': [],
+        'pending_checks': [], 'pending_check_details': [], 'question': '', 'questions': [], 'context_updates': [],
         'warnings': [], 'stage_complete': True, 'blocking_reasons': [],
         'test_files': ['test_calc.py'], 'test_change_reason': ''}
 REVIEW = {key: value for key, value in DONE.items() if key not in ('test_files', 'test_change_reason')}
 
 
 class CodeTestContractTests(unittest.TestCase):
+    def test_process_bypass_proposal_is_limited_to_same_relative_script(self):
+        command = r'powershell -NoProfile -File .\tests\Run-Tests.ps1'
+        self.assertEqual(process_bypass_command(command),
+                         r'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1')
+        for command in (command + '; echo x', 'Set-ExecutionPolicy RemoteSigned',
+                        r'powershell -NoProfile -File ..\outside.ps1',
+                        r'powershell -NoProfile -File .\..\outside.ps1',
+                        r'powershell -NoProfile -File C:\outside.ps1',
+                        r'powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1'):
+            with self.subTest(command=command):
+                self.assertIsNone(process_bypass_command(command))
+
+    def test_auth_exclusions_do_not_require_accounts(self):
+        for text in ('固定データと認証なしの構成にする。',
+                     '認証・DB・外部API・外部公開は設けない。',
+                     '認証機能は不要。', 'ログイン機能は依頼対象外。',
+                     '認証・権限機能は対象外。',
+                     'この下書きは実装・削除・公開・権限変更・外部アクセス・コマンド実行・テスト実行を許可しない。',
+                     '権限変更は禁止する。',
+                     'A server without authentication', 'No login is required'):
+            with self.subTest(text=text):
+                self.assertFalse(_auth_test_required(text))
+
+    def test_positive_auth_requirement_survives_other_exclusions(self):
+        for text in ('認証機能を実装する', 'ログイン画面を確認する', '権限を確認する',
+                     '認証なしの公開画面とログイン機能を実装する',
+                     '認証は不要。管理画面の権限をテストする',
+                     '権限変更を許可しない。ログイン画面を確認する。',
+                     'ログイン画面を確認する。公開・権限変更を許可しない。',
+                     'No authentication on public pages. Test login on admin pages.'):
+            with self.subTest(text=text):
+                self.assertTrue(_auth_test_required(text))
+
+    def test_observed_auth_absence_does_not_require_fictional_accounts(self):
+        for text in ('認証機能がないため架空アカウントは作らず、架空の検索入力を使います。',
+                     '認証機能は確認した範囲にないため、架空アカウントは作らない。',
+                     '認証・権限機能がなく、検索を確認する。',
+                     '認証機能はありません。検索を確認する。'):
+            with self.subTest(text=text):
+                self.assertFalse(_auth_test_required(text))
+                self.assertTrue(_auth_test_required(text + '管理画面のログイン機能をテストする。'))
+
+    def test_saved_authless_plan_returns_to_approval_without_ai_or_execution(self):
+        self.check_saved_plan_recovery({'recovery_status': 'retrying'})
+
+    def test_permission_prohibition_plan_recovers_without_prior_interruption(self):
+        self.check_saved_plan_recovery(None)
+
+    def check_saved_plan_recovery(self, interruption):
+        from team_p0_contract import initial
+        job = self.store.update(self.job['id'], status='blocked', p0_contract_version=1,
+                                goal_contract=initial(self.job['goal']),
+                                p0_interruption=interruption)
+        planner = self.engine.new_task(job, '架空の計画', '架空の計画を作る', 'planner')
+        plan = dict(PLAN, test_methods=['unit'],
+                    preconditions=['Pythonと.local\\test-tmpを準備済み'],
+                    setup_steps=['固定の架空入力を準備する'], synthetic_accounts=[],
+                    ui_test_required=False, ui_test_tool='not_applicable', ui_test_reason='画面なし',
+                    ui_test_command='', cleanup_steps=['今回の架空入力だけを片付ける'])
+        result = {'summary': '計算機能を実装する。実装・削除・公開・権限変更・外部アクセス・コマンド実行・テスト実行を許可しない。',
+                  'tasks': [{'title': '計算を実装する', 'instruction': '計算を実装してテストする',
+                             'role': 'builder', 'goal_links': ['計算機能']}],
+                  'security_review_required': False, 'questions': [], 'context_updates': [],
+                  'warnings': [], 'code_test_plan': plan,
+                  'goal_contract': {'primary_goal': job['goal'], 'deliverables': ['計算機能'],
+                                    'acceptance_criteria': ['計算が正しい'], 'non_goals': [],
+                                    'constraints': []}}
+        task = self.store.update(planner['id'], status='blocked', result=result,
+                                 summary='・認証/権限を試す架空アカウントの役割、作成方法、初期化方法がありません。')
+        self.store.update(job['id'], p0_interruption={'recovery_status': 'keep_paused'})
+        self.engine._restore_auth_exclusion_plans()
+        self.assertEqual(self.store.get(task['id'])['status'], 'blocked')
+        self.store.update(job['id'], p0_interruption=interruption)
+        # A remaining real omission must not be bypassed.
+        bad = dict(result, code_test_plan=dict(plan, cleanup_steps=[]))
+        self.store.update(task['id'], result=bad)
+        self.engine._restore_auth_exclusion_plans()
+        self.assertEqual(self.store.get(task['id'])['status'], 'blocked')
+        self.store.update(task['id'], result=result)
+        self.engine._restore_auth_exclusion_plans()
+        self.assertEqual(self.store.get(job['id'])['status'], 'awaiting_approval')
+        self.assertEqual(self.store.get(task['id'])['attempt'], task['attempt'])
+        approvals = self.store.for_job('approval', job['id'])
+        self.assertEqual([(a['kind'], a['status']) for a in approvals], [('plan', 'pending')])
+        self.assertEqual(approvals[0]['payload'], dict(result, question=''))
+        self.assertEqual(len(self.store.for_job('task', job['id'])), 1)
+        self.assertFalse(self.engine.active)
+        self.engine._restore_auth_exclusion_plans()
+        self.assertEqual(len(self.store.for_job('approval', job['id'])), 1)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='saikuru-code-tests-synthetic-')
         self.addCleanup(self.temp.cleanup)

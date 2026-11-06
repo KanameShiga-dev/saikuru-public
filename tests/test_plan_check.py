@@ -27,7 +27,11 @@ def plan(links=(D1, D2, A1, A2), task_links=None):
     links = list(links)
     return {'summary': '架空の計画', 'questions': [], 'context_updates': [], 'warnings': [],
             'security_review_required': False, 'checkpoint_paths': ['output.txt'],
-            'code_test_plan': {'required': True, 'reason': '架空の試験', 'cases': ['架空の条件'],
+            'code_test_plan': {'test_methods': ['unit'], 'preconditions': ['架空の実行環境と .local/test-tmp'],
+                               'setup_steps': ['架空のデータを準備する'], 'synthetic_accounts': [], 'ui_test_required': False,
+                               'ui_test_tool': 'not_applicable', 'ui_test_reason': '', 'ui_test_command': '',
+                               'cleanup_steps': ['架空のデータを消す'],
+                               'required': True, 'reason': '架空の試験', 'cases': ['架空の条件'],
                                'command': 'python -I run_fictional_tests.py', 'existing_tests': []},
             'goal_contract': {'primary_goal': '架空の目的', 'deliverables': [D1, D2],
                               'acceptance_criteria': [A1, A2], 'non_goals': [], 'constraints': []},

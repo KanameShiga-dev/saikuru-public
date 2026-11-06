@@ -78,7 +78,8 @@ class RecoveryTests(unittest.TestCase):
         self.store.recover()
         self.assertEqual(self.store.get('t')['status'], 'interrupted')
         self.assertEqual(self.store.get('a')['status'], 'expired')
-        engine = SimpleNamespace(store=self.store, active={}, sync_handoff=lambda job: None)
+        engine = SimpleNamespace(store=self.store, active={}, sync_handoff=lambda job: None,
+                                 _has_active_recovery_investigation=lambda task: False)
         # This fixture covers the legacy path using real Store/retry logic.
         self.assertNotIn('workflow_contract_version', self.store.get('j'))
         engine._retry_confirmed = MethodType(Engine._retry_confirmed, engine)

@@ -28,7 +28,16 @@ PRIVATE_IP = re.compile(r'(?<![\d.])(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3
 INTERNAL_HOST = re.compile(r'\b[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.(?:local|lan|corp|internal|intra|intranet|localdomain)\b', re.I)
 LOCAL_PATH = re.compile(r'(?:\b[A-Za-z]:[\\/]|\\\\[\w.$-]+\\|(?:^|\s)~[\\/]|/(?:home|Users)/[\w.-]+)')
 MY_NUMBER = re.compile(r'(?<!\d)\d{4}[- ]?\d{4}[- ]?\d{4}(?!\d)')
+HEX_IDENTIFIER = re.compile(r'(?<![A-Za-z0-9_])[0-9a-fA-F]{32}(?:[0-9a-fA-F]{32})?(?![A-Za-z0-9_])')
 CARD = re.compile(r'(?<!\d)(?:\d[ -]?){13,16}(?!\d)')
+
+
+def has_personal_number(text):
+    """Do not split 32-character IDs or 64-character SHA-256 digests into a personal number."""
+    identifiers = [(match.start(), match.end()) for match in HEX_IDENTIFIER.finditer(text)
+                   if re.search(r'[a-fA-F]', match.group())]
+    return any(not any(start <= match.start() and match.end() <= end for start, end in identifiers)
+               for match in MY_NUMBER.finditer(text))
 
 
 def load_policy():
@@ -93,7 +102,7 @@ def scan_input(text):
         confirm.append('メールアドレス')
     if PHONE.search(text):
         confirm.append('電話番号')
-    if MY_NUMBER.search(text):
+    if has_personal_number(text):
         confirm.append('12桁の番号（個人番号の可能性）')
     if has_card_number(text):
         confirm.append('カード番号の可能性がある数字')

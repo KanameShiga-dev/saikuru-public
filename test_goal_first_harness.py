@@ -154,7 +154,7 @@ class GoalFirstHarnessTest(unittest.TestCase):
             'status': 'done', 'summary': '現行成果物で検証Xを確認。', 'checks': ['検証X: 現行成果物の証拠を確認。'],
             'pending_checks': [],
         })
-        self.assertEqual(self.engine._pending_acceptance_items(job['id'], [self.store.get(review['id'])]), [])
+        self.assertEqual(self.engine._pending_acceptance_items(job['id'], [self.store.get(review['id'])])[0], [])
 
     def test_schema_requires_new_reports_but_legacy_handoff_reports_remain_readable(self):
         report = {'status': 'done', 'summary': '完了', 'checks': [], 'question': '', 'questions': [], 'context_updates': []}

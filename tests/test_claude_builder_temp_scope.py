@@ -38,20 +38,31 @@ class ClaudeBuilderTempScopeTests(unittest.TestCase):
             self.assertEqual(env['TEMP'], str(target.resolve()))
             self.assertEqual(env['TMP'], str(target.resolve()))
 
-    def test_non_builder_or_job_without_validation_keeps_environment(self):
-        for ctx in (context(Path.cwd(), role='reviewer', validation_commands=['python -m unittest']),
-                    context(Path.cwd(), validation_commands=[])):
-            env = {'TEMP': 'unchanged', 'TMP': 'unchanged'}
-            _set_scoped_test_temp(ctx, env)
-            self.assertEqual(env, {'TEMP': 'unchanged', 'TMP': 'unchanged'})
+    def test_non_builder_keeps_environment(self):
+        env = {'TEMP': 'unchanged', 'TMP': 'unchanged'}
+        _set_scoped_test_temp(context(Path.cwd(), role='reviewer'), env)
+        self.assertEqual(env, {'TEMP': 'unchanged', 'TMP': 'unchanged'})
 
-    def test_missing_allowed_folder_stops_before_test(self):
+    def test_missing_folder_stops_before_provider_start_without_creating_it(self):
         with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            env = {'TEMP': 'outside', 'TMP': 'outside'}
+            with self.assertRaises(ProviderError) as caught:
+                _set_scoped_test_temp(context(root), env)
+            self.assertEqual(caught.exception.code, 'test_temp_scope')
+            self.assertEqual(caught.exception.model_call_state, 'not_started')
+            self.assertFalse((root / '.local').exists())
+            self.assertEqual(env, {'TEMP': 'outside', 'TMP': 'outside'})
+
+    def test_unsafe_folder_stops_before_provider_start(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            (Path(workspace) / '.local').write_text('fictional file', encoding='utf-8')
             env = {'TEMP': 'outside', 'TMP': 'outside'}
             with self.assertRaises(ProviderError) as caught:
                 _set_scoped_test_temp(
                     context(Path(workspace), validation_commands=['python -m unittest']), env)
             self.assertEqual(caught.exception.code, 'test_temp_scope')
+            self.assertEqual(caught.exception.model_call_state, 'not_started')
             self.assertEqual(env, {'TEMP': 'outside', 'TMP': 'outside'})
 
 

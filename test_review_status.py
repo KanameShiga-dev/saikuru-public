@@ -18,10 +18,10 @@ PLAN = {'summary': '計画', 'tasks': [{'title': '作る', 'instruction': '作�
         # Plans for new development jobs must carry a code-test decision; these jobs change no real code.
         'code_test_plan': {'required': False, 'reason': '架空のテスト用の計画。実コードの変更なし。',
                            'cases': [], 'command': '', 'existing_tests': []}}
-DONE = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格'], 'pending_checks': [], 'question': '',
+DONE = {'status': 'done', 'summary': '完了', 'checks': ['実行：テスト合格'], 'pending_checks': [], 'pending_check_details': [], 'question': '',
         'warnings': [], 'stage_complete': True, 'blocking_reasons': []}
 NO_EVIDENCE = {'status': 'blocked', 'summary': '修正後のテスト結果がないため完了と判定できない。',
-               'checks': ['後続確認：現行版でunittestを実行する'], 'pending_checks': ['現行版でunittestを実行する'], 'question': '',
+               'checks': ['後続確認：現行版でunittestを実行する'], 'pending_checks': ['現行版でunittestを実行する'], 'pending_check_details': [], 'question': '',
                'warnings': [], 'stage_complete': False, 'blocking_reasons': []}
 QUESTION = {'id': 'q1', 'text': '出力先を変えてよいですか', 'options': [
     {'id': 'yes', 'label': '変えてよい', 'input_required': False, 'input_label': ''}]}
@@ -108,7 +108,7 @@ class ReviewFlowTest(unittest.TestCase):
         self.engine._validate(task, result)
         self.assertEqual((result['question'], result['questions']), ('', []))
         with self.assertRaises(Exception):
-            self.engine._validate(task, {'status': 'done', 'summary': '完了', 'checks': [], 'pending_checks': [], 'question': ['x']})
+            self.engine._validate(task, {'status': 'done', 'summary': '完了', 'checks': [], 'pending_checks': [], 'pending_check_details': [], 'question': ['x']})
         with self.assertRaises(Exception):  # checks carry information: never filled in
             self.engine._validate(task, {'status': 'done', 'summary': '完了', 'checks': None, 'pending_checks': []})
 
@@ -174,7 +174,7 @@ class ReviewFlowTest(unittest.TestCase):
     def test_finding_the_repair_cannot_fix_stops_instead_of_repeating(self):
         # 2026-10-14: the repair assignee said it cannot fix the finding; another automatic repair would repeat it.
         handoff = {'status': 'handoff', 'summary': '操作記録はこの担当から編集できません。', 'checks': ['未実施：記録の伏字化'],
-                   'pending_checks': [], 'question': '', 'warnings': [], 'stage_complete': False, 'blocking_reasons': []}
+                   'pending_checks': [], 'pending_check_details': [], 'question': '', 'warnings': [], 'stage_complete': False, 'blocking_reasons': []}
         job = self.run_with_builder(lambda task: NO_EVIDENCE, lambda ctx: dict(handoff) if ctx.task['repair'] else DONE, answer_handoff=True)
         self.assertEqual(job['status'], 'blocked')
         fixes = [t for t in self.store.all('task') if t['title'] == 'レビュー指摘を修正する']

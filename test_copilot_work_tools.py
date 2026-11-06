@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,6 +60,11 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(result['isError'])
         self.assertEqual(self.asked, [])
 
+    def test_read_failure_reports_actionable_reason(self):
+        result = self.call('read_file', {'path': '.local/hidden.txt'})
+        self.assertTrue(result['isError'])
+        self.assertIn('読み取り対象外', result['content'][0]['text'])
+
     def test_cancelled_request_is_not_performed_after_approval(self):
         self.server.cancelled.add(7)
         result = self.call('write_file', {'path': 'late.txt', 'content': 'x'}, request_id=7)
@@ -89,6 +95,114 @@ class ServerTest(unittest.TestCase):
         result = self.call('read_file', {'path': 'app.py'})
         self.assertIn('print', result['content'][0]['text'])
         self.assertEqual(self.asked, [])
+
+    def test_powershell_modules_are_listed_read_and_searchable(self):
+        source = self.root / 'src'
+        source.mkdir()
+        for name in ('Search.psm1', 'Search.psd1'):
+            (source / name).write_text('# sample-module\n', encoding='utf-8')
+        listing = json.loads(self.call('list_files', {})['content'][0]['text'])
+        self.assertIn(str(Path('src', 'Search.psm1')), listing['files'])
+        for name in ('Search.psm1', 'Search.psd1'):
+            result = self.call('read_file', {'path': str(Path('src', name))})
+            self.assertFalse(result.get('isError'), result)
+            self.assertIn('sample-module', result['content'][0]['text'])
+        matches = json.loads(self.call('search_files', {'query': 'sample-module'})['content'][0]['text'])
+        self.assertEqual(len(matches['matches']), 2)
+        self.assertEqual(self.asked, [])
+
+    def test_data_requires_file_and_content_specific_approval(self):
+        data = self.root / 'data'
+        data.mkdir()
+        path = data / 'prefectures.json'
+        path.write_text('{"name":"Tokyo"}', encoding='utf-8')
+        listing = json.loads(self.call('list_files', {})['content'][0]['text'])
+        relative = str(Path('data', 'prefectures.json'))
+        self.assertNotIn(relative, listing['files'])
+        self.assertIn(relative, listing['approval_required_files'])
+        denied = self.call('read_file', {'path': relative}, allow=False)
+        self.assertTrue(denied['isError'])
+        self.assertNotIn('Tokyo', denied['content'][0]['text'])
+        self.asked.clear()
+        for _ in range(2):
+            result = self.call('read_file', {'path': relative})
+            self.assertFalse(result.get('isError'), result)
+        self.assertEqual(len(self.asked), 1)
+        self.assertEqual(self.asked[0][0], 'ReadProjectData')
+        path.write_text('{"name":"Osaka"}', encoding='utf-8')
+        self.call('read_file', {'path': relative})
+        self.assertEqual(len(self.asked), 2)
+        self.assertNotEqual(self.asked[0][1]['sha256'], self.asked[1][1]['sha256'])
+        with self.assertRaises(ValueError):
+            work.reader.execute(self.root, 'read_file', {'path': relative})
+        matches = json.loads(self.call('search_files', {'query': 'Osaka'})['content'][0]['text'])
+        self.assertEqual(matches['matches'], [])
+
+    def test_data_changed_during_approval_is_not_returned(self):
+        (self.root / 'data').mkdir()
+        path = self.root / 'data' / 'items.json'
+        path.write_text('{"name":"before"}', encoding='utf-8')
+        def change_during_approval(*args):
+            path.write_text('{"name":"after"}', encoding='utf-8')
+            return 'ok'
+        with mock.patch.object(work, 'ask', side_effect=change_during_approval), mock.patch('sys.stdout', self.out):
+            self.server.call(1, 'read_file', {'path': str(Path('data', 'items.json'))})
+        result = json.loads(self.out.getvalue().strip().splitlines()[-1])['result']
+        self.assertTrue(result['isError'])
+        self.assertNotIn('after', result['content'][0]['text'])
+
+    def test_data_guards_still_refuse_runtime_settings_and_sensitive_content(self):
+        (self.root / 'data').mkdir()
+        for name in ('config.yaml', 'config.json', 'auth.json', 'records.json'):
+            path = self.root / 'data' / name
+            path.write_text('{"name":"example"}', encoding='utf-8')
+        for name in ('config.yaml', 'config.json', 'auth.json'):
+            result = self.call('read_file', {'path': str(Path('data', name))})
+            self.assertTrue(result['isError'], result)
+        with mock.patch.object(work.reader, 'screen_model_read', side_effect=ValueError('protected')):
+            result = self.call('read_file', {'path': str(Path('data', 'records.json'))})
+        self.assertTrue(result['isError'])
+        self.assertEqual(self.asked, [])
+        app = Path(work.reader.__file__).resolve().parent
+        with self.assertRaises(ValueError):
+            work.reader.safe_path(app, str(Path('data', 'project_ledger.sqlite3')), allow_data=True)
+
+    def test_cancelled_data_read_does_not_request_or_return_content(self):
+        (self.root / 'data').mkdir()
+        (self.root / 'data' / 'items.json').write_text('{"sample":"value"}', encoding='utf-8')
+        self.server.cancelled.add(1)
+        result = self.call('read_file', {'path': str(Path('data', 'items.json'))})
+        self.assertTrue(result['isError'])
+        self.assertEqual(self.asked, [])
+        self.assertNotIn('sample', result['content'][0]['text'])
+
+    def test_parallel_reads_share_one_consent(self):
+        (self.root / 'data').mkdir()
+        (self.root / 'data' / 'items.json').write_text('{"sample":"value"}', encoding='utf-8')
+        entered, release = threading.Event(), threading.Event()
+        calls, replies = [], []
+        def wait_for_consent(*args):
+            calls.append(args)
+            entered.set()
+            if not release.wait(5):
+                raise work.Denied('test consent timeout')
+            return 'approved'
+        threads = [threading.Thread(target=self.server.call, args=(
+            i, 'read_file', {'path': str(Path('data', 'items.json'))})) for i in (1, 2)]
+        with mock.patch.object(work, 'ask', side_effect=wait_for_consent), \
+                mock.patch.object(self.server, 'send', side_effect=replies.append):
+            try:
+                for thread in threads:
+                    thread.start()
+                self.assertTrue(entered.wait(5))
+            finally:
+                release.set()
+                for thread in threads:
+                    thread.join(5)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(replies), 2)
+        self.assertTrue(all(not reply['result'].get('isError') for reply in replies))
 
 
 class AskTest(unittest.TestCase):
@@ -207,6 +321,64 @@ class EngineDecisionTest(unittest.TestCase):
         result = self.call('write_file', {'path': 'x.py', 'content': 'x'})
         self.assertTrue(result['isError'])
         self.assertFalse((self.project / 'x.py').exists())
+
+    def test_project_data_read_forces_manual_approval_even_with_automatic_operations(self):
+        self.engine.config['automatic_operations'] = True
+        (self.project / 'data').mkdir()
+        path = self.project / 'data' / 'items.json'
+        path.write_text('{"sample":"value"}', encoding='utf-8')
+        with mock.patch.object(self.ctx, 'approve', return_value={'allow': True, 'note': 'confirmed'}) as approve:
+            result = self.call('read_file', {'path': str(Path('data', 'items.json'))})
+        self.assertFalse(result.get('isError'), result)
+        payload = approve.call_args.args[0]
+        self.assertTrue(payload['force_manual'])
+        self.assertEqual(payload['operation'], 'ReadProjectData')
+        self.assertEqual(payload['details']['file_path'], str(path.resolve()))
+        self.assertNotIn('sample', json.dumps(payload))
+
+    def test_unverified_data_request_is_denied_before_approval(self):
+        (self.project / 'data').mkdir()
+        path = self.project / 'data' / 'items.json'
+        path.write_text('{"sample":"value"}', encoding='utf-8')
+        with mock.patch.object(self.ctx, 'approve') as approve:
+            result = self.engine.tool_request(self.ctx.token, {
+                'task_id': self.ctx.task['id'], 'source': 'copilot', 'tool': 'ReadProjectData',
+                'input': {'file_path': str(path), 'sha256': 'wrong'}})
+        self.assertFalse(result['allow'])
+        approve.assert_not_called()
+
+    def test_one_real_decision_releases_parallel_reads(self):
+        self.engine.config['automatic_operations'] = True
+        (self.project / 'data').mkdir()
+        (self.project / 'data' / 'items.json').write_text('{"sample":"value"}', encoding='utf-8')
+        replies = []
+        threads = [threading.Thread(target=self.server.call, args=(
+            i, 'read_file', {'path': str(Path('data', 'items.json'))})) for i in (1, 2)]
+        with mock.patch.object(self.server, 'send', side_effect=replies.append):
+            for thread in threads:
+                thread.start()
+            try:
+                deadline = time.monotonic() + 5
+                pending = []
+                while time.monotonic() < deadline:
+                    pending = [a for a in self.store.for_job('approval', self.ctx.task['job_id'])
+                               if a['status'] == 'pending' and a['kind'] == 'tool']
+                    if pending:
+                        break
+                    time.sleep(.02)
+                self.assertEqual(len(pending), 1)
+                self.engine.decide(pending[0]['id'], True, 'synthetic explicit consent')
+            finally:
+                for thread in threads:
+                    thread.join(12)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(len(replies), 2)
+            self.assertTrue(all(not reply['result'].get('isError') for reply in replies), replies)
+            self.server.call(3, 'read_file', {'path': str(Path('data', 'items.json'))})
+        approvals = [a for a in self.store.for_job('approval', self.ctx.task['job_id']) if a['kind'] == 'tool']
+        self.assertEqual([(a['kind'], a['status']) for a in approvals], [('tool', 'approved')])
+        self.assertEqual(len(replies), 3)
+        self.assertFalse(replies[-1]['result'].get('isError'), replies[-1])
 
 
 class AdapterTest(unittest.TestCase):

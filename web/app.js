@@ -9,16 +9,35 @@ const jobStatuses = {...statuses,planning:'計画中',awaiting_acceptance:'成�
 // P0 L2：復旧と保守の状態は、サーバーの p0_interruption と承認の category / intended_role だけで分ける。
 // 画面側で障害の種類を推測しない。未知の値は「保守対応待ち」とし、成功や判断待ちとは扱わない。
 const P0_PHASES={
-  retrying:{key:'retrying',label:'復旧中',detail:'采来が自動で復旧を試みています。完了すると、止まった作業から再開します。あなたの操作は不要です。'},
-  maintenance_required:{key:'maintenance_required',label:'保守対応待ち',detail:'作業の成果は保存されています。保守担当が対応します。あなたの操作は不要です。'},
+  retrying:{key:'retrying',label:'復旧中',detail:'止まった工程の再試行を受け付けました。担当の実行状況を確認してください。'},
+  maintenance_required:{key:'maintenance_required',label:'保守対応待ち',detail:'作業が停止しました。原因は確認中です。途中の成果は保存されています。'},
+  network_wait:{key:'network_wait',label:'通信回復後の再開待ち',detail:'AIサービスとの通信が切れました。途中成果・計画・操作記録を保持しています。通信と実行済みの操作を確認してから、停止した担当だけを再開できます。自動再実行はしません。'},
   safety_blocked:{key:'safety_blocked',label:'安全上の確認待ち',detail:'安全のため作業を止めました。作業の成果は保存されています。権限のある担当者の確認が必要です。'}
 };
 function p0Phase(job){
   if(job?.p0_contract_version!==1)return null;
   const status=job.p0_interruption?.recovery_status;
   if(!status)return null;
+  if(status==='recovered')return null;
+  if(status==='retrying'&&job.status==='blocked'){
+    if((state?.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a)))return null;
+    return P0_PHASES.maintenance_required;
+  }
+  if(status==='retrying'&&state?.paused&&!(state.tasks||[]).some(t=>t.job_id===job.id&&['running','awaiting_approval'].includes(t.status)))
+    return {...P0_PHASES.retrying,label:'再開待ち',waiting_for_unpause:true,detail:'新規着手が一時停止中です。再開すると、確認済みの工程の実行が始まります。'};
   if(status==='retrying')return P0_PHASES.retrying;
   if(job.status!=='blocked')return null;
+  const reasons={
+    test_temp_unavailable:'テスト用の一時フォルダーを使用できず、担当を起動する前に停止しました。準備状況を確認してから、止まった工程の再開が必要です。',
+    execution_environment:'担当の実行環境を起動できず停止しました。実行環境を確認してから再開する必要があります。',
+    report_format:'担当の完了報告を読み取れず停止しました。報告と途中の成果を確認してから再開する必要があります。',
+    time_limit:'担当の処理が時間上限に達して停止しました。途中の処理と成果を確認してから再開する必要があります。',
+    authentication:'AIサービスの認証に問題があり停止しました。対象サービスのログイン状態を確認し、途中の処理を確認してから再開する必要があります。',
+    provider_limit:'AIサービスが利用上限を報告したため停止しました。利用枠が回復したことと途中の処理を確認してから再開する必要があります。',
+    provider_failure:'AI担当の実行中に問題が発生して停止しました。詳しい原因と途中の処理を確認してから再開する必要があります。'
+  };
+  if(status==='maintenance_required'&&reasons[job.p0_interruption?.public_reason])
+    return {...P0_PHASES.maintenance_required,detail:reasons[job.p0_interruption.public_reason]+' 途中の成果は保存されています。'};
   return P0_PHASES[status]||P0_PHASES.maintenance_required;
 }
 // 利用者に判断を求める承認か。category の無い旧形式の承認は従来どおり扱う。保守・技術・改善の項目と、保守担当宛ての項目は含めない。
@@ -31,10 +50,19 @@ function jobStatusLabel(job){const phase=p0Phase(job);if(phase)return phase.labe
   // 新形式の依頼が停止していて、利用者に判断を求める項目が無いとき、原因を推測せず「判断が必要」とは表示しない。
   if(job?.p0_contract_version===1&&job.status==='blocked'&&!(state?.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a)))return '停止中（次の動作をご確認ください）';
   return job?.g2_gate_version===1&&job.g2_status==='pending'?'AIによる計画作成の開始の承認待ち':jobStatuses[job?.status]||job?.status||'不明';}
+function validationCommands(job){
+  const plan=job?.code_test_plan||{};
+  return [...new Set([...(job?.validation_commands||[]),
+    ...(plan.required&&plan.command?[plan.command]:[]),
+    ...(plan.ui_test_required&&plan.ui_test_command?[plan.ui_test_command]:[])])];
+}
 function el(tag, text, cls) { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; }
-function notice(text) { $('notice').textContent=text; dialogNotice(text); }
+function notice(text,error=false) {
+  const box=$('notice');box.textContent=text;box.setAttribute('role',error?'alert':'status');
+  box.style.color=error?'#a32020':'';dialogNotice(text,error);
+}
 // W05.05.UI（F2）：modal のダイアログの間は #notice が裏に隠れ、外側は inert になる。開いているダイアログの中にも同じ文を出す。
-function dialogNotice(text){
+function dialogNotice(text,error=false){
   const dialog=[...document.querySelectorAll('dialog[open]')].filter(d=>d.id).at(-1);
   if(!dialog)return;
   let box=dialog.querySelector(':scope > .dialog-notice');
@@ -44,6 +72,9 @@ function dialogNotice(text){
     dialog.addEventListener('close',()=>{box.textContent='';box.hidden=true;});
   }
   box.textContent=text||'';box.hidden=!text;
+  box.setAttribute('role',error?'alert':'status');box.setAttribute('aria-live',error?'assertive':'polite');
+  box.style.color=error?'#a32020':'';
+  if(error)box.scrollIntoView({block:'center'});
 }
 // P0 L1：標準画面（既定）と技術詳細の切り替え。選択はこのブラウザーにだけ保存し、読めなくても標準で動く。
 (()=>{const toggle=$('view-toggle');if(!toggle)return;let technical=false;
@@ -66,6 +97,13 @@ function reviewRepairProposal(review,job){
  const artifact=job.artifacts?.[0]?.path;
  const findings=(review.result?.summary||'').trim();
  const shown=findings.length<=2400?findings:findings.slice(0,2400)+'\n（表示上限です。最新レビュー全文は担当に別途渡されます。）';
+ if(isStalledValidation(review))return `【修正対象と許可範囲】
+元の依頼と承認済み計画の範囲内で、次の検証指摘を解消してください。範囲外の変更は行わないでください。
+${shown}
+【維持する動作】
+最新のソースとテストを読み、作成済みの成果と既存動作を保持してください。検証を通すためにテストや完了条件を弱めないでください。
+【検証のやり直し】
+元の依頼と計画にある検証を現行版で再実行し、コマンド・終了コード・結果を記録してください。未実施を合格扱いせず、修正後は通常レビューと必要なセキュリティレビューへ進めてください。`;
  if(job.document_source)return `${artifact?'修正対象は '+artifact+' です。この依頼で作った資料は同じ名前で作り直せます（旧版は .saikuru-versions/ に退避されます）。':'修正対象の資料を確認し、この依頼の範囲外のファイルは変更しないでください。'}
 【直す内容】
 次の最新レビューの指摘を、資料の本文・構成・表・図に反映してください。
@@ -86,9 +124,10 @@ ${shown}
 }
 function reviewResolutionHint(review,job){
  const box=el('div',undefined,'stop-reason-box');
- box.append(el('strong','原因：レビュー指摘が未解決のため、依頼が停止しています。'));
+ const validation=isStalledValidation(review);
+ box.append(el('strong',validation?'原因：検証指摘の自動修正上限に達したため、依頼が停止しています。':'原因：レビュー指摘が未解決のため、依頼が停止しています。'));
  const items=(review.result?.summary||'').split('\n').filter(line=>/^\s*(?:\d+[.．、]|【(?:高|中|低|重大)】)/.test(line)).slice(0,5);
- box.append(el('p','最新レビューで報告された指摘（抜粋）：'));
+ box.append(el('p',validation?'最後の検証で報告された指摘（抜粋）：':'最新レビューで報告された指摘（抜粋）：'));
  if(items.length){const list=el('ul');for(const item of items)list.append(el('li',item.length>420?item.slice(0,420)+'…':item));box.append(list);}
  else box.append(el('p',(review.result?.summary||'指摘本文を確認してください。').slice(0,900)));
  box.append(el('strong','解消のヒント'),el('p','① 指摘ごとの修正対象を確認 → ② 下の修正指示案を確認・編集 → ③「この範囲で修正を依頼」。修正後は通常レビューと必要なセキュリティレビューへ進みます。'));
@@ -112,8 +151,17 @@ async function api(path, data, retried=false) {
   try{return await apiCall(path,data,retried);}finally{hideBusy();blockNext=true;}
 }
 async function apiCall(path, data, retried=false) {
-  const response=await fetch(path,data===undefined?{credentials:'same-origin',cache:'no-store'}:{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Agent-Team-UI':'1'},body:JSON.stringify(data)});
-  const result=await response.json();
+  const timeout=data===undefined?15000:30000;
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeout);
+  let response,result;
+  try{
+    response=await fetch(path,data===undefined?{credentials:'same-origin',cache:'no-store',signal:controller.signal}:{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Agent-Team-UI':'1'},body:JSON.stringify(data),signal:controller.signal});
+    result=await response.json();
+  }catch(error){
+    if(controller.signal.aborted)throw new Error(`${data===undefined?'状態の取得':'操作の応答'}が${timeout/1000}秒以内に完了しませんでした。操作の結果は未確認です。同じ承認を押し直さず、最新の状態を確認してください。`);
+    throw new Error('サーバーとの通信または応答の読み取りに失敗しました。操作の結果は未確認です。同じ承認を押し直さず、最新の状態を確認してください。 '+error.message);
+  }finally{if(timer!==null)clearTimeout(timer);}
   // These exact errors are returned before any operation is performed. Never retry
   // timeouts, network failures, or other responses that could duplicate a mutation.
   if(!retried&&response.status===403&&['画面を再読み込みしてください。','ブラウザからの認証済み操作が必要です。'].includes(result.error)){
@@ -214,16 +262,38 @@ async function requestCancel(job){
   notice('依頼を中止しました。作業済みの変更は戻していません。');
 }
 // 保守の確認の後も、この作業の再試行には保守の認証が要る（サーバーの判定）。利用者の画面に再試行が出ると約束しない。
-function maintenanceWaitBox(task){
+function maintenanceWaitBox(task,job){
   const confirmed=!!task?.recovery_confirmation&&!task?.recovery_check_required;
   const box=el('section',undefined,'decision-help');box.id='maintenance-wait';box.setAttribute('role','status');
   box.append(el('h3',confirmed?'保守担当の再開を待っています':'保守担当の確認を待っています'),
     el('p',confirmed?'保守担当が、担当の停止と現在の変更を確認しました。この作業の再開（再試行）も保守担当が行います。作業の成果は保存されています。'
       :'作業が途中で止まりました。保守担当が、担当の停止と現在の変更を確認するまで再開しません。確認の後の再開も保守担当が行います。作業の成果は保存されています。'),
     el('p','あなたの画面からは、この作業を再試行できません。待つ場合、あなたの操作は不要です。待たずにやめる場合は、下の「この依頼全体を中止」を使い、必要なら新しい依頼として出し直してください（中止しても、作業済みの変更は戻りません）。','hint'));
+  if(job?.status==='interrupted'){
+    const inspect=el('button','AIに中断した作業の調査を依頼する'),message=el('p','','hint');inspect.type='button';
+    message.setAttribute('role','status');box.append(inspect,message);
+    inspect.onclick=async()=>{inspect.disabled=true;message.textContent='中断した工程を確認しています…';
+      try{const target=await api('/api/recovery/user-target?job_id='+encodeURIComponent(job.id)+'&task_id='+encodeURIComponent(task.id));
+        message.textContent='調査後も、途中の操作や停止状態の確認が済むまで再開できません。';
+        recoveryInvestigationControls(box,job,target,message);
+      }catch(error){message.textContent=error.message;inspect.disabled=false;}};
+  }
   return box;
 }
-async function action(fn) { if(busy)return; busy=true; try{await fn();await refresh();}catch(e){notice(e.message);}finally{busy=false;} }
+async function action(fn) {
+  if(busy)return;
+  busy=true;
+  showBusy('操作を処理しています…');
+  try{
+    await fn();
+    showBusy('結果を反映しています…');
+    try{
+      if(refreshing)await refreshing;
+      blockNext=true;
+      await refresh();
+    }finally{hideBusy();}
+  }catch(e){notice(e.message,true);}finally{hideBusy();busy=false;}
+}
 function button(text, fn, cls) { const b=el('button',text,cls);b.type='button';b.addEventListener('click',()=>action(fn));return b; }
 function pending(id) { return state.approvals.filter(a=>a.task_id===id&&a.status==='pending'); }
 function pendingUser(id){return pending(id).filter(userDecision);}
@@ -253,8 +323,22 @@ function stalledReview(job){
     .sort((a,b)=>(a.finished_at||a.updated_at||0)-(b.finished_at||b.updated_at||0)).pop()||null;
 }
 function isStalledReview(task){return stalledReview(state.jobs.find(j=>j.id===task.job_id))?.id===task.id;}
+function stalledValidation(job){
+  if(job?.status!=='blocked'||job.p0_contract_version===1||job.workflow_contract_version===1)return null;
+  const tasks=state.tasks.filter(t=>t.job_id===job.id);
+  if(tasks.some(t=>pending(t.id).length||!['succeeded','cancelled','handed_off'].includes(t.status)))return null;
+  const task=tasks.filter(t=>t.role==='builder'&&t.status==='succeeded')
+    .sort((a,b)=>(a.repair||0)-(b.repair||0)||(a.finished_at||a.updated_at||0)-(b.finished_at||b.updated_at||0)).pop();
+  return task&&task.result?.status==='needs_changes'&&task.repair>=state.config.max_repairs&&
+    (job.validation_commands?.length||job.code_test_plan?.required)&&
+    tasks.some(t=>t.role==='reviewer'&&t.status==='cancelled'&&t.review_cycle===task.id)?task:null;
+}
+function isStalledValidation(task){return stalledValidation(state.jobs.find(j=>j.id===task.job_id))?.id===task.id;}
+function stalledWork(job){return stalledValidation(job)||stalledReview(job);}
+function isStalledWork(task){return stalledWork(state.jobs.find(j=>j.id===task.job_id))?.id===task.id;}
 // 停止理由の欄の先頭に出す、止まった原因の一文（担当の報告の前に、何が止めたのかを示す）。
 function stopCause(task,job){
+  if(isStalledValidation(task))return `原因：検証指摘の自動修正上限（${state.config.max_repairs}回）に達しました。検証が未解決のため、後続レビューを開始せず停止しています。修正範囲を確認して追加の修正を1回依頼するか、依頼を中止してください。`;
   if(isStalledReview(task))return `原因：自動修正の上限（${state.config?.max_repairs??'設定'}回）に達しました。最後のレビューが、まだ修正・確認を求めています（下の報告）。`;
   if(pending(task.id).length)return '原因：担当が利用者の回答・承認を待っています。';
   if(task.status==='blocked')return '原因：担当が停止を報告しました（下の報告）。';
@@ -262,7 +346,7 @@ function stopCause(task,job){
   if(task.status==='interrupted')return '原因：担当の実行が中断されました。';
   return '原因：依頼が停止しています（'+jobStatusLabel(job)+'）。';
 }
-function group(task) { if(endedJob(task))return 3; const phase=p0Phase(state.jobs.find(j=>j.id===task.job_id));if(phase&&!pendingUser(task.id).length)return phase.key==='retrying'?1:0; if(maintenanceHeld(task)||workflowMaintenanceWait(task))return 0; if(isStalledReview(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
+function group(task) { if(endedJob(task))return 3; const phase=p0Phase(state.jobs.find(j=>j.id===task.job_id));if(phase&&!pendingUser(task.id).length)return phase.key==='retrying'&&!phase.waiting_for_unpause?1:0; if(maintenanceHeld(task)||workflowMaintenanceWait(task))return 0; if(isStalledWork(task))return 2; if(pending(task.id).length||['failed','blocked','interrupted'].includes(task.status))return 2; if(task.status==='queued')return 0; if(['running','awaiting_approval'].includes(task.status))return 1; return 3; }
 const completedFolds=new Map();
 function completedTime(task){
   const job=state.jobs.find(j=>j.id===task.job_id);
@@ -437,7 +521,7 @@ function toolApprovalView(a){
     const risky=command.match(RISKY_WORDS);
     rows.push(['削除・上書き',risky?`削除・上書きを示す語が含まれています：${risky[0].trim()}（内容を確認してください）`:'削除・上書きを示す語は、コマンドの文字列に見つかりません']);
   }
-  rows.push(['許可すると','この操作が1回だけ実行されます。次に同じ操作が必要になれば、もう一度確認します。']);
+  rows.push(['許可すると',a.payload?.operation==='ReadProjectData'?'この担当の今回の実行中、同じファイルの同じ内容の読み取りに適用します。別ファイル・内容変更・担当の再実行では、改めて承認が必要です。':'この操作が1回だけ実行されます。次に同じ操作が必要になれば、もう一度確認します。']);
   rows.push(['拒否すると','この操作は実行されません。担当は別の方法を試すか、停止する場合があります。']);
   const list=el('dl',undefined,'tool-facts');
   for(const [label,value] of rows)list.append(el('dt',label),el('dd',value));
@@ -743,6 +827,10 @@ function deliverableRow(job,item){
   if(item.launch_status&&item.launch_status!=='unverified')line.append(el('small',`（サーバーの値：${item.launch_status}）`,'tech-only'));
   row.append(line);
   if(!item.path)return row;
+  if(String(item.path).split(/[\\/]/).some(part=>part.toLowerCase()==='data')){
+    row.append(el('p','開発データの存在と内容ハッシュを登録しています。本文の表示やAIへの読み取り許可は別であり、この欄では公開しません。','hint'));
+    return row;
+  }
   const shown=openedArtifacts.get(key);
   const label=shown?(shown.error?'再読み込み':'内容を閉じる'):'内容を読む';
   const readButton=button(label,async()=>{
@@ -771,16 +859,134 @@ function jobCounts(job){
   const tasks=(state.tasks||[]).filter(t=>t.job_id===job.id&&t.status!=='cancelled');
   return tasks.length?{done:tasks.filter(t=>t.status==='succeeded').length,total:tasks.length}:null;
 }
-function needsUserDecision(job){return (state.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a));}
+function needsUserDecision(job){return !!stalledWork(job)||(state.approvals||[]).some(a=>a.job_id===job.id&&a.status==='pending'&&userDecision(a));}
 function deliverableGroup(job,access){
   const group=el('details',undefined,'job-deliverables');
-  group.append(el('summary',`成果物（${access.length}件）`));
+  group.append(el('summary',`登録済みファイル（${access.length}件）`));
   group.open=openJobRows.has(job.id+'|deliverables');
   group.addEventListener('toggle',()=>{const key=job.id+'|deliverables';if(group.open)openJobRows.add(key);else openJobRows.delete(key);});
   if(!access.length){group.append(el('p','登録された成果物はまだありません。','hint'));return group;}
-  group.append(el('p','起動・操作の確認は、まだどれも行われていません。内容を読めても、動作確認の代わりにはなりません。起動用のURLも未提供です。','hint'));
+  group.append(el('p','内容の閲覧と実際の動作確認は別です。起動・操作はご自身で確認してください。','hint'));
   for(const item of access)group.append(deliverableRow(job,item));
   return group;
+}
+const webTrialDrafts=new Map();
+const acceptanceMessages=new Map();
+function webTrialPanel(job){
+  const box=el('section',undefined,'preview-panel web-trial-panel');
+  box.append(el('h3','作ったWebページを開く'),
+    el('p','「ページを開く準備」を押し、起動と停止を許可するとページを開けます。開いたページで実際の表示や操作を試してください。','hint'));
+  const draft=webTrialDrafts.get(job.id)||{start_script:'',stop_script:'',port:''};
+  webTrialDrafts.set(job.id,draft);
+  const area=el('div'),form=el('details');form.append(el('summary','詳細設定（通常は変更不要）'));
+  const inputs={};
+  for(const [key,label] of [['start_script','起動スクリプト（相対パス）'],['stop_script','停止スクリプト（相対パス）'],['port','確認用ポート']]){
+    const row=el('label',label),input=el('input');input.value=draft[key];input.setAttribute('aria-label',label);
+    inputs[key]=input;
+    input.addEventListener('input',()=>{draft[key]=input.value;draft.prepared=null;});row.append(input);form.append(row);
+  }
+  const show=()=>{
+    area.replaceChildren();
+    if(draft.status){
+      area.append(el('p',draft.status.message,'hint'));
+      if(draft.status.status==='ready'){
+        const link=el('a','反映済みのWebページを開く');link.href=draft.status.url;link.target='_blank';link.rel='noopener noreferrer';
+        area.append(link,el('p','HTTP応答と起動時の成果物版を確認した状態です。実際の検索・表示を試してください。開くだけでは正式受領や確認済みの記録は行いません。','hint'));
+      }
+      if(!['stopped'].includes(draft.status.status))area.append(button('確認用サーバーを停止',async()=>{
+        if(!confirm('采来が起動した確認用サーバーを、承認した停止コマンドで停止しますか？'))return;
+        try{await api('/api/job/web-trial/stop',{job_id:job.id,confirmed:true});await check();}catch(e){notice(e.message);}
+      },'secondary'));
+      if(!['stopped'].includes(draft.status.status))area.append(button('停止できないとき：管理対象プロセスだけを停止',async()=>{
+        if(!confirm('通常の停止に失敗した場合だけ使用してください。采来が起動したプロセスとその子プロセスだけを強制停止します。実行しますか？'))return;
+        try{await api('/api/job/web-trial/stop',{job_id:job.id,confirmed:true,force_owned_process:true});await check();}catch(e){notice(e.message);}
+      },'danger'));
+    }
+    if(draft.prepared){
+      const prepared=draft.prepared;
+      area.append(el('p','このPCだけでページを起動します。ほかのアプリは停止しません。起動・停止の実行には以下の許可が必要です。','hint'));
+      const technical=el('details');technical.append(el('summary','実行する内容を確認'),el('p',prepared.notice,'hint'),el('pre',prepared.start_command+'\n'+prepared.stop_command,'text-block'));
+      for(const script of prepared.scripts||[]){
+        const detail=el('details');detail.append(el('summary',script.path+' の内容'),el('pre',script.content,'text-block'));technical.append(detail);
+      }
+      area.append(technical);
+      const checks=[];
+      for(const text of ['実行する内容を確認し、このPCでページを起動することを許可します','実行する内容を確認し、このページの停止処理を許可します']){
+        const label=el('label',undefined,'check'),input=el('input');input.type='checkbox';label.append(input,document.createTextNode(text));checks.push(input);area.append(label);
+      }
+      const launch=button('許可してページを開く',async()=>{
+        if(draft.prepared!==prepared){notice('入力が変わりました。準備し直してください。');return;}
+        if(!checks.every(c=>c.checked)){notice('起動・停止をそれぞれ確認して承認してください。');return;}
+        launch.disabled=true;
+        const page=window.open('about:blank','_blank');
+        if(page){page.opener=null;page.document.documentElement.lang='ja';page.document.body.style.fontFamily='"Meiryo", "Yu Gothic", sans-serif';page.document.title='Webページを起動しています';page.document.body.textContent='ページを起動しています。采来の画面で起動状況を確認できます。';}
+        try{
+          await api('/api/job/web-trial/start',{token:prepared.token,approve_start:true,approve_stop:true});
+          draft.prepared=null;await check();
+          for(let i=0;i<40&&draft.status.status==='starting';i++){
+            await new Promise(resolve=>setTimeout(resolve,1000));await check();
+          }
+          if(draft.status.status==='ready'){
+            if(page&&!page.closed)page.location.replace(draft.status.url);
+          }else{
+            if(page&&!page.closed)page.close();
+            notice(draft.status.status==='starting'?'まだ起動を確認中です。「起動状況を更新」で確認してください。':draft.status.message);
+          }
+        }catch(e){if(page&&!page.closed)page.close();launch.disabled=false;notice(e.message);}
+      },'primary');
+      const update=()=>{launch.disabled=!checks.every(c=>c.checked);};
+      checks.forEach(c=>c.addEventListener('change',update));update();area.append(launch);
+    }
+  };
+  const check=async()=>{draft.status=await api('/api/job/web-trial?job_id='+encodeURIComponent(job.id));show();};
+  box.append(button('ページを開く準備',async()=>{
+    try{
+      await check();
+      if(draft.status.status==='ready')return;
+      if(draft.status.status==='starting'){notice('ページを起動中です。少し待って起動状況を更新してください。');return;}
+      const settings=await api('/api/job/web-trial/settings?job_id='+encodeURIComponent(job.id));
+      if(!settings.configured){form.open=true;notice(settings.message);return;}
+      for(const key of ['start_script','stop_script','port']){draft[key]=String(settings[key]);inputs[key].value=draft[key];}
+      draft.prepared=await api('/api/job/web-trial/prepare',{job_id:job.id,start_script:draft.start_script,stop_script:draft.stop_script,port:Number(draft.port)});show();
+    }catch(e){notice(e.message);}
+  },'primary'));
+  box.append(button('起動状況を更新',async()=>{try{await check();}catch(e){notice(e.message);}},'secondary'));
+  form.append(button('コマンドと対象版を確認',async()=>{
+    try{draft.prepared=await api('/api/job/web-trial/prepare',{job_id:job.id,start_script:draft.start_script,stop_script:draft.stop_script,port:Number(draft.port)});show();}
+    catch(e){notice(e.message);}
+  },'secondary'));
+  box.append(form,area);show();return box;
+}
+function reportedTrialLinks(job){
+  const links=new Map();
+  for(const task of state.tasks.filter(t=>t.job_id===job.id&&t.role==='builder'&&t.status==='succeeded')){
+    const text=String(task.result?.summary||task.summary||'');
+    const candidates=[...commandUrls(text),...[...text.matchAll(/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})(?!\d)/g)].map(m=>'http://'+m[0])];
+    for(const candidate of candidates){
+      let url;try{url=new URL(candidate);}catch{continue;}
+      if(!['http:','https:'].includes(url.protocol)||!isLoopbackHost(url.hostname)||url.username||url.password||!url.port||url.search||url.hash)continue;
+      if(Number(url.port)<1||Number(url.port)>65535)continue;
+      if(!links.has(url.href))links.set(url.href,{url:url.href,task:task.title});
+    }
+  }
+  return [...links.values()];
+}
+function deliverableAcceptancePanel(job){
+  const box=el('section',undefined,'preview-panel');box.append(el('h4','成果物を確認・試行する'));
+  box.append(el('p','保存先：'+job.project,'hint'));
+  box.append(webTrialPanel(job));
+  const links=reportedTrialLinks(job);
+  if(links.length){
+    box.append(el('p','担当が報告したローカルの確認先です。現在の稼働は未確認です。リンクを開くだけでは正式受領や確認済みの記録は行いません。','hint'));
+    for(const item of links){
+      const link=el('a','動作を試す：'+item.url,'primary');link.href=item.url;link.target='_blank';link.rel='noopener noreferrer';
+      const line=el('p');line.append(link);box.append(line,el('p','報告元：'+item.task,'hint'));
+    }
+  }else box.append(el('p','上の「ページを開く準備」から、作ったWebページを起動して試せます。','hint'));
+  const artifacts=job.p0_contract_version===1?(job.p0_artifacts||[]):[];
+  for(const item of artifacts)box.append(deliverableRow(job,item));
+  if(!artifacts.length&&!job.artifacts?.length)box.append(el('p','閲覧できる登録済みファイルはありません。','hint'));
+  return box;
 }
 function progressCard(job){
   const progress=job.p0_progress||{},goal=job.goal_contract||{},counts=jobCounts(job);
@@ -809,12 +1015,21 @@ function progressCard(job){
   if(job.p0_contract_version!==1){
     // 従来形式の依頼：完成の契約や受入条件は持たない。担当の作業の状態だけを、事実として並べる。
     const works=(state.tasks||[]).filter(t=>t.job_id===job.id&&t.status!=='cancelled');
-    const finished=works.filter(t=>t.status==='succeeded').map(t=>t.title);
+    const finished=works.filter(t=>t.status==='succeeded').map(t=>t.title+(t.result?.status==='needs_changes'?'（指摘が未解決）':''));
     const handedOff=works.filter(t=>t.status==='handed_off').map(t=>`${t.title}（${statuses[t.status]||t.status}）`);
     const rest=works.filter(t=>!['succeeded','handed_off'].includes(t.status)).map(t=>`${t.title}（${statuses[t.status]||t.status}）`);
     const lists=el('div',undefined,'progress-lists');
-    lists.append(progressList('完了した作業',finished,'✓','done'),progressList('残りの作業',rest,'○','todo'),progressList('未完了で引き継いだ作業',handedOff,'↗','todo'));
+    lists.append(progressList('担当の処理が終了した作業',finished,'✓','done'),progressList('残りの作業',rest,'○','todo'),progressList('未完了で引き継いだ作業',handedOff,'↗','todo'));
     body.append(lists,el('p','従来形式の依頼です。完成の判定や成果物の確認は、各作業の画面で行います。','hint'));
+    const stopped=stalledWork(job);
+    if(stopped){
+      body.append(el('p',stopCause(stopped,job),'failure-cause'),
+        el('p',stopped.result?.summary||stopped.summary||'最後の担当の報告を確認してください。','text-block'));
+      const actions=el('div',undefined,'actions');
+      actions.append(button('停止理由・検証結果を確認して判断する',()=>openTask(stopped.id),'primary'),
+        button('この依頼全体を中止する',()=>requestCancel(job),'danger'));
+      body.append(actions,el('p','修正の依頼は、移動先で範囲を入力・確認してから送信します。中止は確認画面で確定し、作成済みファイルは削除しません。','hint'));
+    }
     row.append(body);
     row.open=openJobRows.has(job.id);
     row.addEventListener('toggle',()=>{if(row.open)openJobRows.add(job.id);else openJobRows.delete(job.id);});
@@ -909,7 +1124,7 @@ function render() {
     }
     for(const task of tasks){
       const job=state.jobs.find(j=>j.id===task.job_id),card=button('',()=>openTask(task.id),'card role-'+task.role+(index===2?' attention':''));card.dataset.focusKey='card:'+task.id;
-      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatusLabel(job)):p0Phase(job)&&!pendingUser(task.id).length?p0Phase(job).label:maintenanceHeld(task)||workflowMaintenanceWait(task)?'保守対応待ち':pending(task.id).length?'確認・承認してください':isStalledReview(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
+      const badge=el('span',endedJob(task)?(job.status==='cancelled'?'中止済みの依頼':jobStatusLabel(job)):p0Phase(job)&&!pendingUser(task.id).length?p0Phase(job).label:maintenanceHeld(task)||workflowMaintenanceWait(task)?'保守対応待ち':pending(task.id).length?'確認・承認してください':isStalledWork(task)?'判断が必要（自動修正の上限）':statuses[task.status]||task.status,'badge'+(index===2?' approval':''));
       const head=el('div',undefined,'card-head');head.append(badge);if(job?.title)head.append(el('span',job.title,'job-title'));card.append(head,el('strong',task.title));
       const warnings=(job?.warning_issues||[]).filter(i=>i.task_id===task.id&&i.status==='open');
       if(warnings.length){const note=el('div',undefined,'progress-warning');note.append(el('strong',`⚠ 警告 ${warnings.length}件・作業は継続`));for(const issue of warnings)note.append(el('p',issue.summary));card.append(note);}
@@ -966,6 +1181,7 @@ function revealSection(node){
 const DETAIL_TABS=[['action','対応'],['result','結果'],['request','依頼・指示'],['run','実行記録'],['usage','使用量'],['handoff','引き継ぎ']];
 const detailTabs=new Map();
 function detailTabOf(node){
+  if(node.classList?.contains('web-trial-panel')||node.querySelector?.(':scope > .web-trial-panel'))return 'result';
   const title=(node.querySelector?.(':scope > summary')?.textContent||node.querySelector?.(':scope > h3')?.textContent||node.textContent||'').trim().slice(0,60);
   if(/CLIトークン|入力サイズ|参考情報の画像化/.test(title))return 'usage';
   if(/Agentの実行情報|過去のAgent実行|判断レイヤー|共通Skill|一時モデル|担当する共通Agent|実行時に共通定義|旧方式/.test(title))return 'run';
@@ -1022,13 +1238,13 @@ function foldDetailSections(body,task){
   const previous=detailFolds.get(task.id)||{signature:null,open:{}};
   const requests=endedJob(task)?[]:pending(task.id);
   // 自動修正の上限では担当の状態は変わらず依頼だけが止まるため、依頼の状態と上限の判定も署名に含める。
-  const stalled=isStalledReview(task),jobStatus=state.jobs.find(j=>j.id===task.job_id)?.status||'';
+  const stalled=isStalledWork(task),jobStatus=state.jobs.find(j=>j.id===task.job_id)?.status||'';
   const signature=JSON.stringify([task.status,task.attempt,endedJob(task),stalled,jobStatus,task.recovery_advice?.code||null,requests.map(a=>[a.id,a.status])]);
   const changed=previous.signature!==signature;
   const stopped=!endedJob(task)&&(stalled||['failed','blocked','interrupted'].includes(task.status));
   const scopeError=/未完了項目の引き継ぎには利用者の範囲指定/.test(task.summary||'');
   const completedReport=task.recovery_advice?.code==='task_completion';
-  const focus=requests.length?'.approval-box':(isStalledReview(task)||stopped)?'#decision-guide':null;
+  const focus=requests.length?'.approval-box':(isStalledWork(task)||stopped)?'#decision-guide':null;
   const focusNode=focus?body.querySelector(focus):null;
   let focusFold=null;
   for(const [index,node] of [...body.children].entries()){
@@ -1058,39 +1274,120 @@ function foldDetailSections(body,task){
 }
 function reportText(result){
   let text=result.summary||'';
-  if(result.stage_checks?.length)text+='\n\n各担当の検証報告（未実施の項目を含みます。合格の保証ではありません）:\n'+result.stage_checks.map(item=>`${item.title}（担当報告: ${item.reported_status||'不明'}）\n${(item.checks||[]).join('\n')}${item.pending_checks?.length?'\n担当時点で未確認と報告された項目:\n'+item.pending_checks.map(c=>'・'+c).join('\n'):''}`).join('\n\n');
+  if(result.stage_checks?.length)text+='\n\n各担当の検証報告（未実施の項目を含みます。合格の保証ではありません）:\n'+result.stage_checks.map(item=>`${item.title}（担当報告: ${item.reported_status||'不明'}）\n${(item.checks||[]).join('\n')}${item.pending_checks?.length?'\n担当時点で未確認と報告された項目:\n'+item.pending_checks.map(c=>'・'+c).join('\n'):''}${item.pending_check_details?.length?'\n条件の出典・担当・実施可否:\n'+item.pending_check_details.map(d=>`・${d.check} / ${d.source_type}: ${d.source_excerpt} / ${d.owner==='ai'?'AI':d.owner==='user'?'利用者':'未特定'} / ${d.feasibility==='feasible'?'実施可能':d.feasibility==='infeasible'?'実施困難':'未確認'}`).join('\n'):''}`).join('\n\n');
   if(result.tasks)text+='\n\n'+result.tasks.map((t,i)=>`${i+1}. ${t.title}（${roles[t.role]||t.role}）\n${t.instruction}`).join('\n\n');
-  if(result.code_test_plan){const p=result.code_test_plan;text+='\n\nコードテスト計画: '+(p.required?'実施する':'対象外（'+(p.reason||'理由未記載')+'）');if(p.required)text+='\n既存テスト: '+(p.existing_tests?.length?p.existing_tests.join('、'):'なし')+'\n確認する条件:\n'+(p.cases||[]).map(c=>'・'+c).join('\n')+'\n実行予定: '+p.command+'\n※計画のコマンドは自動承認されません。実行時に既存の安全確認を通します。';}
+  if(result.code_test_plan){
+    const p=result.code_test_plan,methodNames={unit:'単体',integration:'結合',api:'API',ui:'画面操作'};
+    text+='\n\nコードテスト計画: '+(p.required?'実施する':'対象外（'+(p.reason||'理由未記載')+'）');
+    if(p.required){
+      text+='\n方式: '+(p.test_methods||[]).map(x=>methodNames[x]||x).join('、')
+        +'\n既存テスト: '+(p.existing_tests?.length?p.existing_tests.join('、'):'なし')
+        +'\n確認する条件:\n'+(p.cases||[]).map(c=>'・'+c).join('\n')
+        +'\n実行前提:\n'+(p.preconditions||[]).map(c=>'・'+c).join('\n')
+        +'\n環境・データ準備:\n'+(p.setup_steps||[]).map(c=>'・'+c).join('\n')
+        +'\n架空テストアカウント:\n'+((p.synthetic_accounts||[]).length?p.synthetic_accounts.map(a=>`・${a.purpose}: ${a.fixture_method} / 初期化: ${a.reset_method}`).join('\n'):'認証アカウントは使用しない')
+        +'\n画面テスト: '+(p.ui_test_required?(p.ui_test_tool==='playwright'?'Playwright':p.ui_test_tool==='manual_fallback'?'手動（代替）':'方式未指定'):'対象外')
+        +(p.ui_test_required&&p.ui_test_reason?'\n理由: '+p.ui_test_reason:'')
+        +(p.ui_test_command?'\n画面テストコマンド: '+p.ui_test_command:'')
+        +'\n後片付け:\n'+(p.cleanup_steps||[]).map(c=>'・'+c).join('\n')
+        +'\n采来は承認後、担当/Providerの起動前にプロジェクト内の .local/test-tmp を安全確認して準備します。'
+        +'\n※記載されたテストコマンドは自動実行されません。実行時に既存の安全確認を通します。';
+    }
+  }
   if(result.test_files?.length)text+='\n\n今回使用したテストファイル: '+result.test_files.join('、')+(result.test_change_reason?'\nテスト変更の理由: '+result.test_change_reason:'');
   if(result.security_review_required===true)text+='\n\n通常レビューの後、common-security-reviewerを独立セッションで起動します。';
   if(result.checks?.length)text+='\n\n報告された検証:\n'+result.checks.map(c=>'・'+c).join('\n');
-  if(result.pending_checks?.length)text+='\n\n未確認の必須検証（依頼全体の達成は未確認）:\n'+result.pending_checks.map(c=>'・'+c).join('\n');
+  if(result.pending_checks?.length)text+='\n\n担当が未確認と報告した項目（必須条件との対応は別途照合）:\n'+result.pending_checks.map(c=>'・'+c).join('\n');
   if(result.question)text+='\n\n確認したいこと:\n'+result.question;
   if(result.note)text+='\n\n'+result.note;
   if(result.review_findings?.length)text+='\n\nレビュー指摘（未修正。受け入れるか差し戻すかを決めてください）:\n'+result.review_findings.map(f=>`・${f.reviewer}：${f.summary}`).join('\n');
-  if(result.pending_items?.length)text+='\n\n未完了として残す項目（合格・全体完了ではありません）:\n'+result.pending_items.map(item=>`${item.title}\n${item.note}\n${item.checks.join('\n')}`).join('\n\n');
+  if(result.pending_items?.length)text+='\n\n未完了として残す必須項目（条件付き受領の対象）:\n'+result.pending_items.map(item=>`${item.title}\n${item.note}\n出典: ${item.sources?.join(' / ')||item.source||'明示的な引き継ぎ'}\n担当: ${item.owner==='ai'?'AI':item.owner==='user'?'利用者':item.owner==='unassigned'?'未特定':item.owner||'未特定'} · 実施可否: ${item.feasibility==='feasible'?'実施可能':item.feasibility||'未確認'}\n${item.checks.join('\n')}`).join('\n\n');
+  if(result.reference_items?.length)text+='\n\n参考：未確認（必須条件との出典・担当・実施可否が確認できず、受け入れ状態には数えません）:\n'+result.reference_items.map(item=>`${item.title}\n${item.note}\n担当: ${item.owner==='ai'?'AI':item.owner==='user'?'利用者':item.owner==='unassigned'?'未特定':item.owner||'未特定'} · 実施可否: ${item.feasibility==='feasible'?'実施可能':item.feasibility==='infeasible'?'実施困難':item.feasibility||'未確認'}\n${(item.checks||[]).join('\n')}`).join('\n\n');
   if(result.resolved_checks?.length)text+='\n\n利用者が後から確認した検証（AIの再検証ではありません）:\n'+result.resolved_checks.map(item=>`${item.title}\n${item.check}\n根拠: ${item.evidence}\n確認日時: ${date(item.confirmed_at)}`).join('\n\n');
+  if(result.acknowledged_findings?.length)text+='\n\n利用者が確認し、根拠を記録したレビュー指摘:\n'+result.acknowledged_findings.map(item=>`${item.reviewer||'レビュー担当'}：${item.summary}\n根拠: ${item.evidence}\n確認日時: ${date(item.confirmed_at)}`).join('\n\n');
   return text;
 }
 function completionEvidenceForm(approval){
   const choices=[];
-  (approval.payload.pending_items||[]).forEach((item,itemIndex)=>(item.checks||[]).forEach((check,checkIndex)=>choices.push({itemIndex,checkIndex,label:`${item.title}：${check}`})));
+  const previousEvidence=new Map();
+  for(const previous of state.approvals.filter(a=>a.job_id===approval.job_id&&a.id!==approval.id)){
+    for(const record of previous.payload?.resolved_checks||[]){
+      if(record.authority==='user_confirmed'&&typeof record.check==='string'&&typeof record.evidence==='string'){
+        previousEvidence.set(record.check,record.evidence);
+      }
+    }
+  }
+  (approval.payload.pending_items||[]).forEach((item,itemIndex)=>(item.checks||[]).forEach((check,checkIndex)=>choices.push({kind:'pending_check',itemIndex,checkIndex,label:`${item.title}：${check}`})));
+  (approval.payload.review_findings||[]).forEach((finding,findingIndex)=>choices.push({kind:'review_finding',findingIndex,label:`レビュー指摘（${finding.reviewer||'担当'}）：${finding.summary}`}));
   if(!choices.length)return null;
-  const form=el('form',undefined,'detail-section'),select=el('select'),evidence=el('textarea'),confirmed=el('input'),message=el('p','','hint');
-  choices.forEach((choice,index)=>{const option=el('option',choice.label);option.value=String(index);select.append(option);});
-  evidence.required=true;evidence.maxLength=2000;evidence.rows=3;evidence.id='evidence-'+approval.id;
-  evidence.placeholder='実施日時、対象、方法、結果、確認できる場所など。秘密情報は入力しないでください。';
-  confirmed.type='checkbox';confirmed.required=true;confirmed.id='evidence-confirm-'+approval.id;
-  const targetLabel=el('label','根拠を追加する未確認項目');targetLabel.append(select);
-  const evidenceLabel=el('label','人が確認した検証根拠');evidenceLabel.append(evidence);
-  const confirmLabel=el('label',undefined,'check');confirmLabel.append(confirmed,document.createTextNode('この検証を実施し、結果と根拠を確認しました。'));
-  const submit=el('button','根拠を記録して受領判断を更新','primary');submit.type='submit';message.setAttribute('role','status');
-  form.append(el('h4','後から確認した検証を記録'),el('p','項目ごとに記録します。記録後も成果は自動で通常受領にならず、更新された内容を改めて受領します。AIの再検証ではありません。','hint'),targetLabel,evidenceLabel,confirmLabel,message,submit);
+  const form=el('form',undefined,'detail-section'),message=el('p','','hint'),rows=[];
+  form.id='acceptance-evidence-'+approval.id;
+  choices.forEach((choice,index)=>{
+    const row=el('div',undefined,'evidence-entry'),selected=el('input'),evidence=el('textarea');
+    selected.type='checkbox';selected.id=`evidence-select-${approval.id}-${index}`;
+    evidence.id=`evidence-text-${approval.id}-${index}`;
+    evidence.maxLength=2000;evidence.rows=2;evidence.disabled=true;
+    const saved=choice.kind==='pending_check'?previousEvidence.get(
+      approval.payload.pending_items[choice.itemIndex].checks[choice.checkIndex]):null;
+    if(saved)evidence.value=saved;
+    evidence.placeholder='実施日時、対象、方法、結果、確認できる場所など。秘密情報は入力しないでください。';
+    const sync=()=>{evidence.disabled=!selected.checked;evidence.required=selected.checked;evidenceLabel.firstChild.textContent=selected.checked?'人が確認した根拠（必須）':'人が確認した根拠（項目をチェックすると入力できます）';};
+    selected.addEventListener('change',sync);
+    selected.syncEvidence=sync;
+    const target=el('label',undefined,'check');target.htmlFor=selected.id;target.append(selected,document.createTextNode(' '+choice.label));
+    const evidenceLabel=el('label','人が確認した根拠');evidenceLabel.append(evidence);
+    sync();
+    row.append(target,evidenceLabel);
+    if(saved)row.append(el('p','前回保存した確認根拠を表示しています。今回の対象でも有効か確認してからチェックし、保存してください。自動では確認済みにしません。','hint'));
+    form.append(row);rows.push({choice,selected,evidence});
+  });
+  const confirmed=el('input');confirmed.type='checkbox';confirmed.required=true;confirmed.id='evidence-confirm-'+approval.id;
+  const confirmLabel=el('label',undefined,'check');confirmLabel.append(confirmed,document.createTextNode('選択した各項目について、確認を実施し、結果と根拠を確認しました。'));
+  const submit=el('button','選択項目の根拠をまとめて記録','primary');submit.type='submit';message.setAttribute('role','status');
+  form.prepend(el('h4','確認済みの根拠をまとめて記録'),el('p','選択した複数項目を一度に記録します。記録後は更新内容を一度だけ改めて受領します。レビュー指摘の確認は、未修正の指摘を条件付きで受領する記録です。','hint'));
+  form.append(confirmLabel,message,submit);
   form.addEventListener('submit',async event=>{event.preventDefault();if(submit.disabled)return;submit.disabled=true;
-    const choice=choices[Number(select.value)];
-    try{await api('/api/completion/evidence',{approval_id:approval.id,item_index:choice.itemIndex,check_index:choice.checkIndex,evidence:evidence.value,confirmed:confirmed.checked});await refresh();}
+    const entries=rows.filter(row=>row.selected.checked).map(({choice,evidence})=>({
+      kind:choice.kind,
+      ...(choice.kind==='pending_check'
+        ?{item_index:choice.itemIndex,check_index:choice.checkIndex}
+        :{finding_index:choice.findingIndex}),
+      evidence:evidence.value
+    }));
+    if(!entries.length){message.textContent='根拠を記録する項目を選んでください。';submit.disabled=false;return;}
+    if(entries.some(entry=>!entry.evidence.trim())){message.textContent='選択した各項目に確認根拠を入力してください。';submit.disabled=false;return;}
+    try{await api('/api/completion/evidence',{approval_id:approval.id,entries,confirmed:confirmed.checked});await refresh();notice('確認根拠を保存しました。更新された受領内容を確認し、次の手順へ進んでください。');}
     catch(error){message.textContent=error.message;}finally{submit.disabled=false;}});
   return form;
+}
+function acceptanceNavigation(approval,job){
+  const evidence=(approval.payload.pending_items||[]).some(item=>item.checks?.length)
+    ||!!approval.payload.review_findings?.length;
+  const requiredPending=job.p0_contract_version===1&&!!approval.payload.pending_items?.length;
+  const current=evidence?2:!approval.review_acknowledgement?3:4;
+  const box=el('nav',undefined,'decision-help');box.setAttribute('aria-label','正式受領までの手順');
+  box.append(el('h4','正式受領までの手順'));
+  const steps=[
+    ['成果物を開いて試す','acceptance-deliverables-',false],
+    [evidence?'確認項目をチェックし、根拠を入力して保存':'確認根拠の追加は不要・保存済み','acceptance-evidence-',!evidence],
+    [approval.review_acknowledgement?'レビュー結果は確認済み':'レビュー結果を読み、確認を記録','acceptance-review-',!!approval.review_acknowledgement],
+    ['「正式受領」と入力して受領','acceptance-final-',false]
+  ];
+  steps.forEach(([text,prefix,done],index)=>{
+    const line=el('p',`${index+1}. ${text}${done?' ✓':''}`);
+    if(index+1===current)line.setAttribute('aria-current','step');
+    box.append(line);
+  });
+  box.append(el('p',`次の操作：手順${current}。`+(current===2?'チェックと入力だけでは保存されません。「選択項目の根拠をまとめて記録」を押してください。':current===3?'レビュー確認だけでは依頼は終了しません。':'受領ボタンを押すと依頼が終了します。'),'notice'));
+  if(requiredPending)box.append(el('p','必須項目の確認根拠が未保存のため、正式受領はまだできません。','hint'));
+  box.append(button('次に必要な操作へ移動',()=>{
+    const target=document.getElementById(steps[current-1][1]+approval.id);
+    if(!target)return;
+    revealSection(target);target.scrollIntoView({block:'center',behavior:'smooth'});
+    const field=target.matches('button,input,textarea')?target:target.querySelector('input:not(:disabled),textarea:not(:disabled),button');
+    if(field)field.focus({preventScroll:true});
+  },'secondary'));
+  return box;
 }
 async function showHandoffHistory(jobId,container,before){
   try{
@@ -1161,8 +1458,22 @@ function questionForm(approval){
     box.append(investigate,status);
     if(approval.payload.analysis){box.append(section('AIの意見：確認結果・違い・影響・推奨案',approval.payload.analysis));if(approval.payload.analysis_checks?.length)box.append(section('確認した根拠',approval.payload.analysis_checks.join('\n')));}
   }
-  if(approval.payload.summary){const details=el('details');details.append(el('summary',approval.kind==='context_conflict'?'新旧の内容と根拠を読む':'作業計画と背景を読む'),el('div',approval.payload.summary,'text-block'));box.append(details);}
+  if(approval.payload.summary){const details=el('details');if(approval.user_recovery)details.open=true;details.append(el('summary',approval.user_recovery?'担当が報告した内容':approval.kind==='context_conflict'?'新旧の内容と根拠を読む':'作業計画と背景を読む'),el('div',approval.payload.summary,'text-block'));box.append(details);}
   const drafts=answerDrafts.get(approval.id)||{};answerDrafts.set(approval.id,drafts);
+  if(approval.command_changes?.length){
+    const changes=el('fieldset');changes.append(el('legend','検証コマンドの変更（明示的な承認が必要）'),
+      el('p','回答文だけでは計画の検証コマンドは変わりません。変更する場合だけチェックしてください。旧証跡は失効し、同じスクリプトを変更後のコマンドで再検証します。PCの恒久設定は変更しません。','hint'));
+    const controls=[];
+    for(const change of approval.command_changes){
+      const label=el('label',undefined,'check'),check=el('input');check.type='checkbox';
+      check.checked=drafts.__command_change?.before===change.before;
+      check.onchange=()=>{drafts.__command_change=check.checked?change:null;
+        for(const other of controls)if(other!==check)other.checked=false;};
+      controls.push(check);label.append(check,document.createTextNode('この検証コマンドの変更も承認する'));
+      changes.append(label,el('pre','変更前：'+change.before+'\n変更後：'+change.after));
+    }
+    form.append(changes);
+  }
   // 2026-10-08 レビュー担当の質問では、担当が「何を確認したか」を並べ、利用者が項目ごとに承認し、足りない確認を指示できるようにする。
   const reviewTask=state.tasks.find(t=>t.id===approval.task_id),reviewChecks=reviewTask?.role==='reviewer'?(reviewTask.result?.checks||[]):[];
   let checklist=null;
@@ -1214,19 +1525,26 @@ function questionForm(approval){
     form.append(field);
   }
   let fileDraft=null;
-  if(approval.kind!=='tool'){
+  if(approval.kind!=='tool'&&!approval.user_recovery){
     fileDraft=answerFiles.get(approval.id);
     if(!fileDraft){const host=el('div');host.id='answer-files-'+approval.id;fileDraft={host,widget:new ImageAttachments(host)};answerFiles.set(approval.id,fileDraft);}
     const files=el('details');files.open=approval.payload.questions.some(q=>/ファイル|素材|画像|PDF|添付/.test(q.text));files.append(el('summary','回答にファイルを添付（ファイルを選択）'),fileDraft.host);form.append(files);
   }
   if(approval.kind==='tool')form.append(el('p','回答期限: '+date(approval.expires_at),'hint'));
   else form.append(el('p','送信すると、回答を引き継いでこの担当を再開します。','hint'));
+  let recoveryCheck=null;
+  if(approval.user_recovery){
+    form.append(el('p','AIの報告です。実行済みの操作と成果物を確認してください。認証情報や個人情報を入力しないでください。','hint'));
+    const label=el('label',undefined,'check');recoveryCheck=el('input');recoveryCheck.type='checkbox';
+    label.append(recoveryCheck,document.createTextNode('停止前の操作と回答内容を確認しました。'));form.append(label);
+  }
   form.append(el('p','「保留して閉じる」では、この担当と後続の作業は進みません。','hint'));
   const actions=el('div',undefined,'actions'),later=el('button','保留して閉じる'),submit=el('button','まとめて回答して続行','primary');
   later.type='button';later.addEventListener('click',()=> $('detail-dialog').close());submit.type='submit';
   actions.append(later,submit);form.append(message,actions);box.append(form);
   form.addEventListener('submit',async e=>{
     e.preventDefault();if(submit.disabled)return;
+    if(recoveryCheck&&!recoveryCheck.checked){message.textContent='停止前の操作と回答内容を確認してください。';return;}
     const answers={};
     for(const q of approval.payload.questions){
       const d=drafts[q.id],option=q.options.find(o=>o.id===d.option_id);let text=d.texts[d.option_id]||'';
@@ -1238,7 +1556,11 @@ function questionForm(approval){
       answers[q.id]={option_id:option.id,text};
     }
     submit.disabled=true;message.textContent='回答を送信しています…';
-    try{const attachment_ids=fileDraft?await fileDraft.widget.upload(api):[];await api('/api/decide',{id:approval.id,allow:true,answers,attachment_ids,...(checklist?{review_checklist:{approved:checklist.approved,instruction:checklist.instruction}}:{})});answerDrafts.delete(approval.id);fileDraft?.widget.clear();answerFiles.delete(approval.id);$('detail-dialog').close();await refresh();}
+    try{const attachment_ids=fileDraft?await fileDraft.widget.upload(api):[];
+      const commandChange=drafts.__command_change?{command_change:drafts.__command_change}:{};
+      if(approval.user_recovery)await api('/api/recovery/user-answer',{job_id:approval.user_recovery.job_id,target:approval.user_recovery.target,answers,confirmed:recoveryCheck.checked,...commandChange});
+      else await api('/api/decide',{id:approval.id,allow:true,answers,attachment_ids,...commandChange,...(checklist?{review_checklist:{approved:checklist.approved,instruction:checklist.instruction}}:{})});
+      answerDrafts.delete(approval.id);fileDraft?.widget.clear();answerFiles.delete(approval.id);$('detail-dialog').close();await refresh();}
     catch(error){message.textContent=error.message;}
     finally{submit.disabled=false;}
   });
@@ -1272,7 +1594,7 @@ function failureDiagnosis(task,job){
   return {cause:'担当が決められた回数で工程を終えられませんでした',why:'内容：'+(task.summary||'（記録なし）').slice(0,240),kinds:['retry','model','transfer','cancel']};
 }
 function failureCard(task,job){
-  if(isWorkflowJob(job)&&needsMaintenance(task,job))return maintenanceWaitBox(task);
+  if(isWorkflowJob(job)&&needsMaintenance(task,job))return maintenanceWaitBox(task,job);
   if(task.failure_code==='codex_sandbox'||task.failure_code==='claude_auth'){
     const box=el('section',undefined,'failure-card');box.id='failure-card';
     box.append(el('h3','実行環境の障害で一時停止しています'),
@@ -1370,9 +1692,67 @@ function advicePanel(task){
   }
   return box;
 }
+function recoveryInvestigationControls(host,job,target,message){
+  const profile=target.recovery_planner_profile;
+  const help=el('p','調査・修復の対象は、停止した依頼の開発対象プロジェクトです。復旧調査は元の作業と関連付けた別の依頼です。停止理由の分類と操作承認の件数を使い、詳細なエラーログは自動で渡しません。AIは開始の承認後に調査します。'+
+    (profile?` 使用予定: ${profile.adapter} / ${profile.model} / ${profile.effort}（元の計画担当）。`:' 元の計画担当のモデルを確認できないため、調査を開始できません。'),'hint');
+  host.append(help);
+  if(target.recovery_readonly)host.append(el('p','前の操作の結果を確認できないため、今回は読み取り調査のみです。修復は行わず、必要な確認と修復案を報告します。','hint'));
+  let share=null;
+  if(target.diagnostic_preview&&(!target.recovery_job_id||target.recovery_job_status==='cancelled')){
+    const details=el('details'),label=el('label',undefined,'check');
+    details.append(el('summary','必要なら停止時の担当報告をAIに渡す'),el('p','内容を確認し、個人情報や機密情報が含まれる場合は選択しないでください。認証情報は送信できません。','hint'),el('pre',target.diagnostic_preview,'text-block'));
+    share=el('input');share.type='checkbox';label.append(share,document.createTextNode('表示した担当報告を、上記のAIへ送ることに同意します。'));details.append(label);host.append(details);
+  }
+  if(target.recovery_job_id){
+    const states={awaiting_approval:'AI開始または計画の承認待ち',planning:'計画中',running:target.recovery_readonly?'読み取り調査中':'調査・修復中',blocked:'確認待ち',failed:'停止',interrupted:'中断',awaiting_acceptance:'復旧内容の確認待ち',accepted:'確認済み',accepted_with_pending_checks:'未完了項目あり',cancelled:'中止'};
+    host.append(el('p',(target.recovery_stage==='repair'?'修復の状態: ':'復旧調査の状態: ')+(states[target.recovery_job_status]||'確認中'),'hint'));
+  }
+  const newInvestigation=!target.recovery_job_id||target.recovery_job_status==='cancelled';
+  const investigate=el('button',newInvestigation?'AIに復旧調査を依頼する':(target.recovery_stage==='repair'?'修復の依頼を開く':'復旧調査の依頼を開く'));
+  investigate.type='button';if(!profile&&newInvestigation)investigate.disabled=true;host.append(investigate);
+  investigate.onclick=async()=>{investigate.disabled=true;
+    try{
+      const result=!newInvestigation?{job_id:target.recovery_job_id}:
+        await api('/api/recovery/user-request',{job_id:job.id,target:{task_id:target.task_id,binding:target.binding},confirmed:true,include_diagnostic:!!share?.checked});
+      await refresh();const first=state.tasks.find(t=>t.job_id===result.job_id&&t.role==='planner');
+      if(first)openTask(first.id);else notice('復旧調査を登録しました。依頼一覧を確認してください。');
+    }catch(error){message.textContent=error.message;investigate.disabled=false;}
+  };
+  if(target.repair_preview){
+    const details=el('details'),label=el('label',undefined,'check'),check=el('input');check.type='checkbox';
+    details.append(el('summary','調査報告を確認して修復を依頼する'),
+      el('p','AIの報告は未検証です。この報告を元の計画モデルに送り、前の操作の状態も含めて確認させます。修復の実行には別途、開始と計画の承認が必要です。','hint'),
+      el('pre',target.repair_preview,'text-block'));
+    label.append(check,document.createTextNode('報告を確認し、この内容をAIへ送って修復を依頼します。'));
+    const repair=el('button','この報告から修復を依頼する');repair.type='button';
+    repair.onclick=async()=>{
+      if(!check.checked){message.textContent='調査報告と送信内容を確認してください。';return;}
+      repair.disabled=true;
+      try{
+        const result=await api('/api/recovery/user-repair',{job_id:job.id,target:{task_id:target.task_id,binding:target.binding},confirmed:true});
+        await refresh();const first=state.tasks.find(t=>t.job_id===result.job_id&&t.role==='planner');
+        if(first)openTask(first.id);else notice('修復の依頼を登録しました。依頼一覧を確認してください。');
+      }catch(error){message.textContent=error.message;repair.disabled=false;}
+    };
+    details.append(label,repair);host.append(details);
+  }else if(target.recovery_stage==='investigation'&&target.recovery_job_status==='accepted'&&target.recovery_readonly){
+    host.append(el('p','修復に渡せる調査報告を確認できません。調査の依頼を開き、報告の有無や送信できない情報を確認してください。','hint'));
+  }
+}
 function recoveryPanel(task,job){
   const box=el('section',undefined,'decision-help');box.id='task-recovery';
   box.append(el('h3','ボードから復旧する'));
+  if(job.p0_contract_version!==1){
+    const investigate=el('button','AIに復旧調査を依頼する'),info=el('p','AIの開始と修復計画には、通常の承認が必要です。','hint');
+    investigate.type='button';info.setAttribute('role','status');box.append(investigate,info);
+    investigate.onclick=async()=>{investigate.disabled=true;info.textContent='停止状態を確認しています…';
+      try{
+        const target=await api('/api/recovery/user-target?job_id='+encodeURIComponent(job.id)+'&task_id='+encodeURIComponent(task.id));
+        info.textContent='停止状態を確認しました。';recoveryInvestigationControls(box,job,target,info);
+      }catch(error){info.textContent=error.message;investigate.disabled=false;}
+    };
+  }
   if(task.recovery_advice?.code==='computer_use'){
     box.append(el('p','ゲームの実画面操作が停止しています。工程の移管では解消しません。上の「停止理由と次の操作」で、PC画面の接続状態と再開手順を確認してください。'));
     return box;
@@ -1518,7 +1898,7 @@ function renderDetail(task,version) {
     if(task.recovery_advice?.message)guide.append(el('p','統括の確認結果：'+task.recovery_advice.message));
     const choices=el('div',undefined,'actions');
     const jump=(label,target)=>choices.append(button(label,()=>{const dest=body.querySelector(target);if(!dest){notice('対象の操作欄がありません。担当の報告と履歴を確認してください。');return;}revealSection(dest);dest.scrollIntoView({block:'center'});const focus=dest.querySelector('button,textarea,input')||dest;focus.focus();}));
-    if(isStalledReview(task))jump('範囲を指定して修正を依頼','#manual-review-repair');
+    if(isStalledWork(task))jump('範囲を指定して修正を依頼','#manual-review-repair');
     else if(pendingUser(task.id).length)jump('判断材料を読んで回答','.approval-box');
     else {jump('原因と復旧方法を確認','#recovery-advice');jump('補足・差し戻しを入力','#retry-note');}
     jump('中止の確認へ','#cancel-job');
@@ -1543,8 +1923,9 @@ function renderDetail(task,version) {
       catch(e){content.textContent=e.message;}
     }),content);body.append(panel);
   }
-  if(job.status==='blocked'&&task.role==='reviewer'&&task.result?.status==='needs_changes'&&task.status==='succeeded'){
-    const panel=el('section',undefined,'detail-section'),note=el('textarea');note.rows=4;note.setAttribute('aria-label','レビュー指摘の修正範囲');
+  if(job.p0_contract_version===1&&['accepted','accepted_with_pending_checks'].includes(job.status))body.append(webTrialPanel(job));
+  if(isStalledValidation(task)||(job.status==='blocked'&&task.role==='reviewer'&&task.result?.status==='needs_changes'&&task.status==='succeeded')){
+    const panel=el('section',undefined,'detail-section'),note=el('textarea');note.rows=4;note.maxLength=4000;note.setAttribute('aria-label',isStalledValidation(task)?'検証指摘の修正範囲':'レビュー指摘の修正範囲');
     panel.id='manual-review-repair';
     note.id='manual-review-repair-note';
     const artifact=job.artifacts?.[0]?.path;
@@ -1596,7 +1977,7 @@ function renderDetail(task,version) {
   body.append(section('今回の作業',task.instruction),section('対象と元の依頼',job.project+'\n\n'+job.goal));
   if(task.instruction_history?.length)body.append(section('過去の指示（履歴・現在の命令ではありません）',task.instruction_history.map(h=>`試行 ${h.attempt} · ${new Date(h.at*1000).toLocaleString()} · ${h.reason}\n${h.instruction}${h.submitted_note?'\n\n当時の追加内容:\n'+h.submitted_note:''}`).join('\n\n────────\n\n')));
   if(task.result)body.append(section('担当の報告（AIによる報告）',reportText(task.result)));
-  if(job.status==='blocked'&&!state.tasks.some(t=>t.job_id===job.id&&['queued','running','awaiting_approval'].includes(t.status))){
+  if(job.status==='blocked'&&!isStalledValidation(task)&&!state.tasks.some(t=>t.job_id===job.id&&['queued','running','awaiting_approval'].includes(t.status))){
     const form=el('form',undefined,'detail-section'),label=el('label','成果物への差し戻し理由・修正範囲'),input=el('textarea'),message=el('p','','hint');input.required=true;input.maxLength=4000;input.rows=4;label.append(input);
     const submit=el('button','この指摘で修正とレビューを再開','primary');submit.type='submit';message.setAttribute('role','status');form.append(el('h3','成果物を差し戻す'),el('p','元の許可範囲で修正担当→通常レビュー→セキュリティレビューへ進みます。未回答の質問や矛盾がある場合は先に解消してください。'),label,message,submit);body.append(form);
     form.onsubmit=async event=>{event.preventDefault();submit.disabled=true;try{await api('/api/jobs/rework',{id:job.id,note:input.value});await refresh();}catch(error){message.textContent=error.message;}finally{submit.disabled=false;}};
@@ -1607,6 +1988,13 @@ function renderDetail(task,version) {
     const latest=state.approvals.filter(a=>a.job_id===job.id&&a.kind==='completion').at(-1);
     if(latest?.task_id===task.id&&latest.status==='approved'){
       const evidenceForm=completionEvidenceForm(latest);if(evidenceForm)body.append(evidenceForm);
+      const canRework=(latest.payload.pending_items?.length||latest.payload.review_findings?.length);
+      if(canRework)body.append(button('未完了項目をまとめて修正に戻す',async()=>{
+        await api('/api/jobs/rework',{id:job.id,note:'',
+          pending_item_indices:(latest.payload.pending_items||[]).map((_,i)=>i),
+          review_finding_indices:(latest.payload.review_findings||[]).map((_,i)=>i)});
+        await refresh();
+      },'danger'));
     }
   }
   if(task.handoff_note)body.append(section('引き継ぎ範囲・未完了項目',task.handoff_note));
@@ -1637,45 +2025,108 @@ function renderDetail(task,version) {
     if(a.payload.questions?.length){if(summary)body.append(summary);const form=questionForm(a);form.dataset.userDecision='1';body.append(form);continue;}
     const box=el('section',undefined,'approval-box');box.dataset.userDecision='1';box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
     if(summary)box.append(summary);
-    if(a.kind==='ai_start')box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途、開発計画の確認・承認が必要です。モデル利用量が発生します。','notice'));
+    if(a.kind==='ai_start'){
+      const model=a.payload?.target;
+      if(model?.provider&&model?.model&&model?.effort)box.append(el('p',`使用するAI: ${model.provider} / ${model.model} / ${model.effort}`,'notice'));
+      box.append(el('p','ジョブ登録は完了しています。ここで許可するのは表示されたProviderによる計画生成1回です。計画ができても後続作業は始まらず、別途、開発計画の確認・承認が必要です。モデル利用量が発生します。','notice'));
+      box.append(section('計画担当への依頼内容',task.instruction||job.goal||''));
+      if(model?.scope_status!=='ready'){
+        const path=model?.scope_preparation?.path||((model?.root||job.project)+'\\SCOPE.md');
+        box.append(el('p',`開始前の準備が必要です：${path}（${model?.scope_status||'状態不明'}）。準備が済むまでAIは開始しません。`,'notice'));
+        if(model?.scope_preparation)box.append(section('采来が新規作成するSCOPE.md（既存ファイルは上書きしません）',model.scope_preparation.content));
+        else box.append(el('p','既存ファイルを読み取れない、または対象外のため自動作成できません。対象フォルダとファイルの状態を確認してください。','hint'));
+      }
+    }
     if(a.kind==='tool'&&a.payload?.guard)box.append(el('p',(['delete','dynamic'].includes(a.payload.guard.category)?'安全のための確認：':'送信の防御：')+a.payload.guard.label+'。'+a.payload.guard.note+(['delete','dynamic'].includes(a.payload.guard.category)?' 対象と範囲が依頼に必要かを確認してから許可してください。':' 送信先・送る内容・依頼に必要かを確認してから許可してください。'),'notice'));
     if(a.kind==='completion'){
+      box.append(acceptanceNavigation(a,job));
       box.append(el('p','レビュー結果の確認と依頼全体の正式受領は別操作です。レビュー確認だけでは受領状態を変更しません。','notice'));
       box.append(el('p','対象依頼：'+job.title,'hint'));
+      if(validationCommands(job).length&&!job.workflow_contract_version){
+        box.append(el('p','検証証跡が失効して受領できない場合は、コード修正ではなく、登録済みの検証コマンドを再実行して通常レビューとセキュリティレビューをやり直せます。実行不能や失敗時は自動修正せず、判断待ちで停止します。','hint'));
+      }
     }
     if(a.kind==='tool')box.append(toolApprovalView(a));else box.append(el('div',reportText(a.payload),'text-block'));
     if(a.kind==='plan'&&a.workflow_revision)box.append(planRevisionView(a));
     if(a.kind==='completion'){
+      const deliverables=deliverableAcceptancePanel(job);deliverables.id='acceptance-deliverables-'+a.id;box.append(deliverables);
       box.append(previewPanel(job));
       const evidenceForm=completionEvidenceForm(a);if(evidenceForm)box.append(evidenceForm);
     }
     const input=el('textarea');input.id='note-'+a.id;input.rows=3;input.placeholder='回答・判断の理由（任意）';input.setAttribute('aria-label','承認または拒否の補足');input.value=drafts[input.id]||'';
-    box.append(el('p',a.kind==='tool'?'この操作1回だけに適用されます。期限: '+date(a.expires_at):a.kind==='completion'?'差し戻す場合は理由を入力してください。正式受領する場合は、まずレビュー結果の確認を記録してください。':'内容を確認して承認または拒否してください。','hint'),input);
+    box.append(el('p',a.kind==='tool'?(a.payload?.operation==='ReadProjectData'?'今回の担当実行・同一ファイル・同一内容だけに適用されます。回答期限: ':'この操作1回だけに適用されます。期限: ')+date(a.expires_at):a.kind==='completion'?'差し戻す場合は理由を入力してください。正式受領する場合は、まずレビュー結果の確認を記録してください。':'内容を確認して承認または拒否してください。','hint'),input);
     const actions=el('div',undefined,'actions');
     const hasPending=a.payload.pending_items?.length||a.payload.review_findings?.length;
     actions.append(button(a.kind==='completion'?'差し戻す':'拒否する',()=>api('/api/decide',{id:a.id,allow:false,note:input.value}),'danger'));
     if(a.kind==='completion'){
+      if(validationCommands(job).length&&!job.workflow_contract_version){
+        actions.append(button('検証だけを再実行してレビューし直す',async()=>{
+          const result=await api('/api/jobs/revalidate',{approval_id:a.id});
+          await refresh();
+          notice('検証専用工程を開始しました。登録済みコマンドの再実行後、通常レビューとセキュリティレビューをやり直します。');
+          return result;
+        },'secondary'));
+      }
+      if(hasPending)actions.append(button('未完了項目をまとめて修正に戻す',async()=>{
+        await api('/api/jobs/rework',{id:job.id,note:input.value,
+          pending_item_indices:(a.payload.pending_items||[]).map((_,i)=>i),
+          review_finding_indices:(a.payload.review_findings||[]).map((_,i)=>i)});
+        await refresh();
+      },'secondary'));
       if(!a.review_acknowledgement){
-        actions.append(button('レビュー結果を確認（受領待ちを維持）',()=>api('/api/jobs/review-confirmation',
-          {approval_id:a.id,confirmed:true}),'primary'));
+        const review=button('レビュー結果を確認（受領待ちを維持）',()=>api('/api/jobs/review-confirmation',
+          {approval_id:a.id,confirmed:true}),'primary');review.id='acceptance-review-'+a.id;actions.append(review);
       }else{
         box.append(el('p','レビュー結果の確認済み（受領待ちは継続） '+date(a.review_acknowledgement.decided_at),'notice'));
         box.append(el('p','再起動後に確認証跡が失効した場合は、対象とレビュー結果が変わっていないことを照合して新しい確認要求を発行できます。対象に差異があれば再テスト・再レビューが必要です。','hint'));
         actions.append(button('再起動後のレビュー確認をやり直す',()=>api('/api/jobs/reconfirm-review',
           {approval_id:a.id,confirmed:true}),'secondary'));
-        const confirmation=el('input');confirmation.autocomplete='off';confirmation.maxLength=20;
+        const confirmation=el('input');confirmation.autocomplete='off';confirmation.maxLength=20;confirmation.id='acceptance-final-'+a.id;
         confirmation.setAttribute('aria-label','正式受領の確認');confirmation.placeholder='正式受領と入力';
         const label=el('label','正式受領する場合は「正式受領」と入力');label.append(confirmation);box.append(label);
+        const acceptanceMessage=el('p',undefined,'notice');acceptanceMessage.id='acceptance-message-'+a.id;
+        acceptanceMessage.hidden=true;acceptanceMessage.setAttribute('role','alert');acceptanceMessage.setAttribute('aria-live','assertive');
+        const savedAcceptanceMessage=acceptanceMessages.get(a.id);
+        if(savedAcceptanceMessage){acceptanceMessage.textContent=savedAcceptanceMessage.text;acceptanceMessage.hidden=false;acceptanceMessage.style.color=savedAcceptanceMessage.error?'#a32020':'';}
+        const acceptanceError=error=>{
+          acceptanceMessage.textContent='正式受領できません：'+error.message;
+          acceptanceMessages.set(a.id,{text:acceptanceMessage.textContent,error:true});
+          acceptanceMessage.hidden=false;acceptanceMessage.style.color='#a32020';
+          notice(acceptanceMessage.textContent,true);
+          acceptanceMessage.tabIndex=-1;acceptanceMessage.focus();acceptanceMessage.scrollIntoView({block:'center'});
+        };
+        actions.append(button('受領できない理由を確認',async()=>{
+          try{
+            await api('/api/jobs/acceptance-check',{approval_id:a.id});
+            acceptanceMessage.textContent='受領前の検査に通りました。「正式受領」と入力して受領できます。まだ受領はしていません。';
+            acceptanceMessages.set(a.id,{text:acceptanceMessage.textContent,error:false});
+            acceptanceMessage.style.color='';acceptanceMessage.hidden=false;acceptanceMessage.scrollIntoView({block:'center'});
+          }catch(error){acceptanceError(error);}
+        },'secondary'));
         const accept=button(hasPending?'未完了項目を明示して条件付き正式受領':'成果物を正式受領',async()=>{
-          if(confirmation.value.trim()!=='正式受領'){notice('正式受領する場合は確認欄に「正式受領」と入力してください。');return;}
-          await api('/api/jobs/formal-acceptance',{approval_id:a.id,confirmation:confirmation.value.trim(),note:input.value});
-          notice('正式受領しました。この依頼は終了しました。');
-        },'primary');actions.append(accept);
+          try{
+            if(confirmation.value.trim()!=='正式受領')throw new Error('確認欄に「正式受領」と入力してください。');
+            await api('/api/jobs/formal-acceptance',{approval_id:a.id,confirmation:confirmation.value.trim(),note:input.value});
+            acceptanceMessages.delete(a.id);
+            notice('正式受領しました。この依頼は終了しました。');
+          }catch(error){acceptanceError(error);}
+        },'primary');
+        const requiredPending=job.p0_contract_version===1&&!!a.payload.pending_items?.length;
+        accept.disabled=requiredPending||confirmation.value.trim()!=='正式受領';
+        confirmation.addEventListener('input',()=>{accept.disabled=requiredPending||confirmation.value.trim()!=='正式受領';});
+        if(requiredPending)box.append(el('p','正式受領の前に、手順2で必須項目の確認根拠を保存してください。','hint'));
+        actions.append(accept);box.append(acceptanceMessage);
       }
     }else{
       // 新方式の計画は、表示した分析の digest を確認として送る。表示していない計画では承認しない。
       const confirmation=a.kind==='plan'&&a.workflow_revision_digest?{workflow_confirmation:a.workflow_revision_digest}:{};
-      actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',async()=>{
+      if(a.kind==='ai_start'&&a.payload?.target?.scope_status!=='ready'){
+        if(a.payload?.target?.scope_preparation)actions.append(button('必要ファイルを準備して開始内容を確認',async()=>{
+          await api('/api/jobs/prepare-start',{approval_id:a.id,fingerprint:a.payload.fingerprint,confirmed:true});
+          await refresh();
+          notice('SCOPE.mdを準備しました。AIは未開始です。最新の開始内容を確認して承認してください。');
+        },'primary'));
+      }else actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',async()=>{
         const chosen=transferChoices.get(a.id)||{};
         await api('/api/decide',{id:a.id,allow:true,note:input.value,...confirmation,...(Object.keys(chosen).length?{transfer_decisions:chosen}:{})});
         transferChoices.delete(a.id);
@@ -1707,7 +2158,7 @@ function renderDetail(task,version) {
     catch(error){factMessage.textContent=error.message;}finally{factSubmit.disabled=false;}
   });
   if(!endedJob(task)&&isWorkflowJob(job)&&needsMaintenance(task,job)&&['failed','interrupted','blocked'].includes(task.status)){
-    if(!body.querySelector('#maintenance-wait'))body.append(maintenanceWaitBox(task));
+    if(!body.querySelector('#maintenance-wait'))body.append(maintenanceWaitBox(task,job));
   }else if(!endedJob(task)&&['failed','interrupted','blocked','cancelled'].includes(task.status)&&!pending(task.id).some(a=>a.payload.questions?.length)){
     const s=el('section',undefined,'detail-section'),input=el('textarea');input.id='retry-note';input.rows=4;input.placeholder='ここに回答・追加の作業指示、または解決した条件を入力してください。';input.value=drafts[input.id]||'';input.setAttribute('aria-label','回答・再開の補足');
     const label=el('label','回答・補足の入力欄');label.htmlFor=input.id;
@@ -1722,7 +2173,7 @@ function renderDetail(task,version) {
   }
   if(!['accepted','accepted_with_pending_checks','cancelled'].includes(job.status)){const cancel=button('この依頼全体を中止',()=>requestCancel(job),'danger');cancel.id='cancel-job';body.append(cancel);}
   body.querySelectorAll('textarea').forEach(t=>{if(drafts[t.id])t.value=drafts[t.id];});
-  body.querySelectorAll('input[type=checkbox][id]').forEach(c=>{if(checkedBoxes[c.id])c.checked=true;});
+  body.querySelectorAll('input[type=checkbox][id]').forEach(c=>{if(checkedBoxes[c.id])c.checked=true;if(c.syncEvidence)c.syncEvidence();});
   foldDetailSections(body,task);
   // 新形式の依頼では、引き継ぎDBの編集欄と履歴は技術詳細に置く（旧形式の表示は変えない）。
   // 新形式の依頼では、担当・モデルの切り替えは一般画面に出さない（技術詳細で従来どおり使える）。
@@ -1738,8 +2189,48 @@ function renderDetail(task,version) {
       node.classList.add('tech-only');
     }
     const detail=hasUserDecision?'操作の確認待ちがあります。下の承認欄をご確認ください。':phase.detail;
-    const status=section('いまの状況',phase.label+'\n'+detail+(job.p0_progress?.next_action?'\n次の動作：'+job.p0_progress.next_action:''));
+    const nextAction=phase.key==='maintenance_required'?'停止した工程の原因と復旧方法を確認する':job.p0_progress?.next_action;
+    const status=section('いまの状況',phase.label+'\n'+detail+(nextAction?'\n次の動作：'+nextAction:''));
     status.classList.add('p0-status');status.setAttribute('role','status');body.prepend(status);
+    if(phase.key==='network_wait'&&!hasUserDecision){
+      networkResumeControls(status,job);
+    }
+    if(phase.key==='maintenance_required'&&!hasUserDecision){
+      const inspect=el('button','原因と復旧方法を確認する'),message=el('p','','hint');
+      inspect.type='button';message.setAttribute('role','status');
+      status.append(el('p','原因が分からない場合は、元の計画担当のAIに調査を依頼できます。AIの開始には承認が必要です。','hint'),inspect,message);
+      inspect.onclick=async()=>{
+        inspect.disabled=true;message.textContent='停止状態を確認しています…';
+        try{
+          const target=await api('/api/recovery/user-target?job_id='+encodeURIComponent(job.id));
+          recoveryInvestigationControls(status,job,target,message);
+          if(target.recovery_in_progress){message.textContent='復旧調査が未完了です。調査の依頼を確認し、完了または中止してください。';return;}
+          if(target.pending_maintenance_question){
+            message.textContent='停止した担当から確認事項があります。内容を確認して回答するか、復旧調査を依頼できます。';
+            const view=el('button','担当からの確認事項を表示');view.type='button';status.append(view);
+            view.onclick=async()=>{view.disabled=true;
+              try{
+                const short={task_id:target.task_id,binding:target.binding};
+                const question=await api('/api/recovery/user-question',{job_id:job.id,target:short});
+                if(!question.can_answer){message.textContent='復旧調査または途中の操作確認が未完了のため、まだ回答して再開できません。';return;}
+                status.append(questionForm({id:question.approval_id,kind:'question',task_id:target.task_id,
+                  payload:question.payload,command_changes:question.command_changes,user_recovery:{job_id:job.id,target:short}}));
+              }catch(error){message.textContent=error.message;view.disabled=false;}
+            };return;
+          }
+          if(target.workflow_confirmation_required){message.textContent='途中の操作やチェックポイントの確認が必要なため、現在は再開できません。';return;}
+          message.textContent=target.operation_history_present?'この依頼には操作履歴があります。重複してよいか、成果物と実行済み操作を確認してください。':'停止前の成果物と実行済みの操作を確認してください。';
+          const label=el('label',undefined,'check'),check=el('input'),restart=el('button','確認して停止工程を再試行','primary');
+          check.type='checkbox';restart.type='button';restart.disabled=true;
+          label.append(check,document.createTextNode('停止前の成果物と実行済みの操作を確認し、再試行します。'));
+          check.onchange=()=>{restart.disabled=!check.checked;};
+          restart.onclick=async()=>{restart.disabled=true;message.textContent='再開を依頼しています…';
+            try{await api('/api/recovery/user-retry',{job_id:job.id,target:{task_id:target.task_id,binding:target.binding},confirmed:check.checked});await refresh();}
+            catch(error){message.textContent=error.message;restart.disabled=!check.checked;}};
+          status.append(label,restart);
+        }catch(error){message.textContent=error.message;inspect.disabled=false;}
+      };
+    }
   }
   tabifyDetail(body,task);
   // 描き直しで、操作中のボタンが差し替わりフォーカスを失ったときは、承認の枠の見出し（無ければ詳細の題名）へ移す。
@@ -1752,6 +2243,44 @@ function renderDetail(task,version) {
 }
 // 2026-10-08 カードを開くたびに折りたたみを初期状態（停止理由を開く）から始める。以前の開閉を引き継ぐと、停止後も閉じたままになっていた。
 // 定期的な描き直しで、フォーカスのあるボタンが差し替わっても、同じ印（data-focus-key）のボタンへフォーカスを戻す。
+function networkResumeControls(status,job){
+  const probe=el('button','接続と停止状態を確認'),resume=el('button','停止した担当から再開','primary');
+  const message=el('p','','hint'),label=el('label',undefined,'check'),check=el('input'),operations=el('div');
+  probe.type='button';resume.type='button';resume.disabled=true;check.type='checkbox';
+  message.setAttribute('role','status');check.disabled=true;
+  label.append(check,document.createTextNode('途中成果と実行済み操作を確認しました。同じ担当・モデルで未完了部分を再開します。'));
+  let target=null;
+  check.onchange=()=>{resume.disabled=!target||!check.checked;};
+  probe.onclick=async()=>{
+    probe.disabled=true;resume.disabled=true;check.checked=false;check.disabled=true;target=null;operations.replaceChildren();
+    message.textContent='停止状態と接続先のDNS・TLS疎通を確認しています…';
+    try{
+      const current=await api('/api/recovery/user-target?job_id='+encodeURIComponent(job.id));
+      if(!current.network_wait)throw new Error('停止状態が変わりました。画面を再読み込みしてください。');
+      for(const item of current.operation_results||[]){
+        operations.append(el('p',`${item.label}：終了コード ${item.exit_code===null?'不明':item.exit_code}${item.timed_out?'（時間切れ）':''} / ${new Date(item.at*1000).toLocaleString('ja-JP')}`,'hint'));
+      }
+      if(current.workflow_confirmation_required)throw new Error('成否不明の操作またはチェックポイントの確認が必要です。保守担当の確認なしに再送しません。');
+      if(current.recovery_in_progress||current.pending_maintenance_question)throw new Error('復旧調査または確認事項を先に完了してください。');
+      const short={task_id:current.task_id,binding:current.binding};
+      const result=await api('/api/recovery/network-check',{job_id:job.id,target:short});
+      target=short;check.disabled=false;
+      message.textContent=result.reason+' 再開時にも接続と対象版を再確認します。成果物と上の操作結果を確認して、チェックを入れてください。';
+    }catch(error){message.textContent=error.message;}
+    finally{probe.disabled=false;}
+  };
+  resume.onclick=async()=>{
+    resume.disabled=true;probe.disabled=true;check.disabled=true;message.textContent='接続と対象版を再確認し、再開を依頼しています…';
+    try{
+      await api('/api/recovery/user-retry',{job_id:job.id,target,confirmed:check.checked});
+      await refresh();
+    }catch(error){
+      target=null;check.checked=false;
+      message.textContent=error.message+' 接続と停止状態をもう一度確認してください。';
+    }finally{probe.disabled=false;}
+  };
+  status.append(probe,message,operations,label,resume);
+}
 function currentFocusKey(){return document.activeElement?.dataset?.focusKey||null;}
 let focusPending=false;   // 詳細を閉じた直後は、描き直しでフォーカスを失っても、戻り先（進み具合の見出し）へ戻す
 // 操作の結果で押したボタンが消える場合（機能の確認・差し戻し）は、結果の行へフォーカスを移す（W05.05.UI、F3）。
@@ -1833,7 +2362,7 @@ function refresh(){
   refreshing=loadState().finally(()=>{refreshing=null;if(block)hideBusy();});
   return refreshing;
 }
-async function loadState(){try{state=await api('/api/state');mergeTaskDetails();const focusKey=currentFocusKey();render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();restoreFocus(focusKey);}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message);}}
+async function loadState(){try{state=await api('/api/state');mergeTaskDetails();const focusKey=currentFocusKey();render();const routeBox=$('job-routing-eval');if(routeBox){routeBox.hidden=state.config?.routing_evaluation?.enabled!==true;if(routeBox.hidden)$('job-route').value='full';}notifyDecisions();restoreFocus(focusKey);}catch(e){$('connection').textContent='接続できません';notice('接続が切れました。サーバーの状態を確認し、画面を再読み込みしてください。 '+e.message,true);}}
 const decisionNotificationObjects=new Map(),decisionPopupObjects=new Map();
 let seenDecisions=new Set();
 try{seenDecisions=new Set(JSON.parse(localStorage.getItem('agent-team-decision-seen')||'[]'));}catch(error){}
@@ -1853,7 +2382,7 @@ function decisionHelp(task){
   let text,target;
   if(hasChoices){text='「判断が必要です」の各選択肢を選び、必要な補足を入力して「まとめて回答して続行」を押してください。';target='.approval-box';}
   else if(requests.length){text='「操作の承認」または成果の確認欄で回答します。補足はその欄の入力欄に記入し、承認・受領または拒否を選んでください。';target='.approval-box';}
-  else if(isStalledReview(task)){text='自動修正の上限です。「ボード内で指摘を修正する」で最新指摘と成果物を確認し、許可する修正範囲を送信してください。';target='#manual-review-repair';}
+  else if(isStalledWork(task)){text='自動修正の上限です。「ボード内で指摘を修正する」で最新指摘と成果物を確認し、許可する修正範囲を送信してください。';target='#manual-review-repair';}
   else if(stopReason(task)){const reason=stopReason(task);text=reason.title+'。'+reason.detail;target='#task-recovery';}
   else if(pythonFailure(task)){text='Pythonの起動失敗で停止しています。「停止理由と次の操作」の「原因を確認して回答案を作る」で統括側の起動確認を行い、結果に応じた回答案を取得してください。工程間の移管欄は使いません。';target='#recovery-advice';}
   else if(task.recovery_advice?.code==='task_completion'){text='担当工程の完了報告を、未完了作業の移管として返したため停止しています。「停止理由と次の操作」の回答案を入力して再報告してください。移管欄は使いません。';target='#recovery-advice';}
@@ -1904,9 +2433,9 @@ function decisionItems(){
     if(!p0Phase(state.jobs.find(j=>j.id===task.job_id))&&!workflowMaintenanceWait(task)&&['blocked','failed','interrupted'].includes(task.status)){const reason=stopReason(task);return [{task,key:`${task.id}:${task.attempt}:${task.status}:${reason?.code||'generic'}`,label:reason?.title||(task.status==='blocked'?'判断が必要です':'作業が停止しています'),detail:reason?.detail,voice:reason?.title}];}
     return [];
   }).concat(state.jobs.filter(job=>!['cancelled','accepted','accepted_with_pending_checks'].includes(job.status)).flatMap(job=>{
-    const review=stalledReview(job);
+    const review=stalledWork(job);
     return review&&!p0Phase(job)?[{task:review,key:'repair-limit:'+review.id,label:'自動修正の上限に達し、判断が必要です',
-      detail:'レビュー指摘が残っています。修正範囲を指定して再依頼するか、成果の扱いを判断してください。',voice:'自動修正の上限に達しました。判断が必要です。'}]:[];
+      detail:isStalledValidation(review)?'検証指摘が残り、レビューは未実施です。最後の検証結果を確認し、範囲を指定して修正を依頼するか、中止を選んでください。':'レビュー指摘が残っています。修正範囲を指定して再依頼するか、成果の扱いを判断してください。',voice:'自動修正の上限に達しました。判断が必要です。'}]:[];
   }));
 }
 function openNotifiedTask(id){

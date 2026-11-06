@@ -112,6 +112,8 @@ class App:
         self.archives = Archives(self.ledger, self.engine)
         self.moves = Moves(self.ledger, self.engine, self.archives)
         self.engine.project_blocked = lambda path: self.archives.blocked(path) or self.moves.blocked(path)
+        from team_web_trial import WebTrials
+        self.web_trials = WebTrials(self)
         for job in self.store.all('job'):
             self.engine.sync_handoff(job['id'])
         self.usage = UsageMonitor(self.commands, self.engine.shutdown,
@@ -309,6 +311,9 @@ class App:
                 visible_jobs.append(dict(job,p0_progress=p0_progress(job,tasks,approvals))
                                     if job.get('p0_contract_version') == 1 else job)
         approvals = [dict(a,actionable=actionable[a['id']]) if a['id'] in actionable else a for a in approvals]
+        approvals = [dict(a, command_changes=self.engine.question_command_changes(a))
+                     if a.get('kind') == 'question' and a.get('status') == 'pending' else a
+                     for a in approvals]
         return {'jobs': visible_jobs, 'tasks': tasks,
                 'approvals': approvals, 'events': self.store.events(),
                 'history': {'days': self.history_days(), 'hidden_jobs': jobs_total - len(shown)},
@@ -334,21 +339,48 @@ class App:
         maintenance_tasks.update(job['p0_interruption'].get('interrupted_task_id')
                                  for job in state['jobs']
                                  if isinstance(job.get('p0_interruption'), dict)
-                                 and job['p0_interruption'].get('recovery_status') == 'maintenance_required')
+                                 and job['p0_interruption'].get('recovery_status') in ('maintenance_required', 'network_wait'))
+        network_tasks = {job['p0_interruption'].get('interrupted_task_id')
+                         for job in state['jobs'] if isinstance(job.get('p0_interruption'), dict)
+                         and job['p0_interruption'].get('recovery_status') == 'network_wait'}
         exposed['tasks'] = [
             ({'id': task['id'], 'job_id': task['job_id'], 'status': task['status'],
               'role': task.get('role'), 'after': task.get('after'),
-              'title': '保守対応待ち', 'attempt': task.get('attempt', 0),
+              'title': ('担当工程' if task.get('status') in ('queued', 'running', 'awaiting_approval', 'succeeded')
+                        else '通信回復後の再開待ち' if task['id'] in network_tasks else '保守対応待ち'),
+              'attempt': task.get('attempt', 0),
               'instruction': '', 'result': None, 'agent_name': None, 'common_agents': [],
               'profile': {'adapter': '', 'model': '', 'effort': ''},
-              'summary': '開発エンジンの確認が必要です。途中成果は保存されています。'}
+              'summary': ('' if task.get('status') in ('queued', 'running', 'awaiting_approval', 'succeeded')
+                          else '通信が切れました。途中成果を保持して再開を待っています。' if task['id'] in network_tasks
+                          else '開発エンジンの確認が必要です。途中成果は保存されています。')}
              if task['id'] in maintenance_tasks else task)
             for task in state['tasks']]
-        exposed['jobs'] = [
-            (dict(job, p0_interruption={k: v for k, v in job['p0_interruption'].items()
-                                        if k not in ('failure_signature', 'interruption_reason')})
-             if job.get('p0_contract_version') == 1 and isinstance(job.get('p0_interruption'), dict) else job)
-            for job in state['jobs']]
+        exposed['jobs'] = []
+        for job in state['jobs']:
+            stop = job.get('p0_interruption')
+            if job.get('p0_contract_version') == 1 and isinstance(stop, dict):
+                public_stop = {k: v for k, v in stop.items()
+                               if k not in ('failure_signature', 'interruption_reason', 'public_reason', 'failure_category')}
+                if stop.get('recovery_status') == 'maintenance_required':
+                    reason = {'test_temp_scope': 'test_temp_unavailable',
+                              'codex_sandbox': 'execution_environment',
+                              'format': 'report_format',
+                              'task_timeout': 'time_limit', 'timeout': 'time_limit',
+                              'claude_auth': 'authentication', 'codex_auth': 'authentication',
+                              'copilot_auth': 'authentication', 'authentication': 'authentication',
+                              'usage_limit': 'provider_limit', 'usage_limit_wait': 'provider_limit',
+                              'rate_limit': 'provider_limit', 'quota_exceeded': 'provider_limit',
+                              'provider': 'provider_failure'}.get(stop.get('interruption_reason'))
+                    category = stop.get('failure_category')
+                    if category in ('authentication', 'provider_limit', 'timeout', 'sandbox_setup'):
+                        reason = {'authentication': 'authentication', 'provider_limit': 'provider_limit',
+                                  'timeout': 'time_limit', 'sandbox_setup': 'execution_environment'}[category]
+                    if reason:
+                        public_stop['public_reason'] = reason
+                exposed['jobs'].append(dict(job, p0_interruption=public_stop))
+            else:
+                exposed['jobs'].append(job)
         maintenance_tasks.discard(None)
         exposed['events'] = [
             (dict(event, message='開発エンジンの確認が必要です。', details=None)
@@ -477,6 +509,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
                 return self.send(200, self.app.public_state())
+            if path == '/api/recovery/user-target':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                return self.send(200, self.app.engine.user_recovery_target(
+                    (query.get('job_id') or [''])[0], (query.get('task_id') or [None])[0]))
             if path == '/api/maintenance/state':
                 if not self.maintenance_authorized():
                     raise PermissionError('保守担当の認証が必要です。')
@@ -511,6 +549,16 @@ class Handler(BaseHTTPRequestHandler):
                 job = self.app.store.get((query.get('job_id') or [''])[0], 'job')
                 from team_p0_contract import p0_artifact_text
                 return self.send(200, p0_artifact_text(job, (query.get('path') or [''])[0]))
+            if path == '/api/job/web-trial/settings':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                return self.send(200, self.app.web_trials.settings((query.get('job_id') or [''])[0]))
+            if path == '/api/job/web-trial':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                return self.send(200, self.app.web_trials.status((query.get('job_id') or [''])[0]))
             if path == '/api/tasks/detail':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -523,7 +571,7 @@ class Handler(BaseHTTPRequestHandler):
                 if (detail_job.get('p0_contract_version') == 1
                         and (maintenance_question or (
                             (detail_job.get('p0_interruption') or {}).get('interrupted_task_id') == detail_id
-                            and (detail_job.get('p0_interruption') or {}).get('recovery_status') == 'maintenance_required'))
+                            and (detail_job.get('p0_interruption') or {}).get('recovery_status') in ('maintenance_required', 'network_wait')))
                         and not self.maintenance_authorized()):
                     return self.send(200, {'id': detail_id, 'job_id': detail_job['id'],
                                            'status': detail_task['status'],
@@ -586,9 +634,11 @@ class Handler(BaseHTTPRequestHandler):
                         issues.append(dict(issue, project=job.get('project', ''), job_title=job.get('title', '')))
                 snapshot['warning_issues'] = issues
                 snapshot['development_issues'] = self.app.ledger.issues()
+                issues_by_project = {}
+                for issue in issues:
+                    issues_by_project.setdefault(canonical(issue['project']), []).append(issue)
                 for project in snapshot['projects']:
-                    project['warning_issues'] = [i for i in issues
-                                                if canonical(i['project']) == canonical(project['path'])]
+                    project['warning_issues'] = issues_by_project.get(canonical(project['path']), [])
                 return self.send(200, snapshot)
             if path == '/api/ledger/preview-status':
                 if not self.authorized():
@@ -690,7 +740,42 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized() or self.headers.get('X-Agent-Team-UI') != '1':
                 raise PermissionError('ブラウザからの認証済み操作が必要です。')
             engine = self.app.engine
-            if path == '/api/workflow/recovery/assess':
+            if path == '/api/recovery/user-question':
+                if set(body) != {'job_id', 'target'}:
+                    raise ValueError('確認事項の指定が不正です。')
+                result = engine.user_recovery_question(body['job_id'], body['target'])
+            elif path == '/api/recovery/user-answer':
+                if (not {'job_id', 'target', 'answers', 'confirmed'} <= set(body)
+                        or set(body) - {'job_id', 'target', 'answers', 'confirmed', 'command_change'}):
+                    raise ValueError('確認事項への回答が不正です。')
+                result = engine.user_recovery_answer(body['job_id'], body['target'], body['answers'],
+                                                     body['confirmed'], body.get('command_change'))
+            elif path == '/api/recovery/user-request':
+                if not {'job_id', 'target', 'confirmed'} <= set(body) or set(body) - {'job_id', 'target', 'confirmed', 'include_diagnostic'}:
+                    raise ValueError('復旧調査の指定が不正です。')
+                result = engine.user_recovery_request(body['job_id'], body['target'], body['confirmed'],
+                                                      body.get('include_diagnostic', False))
+            elif path == '/api/recovery/user-repair':
+                if set(body) != {'job_id', 'target', 'confirmed'}:
+                    raise ValueError('修復の指定が不正です。')
+                result = engine.user_recovery_repair(body['job_id'], body['target'], body['confirmed'])
+            elif path == '/api/recovery/user-retry':
+                if set(body) != {'job_id', 'target', 'confirmed'}:
+                    raise ValueError('復旧操作の指定が不正です。')
+                result = engine.user_recovery_retry(body['job_id'], body['target'], body['confirmed'])
+            elif path == '/api/recovery/network-check':
+                if set(body) != {'job_id', 'target'}:
+                    raise ValueError('接続確認の指定が不正です。')
+                result = engine.user_network_check(body['job_id'], body['target'])
+            elif path == '/api/recovery/recheck-criteria':
+                if set(body) != {'id', 'confirmed'}:
+                    raise ValueError('保存済みレビューの指定が不正です。')
+                result = engine.recheck_saved_criterion_report(body['id'], body['confirmed'])
+            elif path == '/api/recovery/recheck-artifacts':
+                if set(body) != {'id', 'confirmed'}:
+                    raise ValueError('保存済みレビューの指定が不正です。')
+                result = engine.recheck_saved_artifact_report(body['id'], body['confirmed'])
+            elif path == '/api/workflow/recovery/assess':
                 if not self.maintenance_authorized():
                     raise PermissionError('保守担当の認証が必要です。')
                 workflow_body(body, ('action', 'job_id', 'task_id'), 'assess_recovery')
@@ -823,6 +908,12 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.app.ledger.save_issue(body)
             elif path == '/api/ledger/add':
                 result = self.app.ledger.add(body)
+            elif path == '/api/job/web-trial/prepare':
+                result = self.app.web_trials.prepare(body)
+            elif path == '/api/job/web-trial/start':
+                result = self.app.web_trials.start(body)
+            elif path == '/api/job/web-trial/stop':
+                result = self.app.web_trials.stop(body)
             elif path == '/api/ledger/scan':
                 result = self.app.ledger.scan()
             elif path == '/api/ledger/backup':
@@ -845,7 +936,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(body.get('title'),str) or not isinstance(body.get('goal'),str) or not body['title'].strip() or not body['goal'].strip() or len(body['goal'])>16000:
                     raise ValueError('依頼名と内容を入力してください（内容は16,000文字まで）。')
                 self.app.attachments.select(body.get('attachment_ids',[]))
-                # 依頼を追加: ledger registration and harness conversion run before planning starts.
+                # Registration does not grant ledger or harness mutation permission.
                 # Input Guard (Security by Default): secrets are refused; personal data / confidential names need confirmation.
                 from team_dlp import require_clean_input
                 from team_validation_gate import validate_commands
@@ -918,12 +1009,18 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/jobs/rework':
                 if self.app.store.get(str(body.get('id','')),'job').get('workflow_contract_version') == 1:
                     raise WorkflowRequestError('workflow_feature_target_required')
-                result = engine.rework_from_rejection(str(body.get('id', '')), body.get('note', ''))
+                result = engine.rework_from_rejection(str(body.get('id', '')), body.get('note', ''),
+                    pending_item_indices=body.get('pending_item_indices'),
+                    review_finding_indices=body.get('review_finding_indices'))
             elif path == '/api/jobs/plan-revision':
                 if set(body) != {'id', 'plan', 'job_revision'}:
                     raise ValueError('改訂計画・依頼ID・表示した依頼版だけを指定してください。')
                 result = engine.propose_plan_revision(body['id'], body['plan'], body['job_revision'],
                                                      actor='authenticated_local_app_session')
+            elif path == '/api/jobs/prepare-start':
+                if set(body) != {'approval_id', 'fingerprint', 'confirmed'}:
+                    raise ValueError('表示した開始対象とファイル作成の確認だけを指定してください。')
+                result = engine.prepare_plan_start(body['approval_id'], body['fingerprint'], body['confirmed'])
             elif path == '/api/decide':
                 if type(body.get('allow')) is not bool:
                     raise ValueError('承認または拒否を選んでください。')
@@ -947,12 +1044,23 @@ class Handler(BaseHTTPRequestHandler):
                     raise PermissionError('保守担当の認証が必要です。')
                 engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'),
                               body.get('review_checklist'), workflow_confirmation=body.get('workflow_confirmation'),
-                              transfer_decisions=body.get('transfer_decisions'))
+                              transfer_decisions=body.get('transfer_decisions'),
+                              command_change=body.get('command_change'))
                 result = {'ok': True}
+            elif path == '/api/jobs/acceptance-check':
+                if set(body) != {'approval_id'}:
+                    raise ValueError('受領前の検査には成果確認IDだけを指定してください。')
+                result = engine.accept_completion(str(body.get('approval_id', '')),
+                                                  '正式受領', check_only=True)
             elif path == '/api/jobs/formal-acceptance':
                 result = engine.accept_completion(str(body.get('approval_id', '')),
                                                   body.get('confirmation'), body.get('note', ''),
                                                   actor='authenticated_local_app_session')
+            elif path == '/api/jobs/revalidate':
+                if set(body) != {'approval_id'}:
+                    raise ValueError('検証の再実行には成果確認IDだけを指定してください。')
+                result = engine.revalidate_completion(str(body.get('approval_id', '')),
+                                                       actor='authenticated_local_app_session')
             elif path == '/api/jobs/review-confirmation':
                 result = engine.acknowledge_completion_review(str(body.get('approval_id', '')),
                                                               body.get('confirmed'),
@@ -964,7 +1072,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/completion/evidence':
                 result = engine.record_completion_evidence(
                     str(body.get('approval_id', '')), body.get('item_index'),
-                    body.get('check_index'), body.get('evidence'), body.get('confirmed'))
+                    body.get('check_index'), body.get('evidence'), body.get('confirmed'),
+                    entries=body.get('entries'))
             elif path == '/api/jobs/accept-without-fix':
                 if body.get('confirmed') is not True:
                     raise ValueError('修正せずに受け入れへ進めることを確認してください。')
@@ -999,7 +1108,7 @@ class Handler(BaseHTTPRequestHandler):
                     retry_task.get('recovery_check_required') or retry_task.get('recovery_confirmation')
                     or self.app.store.has_operation_history(retry_job['id']))
                 if ((recovery_control or (retry_job.get('p0_contract_version') == 1
-                        and (retry_job.get('p0_interruption') or {}).get('recovery_status') == 'maintenance_required'))
+                        and (retry_job.get('p0_interruption') or {}).get('recovery_status') in ('maintenance_required', 'network_wait')))
                         and not self.maintenance_authorized()):
                     raise PermissionError('保守担当の認証が必要です。')
                 if retry_job.get('workflow_contract_version') == 1:
@@ -1277,6 +1386,7 @@ def main():
         pass
     finally:
         server.app.engine.shutdown.set()
+        server.app.web_trials.close()
         server.app.consultations.shutdown()
         for ctx in list(server.app.engine.active.values()):
             ctx.cancel.set()

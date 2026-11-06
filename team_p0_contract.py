@@ -74,6 +74,21 @@ def initial(goal):
     }
 
 
+def selected_project_context(project):
+    """Make the registered project root authoritative in every worker prompt."""
+    root = Path(project).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError('対象プロジェクトのルートがフォルダではありません。')
+    return (
+        '\n\n【対象プロジェクトの正本】\n'
+        f'依頼時に利用者が選択した実際の作業ルート: {root}\n'
+        'この選択済みルートが今回の対象範囲の正本です。専用の読み取りツールもこのルートを対象にしています。'
+        'SCOPE.mdなどの資料に別の絶対パスが記載されていても、移転前の記録として扱い、別の場所へ対象を切り替えないでください。'
+        '実際に読めるファイルと依頼時の選択先が一致することを確認し、古いパスは警告として報告してください。'
+        'プロジェクト資料のパス記載は自動修正しないでください。'
+    )
+
+
 def _items(value, label, required=False):
     if (not isinstance(value, list) or len(value) > MAX_ITEMS
             or (required and not value)
@@ -114,13 +129,75 @@ def validate_plan(job, result, *, check_current_inputs=True):
         links = _items(spec.get('goal_links'), f'作業{index}の目的との対応', required=True)
         if any(link not in allowed for link in links):
             raise ValueError(f'作業{index}に成果物・受入条件へ対応しない作業があります。')
-    test_plan = result.get('code_test_plan') or {}
-    if test_plan.get('required') is not True or not test_plan.get('cases') or not test_plan.get('command'):
-        raise ValueError('開発計画には現行版で実行するテストと確認条件が必要です。')
+    if job.get('criterion_evidence_version') == 1:
+        covered = {link for spec in result.get('tasks') or [] for link in spec['goal_links']}
+        missing = [item for item in contract['acceptance_criteria'] if item not in covered]
+        if missing:
+            raise ValueError('受入条件を担当する作業がありません: ' + ' / '.join(missing))
+    if job.get('code_test_contract_version') == 1:
+        from team_code_test_contract import validate_plan as validate_code_test_plan
+        validate_code_test_plan(result.get('code_test_plan') or {})
+    else:
+        test_plan = result.get('code_test_plan') or {}
+        if test_plan.get('required') is not True or not test_plan.get('cases') or not test_plan.get('command'):
+            raise ValueError('開発計画には現行版で実行するテストと確認条件が必要です。')
     if workflow_version(job) == 1:
         from team_wbs import validate_work_packages
         validate_work_packages(result, job, check_current_inputs=check_current_inputs)
     return contract
+
+
+def criterion_review(job, task):
+    return (job.get('criterion_evidence_version') == 1 and task.get('role') == 'reviewer'
+            and task.get('agent_name') != 'common-security-reviewer')
+
+
+def pending_detail_matches(item, criterion):
+    """Link explanatory text only through an exact quoted approved condition."""
+    return (isinstance(item, dict) and isinstance(item.get('check'), str)
+            and bool(item['check'].strip())
+            and (item['check'] == criterion or (
+                item.get('source_type') == 'approved_plan'
+                and item.get('source_excerpt') == criterion)))
+
+
+def criterion_review_findings(criteria, result, *, request=''):
+    """Check coverage, not the semantic truth of an agent's evidence."""
+    rows = result.get('acceptance_results')
+    if not isinstance(rows, list) or len(rows) > 40:
+        rows = []
+    issues, accepted = [], {}
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {'criterion', 'outcome', 'evidence'}
+                or not isinstance(row['criterion'], str) or row['criterion'] not in criteria
+                or row['criterion'] in accepted
+                or row['outcome'] not in ('passed', 'failed', 'user_pending')
+                or not isinstance(row['evidence'], str) or not row['evidence'].strip()
+                or len(row['evidence']) > 2000):
+            issues.append({'requirement': '実行阻害', 'impact': '受入条件ごとの確認結果が重複・対象外・形式不正です。'})
+            continue
+        criterion = row['criterion']
+        accepted[criterion] = row
+        if row['outcome'] == 'failed':
+            issues.append({'requirement': criterion, 'impact': row['evidence']})
+        elif row['outcome'] == 'user_pending':
+            details = result.get('pending_check_details') or []
+            if (criterion not in (result.get('pending_checks') or []) or not any(
+                    pending_detail_matches(item, criterion)
+                    and item.get('owner') == 'user' and item.get('required') is True
+                    and item.get('feasibility') == 'feasible'
+                    and item.get('source_type') in ('request', 'approved_plan')
+                    and isinstance(item.get('source_excerpt'), str) and item['source_excerpt'].strip()
+                    and item['source_excerpt'].strip() in (
+                        request if item['source_type'] == 'request' else criterion)
+                    for item in details)):
+                issues.append({'requirement': criterion, 'impact': '利用者による確認待ちの出典・担当・未確認項目がありません。'})
+        elif criterion in (result.get('pending_checks') or []):
+            issues.append({'requirement': criterion, 'impact': '同じ受入条件を合格と未確認の両方で報告しています。'})
+    for criterion in criteria:
+        if criterion not in accepted:
+            issues.append({'requirement': criterion, 'impact': 'この受入条件の確認結果と具体的な根拠がありません。'})
+    return issues
 
 
 def approved_plan(job, result):
@@ -129,7 +206,7 @@ def approved_plan(job, result):
     return deepcopy(contract)
 
 
-def artifact_relative_path(name):
+def artifact_relative_path(name, *, allow_data=False):
     """Check artifact path syntax/privacy without consulting a current file."""
     if not isinstance(name, str) or not name.strip() or len(name) > 260:
         raise ValueError('成果ファイルの報告形式が不正です。')
@@ -138,6 +215,8 @@ def artifact_relative_path(name):
         raise ValueError('成果ファイルは依頼フォルダ内の相対パスで指定してください。')
     forbidden = {'.git', 'data', '__pycache__', '.env', '.ssh', '.aws', '.azure',
                  'secrets', 'credentials', 'logs'}
+    if allow_data:
+        forbidden.remove('data')
     if any(part.casefold() in forbidden or part.startswith('.') or
            any(word in part.casefold() for word in ('secret', 'credential', 'private_key',
                                                    'access_token', 'api_key'))
@@ -153,8 +232,15 @@ def artifact_records(project, paths):
     root = Path(project).resolve()
     records = []
     for name in paths:
-        relative = artifact_relative_path(name)
+        relative = artifact_relative_path(name, allow_data=True)
         target = (root / relative).resolve()
+        if 'data' in [part.casefold() for part in relative.parts]:
+            from consultation_read_tools import safe_path, screen_model_read
+            target = safe_path(root, name, allow_data=True)
+            try:
+                screen_model_read(target.read_text(encoding='utf-8-sig'))
+            except UnicodeError as exc:
+                raise ValueError('開発データの成果物はUTF-8のテキストを指定してください。') from exc
         if (not target.is_relative_to(root) or not target.is_file()
                 or target.stat().st_size > 20_000_000):
             raise ValueError('成果ファイルを安全に確認できません。')
@@ -430,6 +516,7 @@ def _legacy_progress(job, tasks, approvals):
     contract = job.get('goal_contract') or {}
     interruption = job.get('p0_interruption') or {}
     maintenance_wait = interruption.get('recovery_status') == 'maintenance_required'
+    network_wait = interruption.get('recovery_status') == 'network_wait'
     hidden_tasks = {item.get('task_id') for item in approvals
                     if item.get('job_id') == job.get('id')
                     and item.get('intended_role') == 'maintainer'}
@@ -475,6 +562,8 @@ def _legacy_progress(job, tasks, approvals):
         unmet = list(contract.get('acceptance_criteria') or [])
         if maintenance_wait:
             next_action = '保守担当が開発エンジンを復旧する'
+        elif network_wait:
+            next_action = '接続と途中成果を確認し、停止した担当から再開する'
         elif interruption.get('recovery_status') == 'safety_blocked':
             next_action = '安全上の問題を確認する'
         elif job.get('status') == 'awaiting_approval':
@@ -483,7 +572,7 @@ def _legacy_progress(job, tasks, approvals):
             next_action = title(active) if active else (remaining[0] if remaining else '作業状態を確認する')
     return {
         'completed': completed,
-        'current': ('保守対応待ち' if maintenance_wait else title(active) if active else
+        'current': ('保守対応待ち' if maintenance_wait else '通信回復後の再開待ち' if network_wait else title(active) if active else
                     '完成物の確認待ち' if latest_completion else '次の作業を待機中'),
         'remaining': remaining + ([] if job.get('status') in ('accepted', 'accepted_with_pending_checks')
                                  else ['利用者による完成物の確認']),

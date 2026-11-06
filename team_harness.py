@@ -177,6 +177,41 @@ def _is_reparse(path):
         return path.is_symlink() or getattr(path, 'is_junction', lambda: False)()
 
 
+def start_scope_content(project):
+    root = Path(project).resolve(strict=True)
+    return (
+        '# Scope\n\n'
+        f'## Project\n\n- Root: {root}\n\n'
+        '## Allowed\n\n'
+        '- Plan only the current user request. Planning does not authorize implementation.\n'
+        '- After separate plan approval, change only task-specific paths within this root.\n'
+        '- Preserve existing project instructions and unrelated user changes.\n\n'
+        '## Restricted\n\n'
+        '- Commands, external access, and other guarded operations require their existing approvals.\n'
+        '- Do not change files outside this root, credentials, or production data.\n'
+        '- Do not broaden the request or run unrelated checks.\n'
+    )
+
+
+def create_start_scope(project, content):
+    """Create the confirmed startup scope without replacing any existing path."""
+    root = Path(os.path.abspath(project))
+    for path in (root, *root.parents):
+        if _is_reparse(path):
+            raise ValueError('リンク・ジャンクションを経由する対象には開始用ファイルを作成できません。')
+    if not root.is_dir():
+        raise ValueError('対象フォルダが見つかりません。')
+    if content != start_scope_content(root):
+        raise ValueError('開始用ファイルの内容が変わりました。再確認してください。')
+    target = root / 'SCOPE.md'
+    try:
+        with target.open('x', encoding='utf-8', newline='\n') as stream:
+            stream.write(content)
+    except FileExistsError as error:
+        raise ValueError('SCOPE.mdは既に存在します。上書きせず、開始内容を再確認してください。') from error
+    return target
+
+
 def _project_path(path):
     raw = Path(path)
     lexical = Path(os.path.abspath(raw))

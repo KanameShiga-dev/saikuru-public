@@ -57,12 +57,15 @@ def check_text(text):
     """Return (allowed, reason). Reason is a category label safe to show/log."""
     try:
         policy = load_policy()
-        checks = [(SECRET, '認証情報・秘密情報らしき文字列'), (MY_NUMBER, '12桁の番号（個人番号等の可能性）'),
+        from team_dlp import has_personal_number
+        checks = [(SECRET, '認証情報・秘密情報らしき文字列'),
                   (EMAIL, 'メールアドレス'), (PHONE, '電話番号'), (PRIVATE_IP, '社内IPアドレス'),
                   (INTERNAL_HOST, '社内ホスト名・ドメイン'), (LOCAL_PATH, 'PC内・社内共有のパス')]
         for pattern, label in checks:
             if pattern.search(text):
                 return False, label
+        if has_personal_number(text):
+            return False, '12桁の番号（個人番号等の可能性）'
         lowered = text.casefold()
         for domain in policy['blocked_domains']:
             d = str(domain).strip().casefold().lstrip('.')

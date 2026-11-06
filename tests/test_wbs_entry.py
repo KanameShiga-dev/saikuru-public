@@ -130,7 +130,11 @@ class WbsEntryTests(WbsFixture):
         plan = {'summary': '架空の計画', 'questions': [], 'context_updates': [], 'warnings': [],
                 'security_review_required': False, 'checkpoint_paths': ['output.txt'],
                 'code_test_plan': {'required': True, 'reason': '架空の試験', 'cases': ['架空の条件'],
-                                   'command': 'python -I run_fictional_tests.py', 'existing_tests': []},
+                                   'command': 'python -I run_fictional_tests.py', 'existing_tests': [],
+                                   'test_methods': ['unit'], 'preconditions': ['架空の実行環境と .local/test-tmp'],
+                                   'setup_steps': ['架空のデータを準備する'], 'synthetic_accounts': [], 'ui_test_required': False,
+                                   'ui_test_tool': 'not_applicable', 'ui_test_reason': '', 'ui_test_command': '',
+                                   'cleanup_steps': ['架空のデータを消す']},
                 'goal_contract': {'primary_goal': '架空の目的', 'deliverables': [deliverable],
                                   'acceptance_criteria': [criterion], 'non_goals': [], 'constraints': []},
                 'work_packages': [{'wbs_id': 'WP1', 'title': '架空の機能', 'goal_links': [deliverable, criterion],
@@ -285,7 +289,11 @@ PLAN = {'summary': '架空の二機能計画', 'questions': [], 'context_updates
         'security_review_required': False,
         'checkpoint_paths': ['catalog.py', 'detail.py', 'tests/test_catalog.py', 'tests/test_detail.py'],
         'code_test_plan': {'required': True, 'reason': '架空の試験', 'cases': ['一覧・検索', '詳細・編集'],
-                           'command': CHECK, 'existing_tests': []},
+                           'command': CHECK, 'existing_tests': [],
+                           'test_methods': ['unit'], 'preconditions': ['架空の実行環境と .local/test-tmp'],
+                           'setup_steps': ['架空のデータを準備する'], 'synthetic_accounts': [], 'ui_test_required': False,
+                           'ui_test_tool': 'not_applicable', 'ui_test_reason': '', 'ui_test_command': '',
+                           'cleanup_steps': ['架空のデータを消す']},
         'goal_contract': {'primary_goal': '架空の一覧・検索と詳細・編集', 'deliverables': DELIVERABLES,
                           'acceptance_criteria': CRITERIA, 'non_goals': [], 'constraints': ['架空のデータだけを使う']},
         'work_packages': [
@@ -339,7 +347,7 @@ class WbsNormalPathTests(WbsFixture):
         self.prompts[task['id']] = prompt
         if task['role'] == 'planner':
             return copy.deepcopy(PLAN)
-        report = {'status': 'done', 'summary': '架空の報告', 'checks': ['架空の確認'], 'pending_checks': [],
+        report = {'status': 'done', 'summary': '架空の報告', 'checks': ['架空の確認'], 'pending_checks': [], 'pending_check_details': [],
                   'question': '', 'questions': [], 'context_updates': [], 'warnings': [], 'stage_complete': True,
                   'blocking_reasons': []}
         if task['role'] == 'builder':

@@ -33,7 +33,7 @@ class ProviderError(Exception):
 
 def scoped_test_temp(project):
     """The project's .local/test-tmp folder for a Claude builder's test temp files, or None when it is missing,
-    a link, or resolves outside the project. The project prepares it; 采来 never creates it."""
+    a link, or resolves outside the project. The engine prepares it after plan approval (team_test_environment); this check never creates it."""
     project_root = Path(project).resolve()
     test_temp = project_root / '.local' / 'test-tmp'
     is_junction = getattr(test_temp, 'is_junction', lambda: False)
@@ -50,7 +50,7 @@ def _set_scoped_test_temp(ctx, env):
     test_temp = scoped_test_temp(ctx.project)
     if test_temp is None:
         raise ProviderError('指定テストの一時領域が許可範囲内にありません。テストは開始していません。',
-                            'test_temp_scope')
+                            'test_temp_scope', model_call_state='not_started') from None
     # Scope TEMP/TMP to the registered project for this Claude builder process and
     # its test child process. This does not change the Windows or user environment.
     env['TEMP'] = str(test_temp.resolve())

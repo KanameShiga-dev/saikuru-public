@@ -10,8 +10,8 @@ import time
 def validate_commands(value):
     if value in (None, []):
         return []
-    if not isinstance(value, list) or not 1 <= len(value) <= 3:
-        raise ValueError('検証コマンドは1〜3件の配列で指定してください。')
+    if not isinstance(value, list) or not 1 <= len(value) <= 5:
+        raise ValueError('検証コマンドは1〜5件の配列で指定してください。')
     commands = []
     for item in value:
         if not isinstance(item, str) or not item.strip() or len(item) > 500 \
@@ -53,6 +53,9 @@ def findings(commands, cycle_task, job=None, project=None):
         run = latest.get(index)
         persisted = (job or {}).get('validation_evidence') or {}
         evidence = persisted.get(str(index)) if isinstance(persisted, dict) else None
+        if cycle_task.get('requires_validation_run') is True and run is None:
+            issues.append(f'検証コマンド{index + 1}が今回の再検証工程で実行されていません。')
+            continue
         if run is not None and (run.get('timed_out') or run.get('exit_code') != 0):
             code = '時間切れ' if run.get('timed_out') else str(run.get('exit_code'))
             issues.append(f'検証コマンド{index + 1}が成功していません（終了状態: {code}）。')

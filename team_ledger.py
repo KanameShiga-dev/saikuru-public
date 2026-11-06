@@ -17,6 +17,8 @@ SKIP = {'.git', '.venv', 'venv', 'node_modules', 'library', 'temp', 'obj', 'bin'
         'outputs', 'captures', 'certs', 'profiles', 'records', 'chrome-amazon-automation-profile',
         'diagnostics', 'tests', 'examples', 'docs', 'deploy', 'manual', 'archive', 'work', '_project_archives'}
 CONTAINERS = {'Claude', 'Codex', 'tools', 'Projects', 'samples'}
+# The ledger root may hold the application itself; it is never a ledger project.
+APP = Path(__file__).resolve().parent
 MULTI_PROJECTS = {'Codex/miscProject', 'Codex/学習資料'}
 MARKERS = {'.git', 'package.json', 'pyproject.toml', 'requirements.txt',
            'Cargo.toml', 'go.mod', 'platformio.ini', 'ProjectSettings', 'server.py'}
@@ -253,7 +255,7 @@ class Ledger:
 
     def add(self, body):
         path = inside(body.get('path', ''))
-        if not path.is_dir() or path == ROOT:
+        if not path.is_dir() or path == ROOT or path.is_relative_to(APP) or APP.is_relative_to(path):
             raise ValueError('C:\\AI_WorkSpace 以下の既存プロジェクトフォルダを指定してください。')
         with self.lock:
             self.backup()
@@ -283,7 +285,7 @@ class Ledger:
                 if depth >= 4 or path.name == 'family' or (marker and not is_multi):
                     return
                 for child in sorted(path.iterdir()):
-                    if child.is_dir() and not child.is_symlink() and not getattr(child, 'is_junction', lambda: False)() and not child.name.startswith(('.', '_project_archive_pending_')) and child.name.lower() not in SKIP and not (depth >= 2 and child.name.lower() == 'tools'):
+                    if child.is_dir() and not child.is_symlink() and not getattr(child, 'is_junction', lambda: False)() and not child.name.startswith(('.', '_project_archive_pending_')) and child.name.lower() not in SKIP and not (depth >= 2 and child.name.lower() == 'tools') and child.resolve() != APP:
                         walk(child, depth + 1)
             except (OSError, ValueError):
                 errors.append(str(path) + ': フォルダ情報を取得できません。')

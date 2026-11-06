@@ -4,6 +4,7 @@ import hashlib
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -17,7 +18,83 @@ COPILOT_AUTH = re.compile(r"not (?:logged|signed) in|copilot login|authenticatio
                           r"|\b401\b|re-?authenticate|(?:oauth )?token (?:has )?(?:expired|is invalid|invalid)", re.I)
 RESET_AT = re.compile(r'resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?', re.I)
 
+NETWORK_FAILURE = re.compile(
+    r'\bENOTFOUND\b|\bEAI_AGAIN\b|dns error|error resolving DNS|'
+    r'\bECONNRESET\b|\bENETUNREACH\b|\bEHOSTUNREACH\b|'
+    r'network is unreachable|connection reset by peer|'
+    r'そのようなホストは不明|ネットワークに到達できません', re.I)
+
+
+def is_network_failure(code, message):
+    """A bounded hint, never evidence that earlier tool operations had no effect."""
+    text = message[:4096] if isinstance(message, str) else ''
+    return (code == 'provider' and not COPILOT_AUTH.search(text)
+            and not re.search(r'\bunauthenticated\b|failed to authenticate', text, re.I)
+            and not USAGE_LIMIT.search(text) and bool(NETWORK_FAILURE.search(text)))
+
+
+def network_operations_known(starts, results):
+    """Require a terminal result for each recorded command; never replay it here."""
+    pending = {}
+    events = sorted([(e, True) for e in starts] + [(e, False) for e in results],
+                    key=lambda item: item[0].get('at', 0))
+    for event, started in events:
+        details = event.get('details') or {}
+        if not isinstance(details, dict):
+            return False
+        digest = details.get('command_digest')
+        if not isinstance(digest, str) or len(digest) != 64:
+            return False
+        key = (details.get('attempt_id'), digest)
+        if details.get('correlated') is True:
+            operation = details.get('operation_id')
+            if not isinstance(operation, str) or not operation:
+                return False
+            key += (operation,)
+        if started:
+            pending[key] = pending.get(key, 0) + 1
+        else:
+            if (not pending.get(key) or type(details.get('exit_code')) is not int
+                    or details.get('timed_out') is not False):
+                return False
+            pending[key] -= 1
+    return not any(pending.values())
+
+
+def probe_provider_connection(adapter):
+    """Check fixed Provider TLS endpoints without credentials, HTTP or model calls."""
+    hosts = {'copilot': 'api.business.githubcopilot.com',
+             'claude': 'api.anthropic.com', 'codex': 'chatgpt.com',
+             'gemini': 'generativelanguage.googleapis.com'}
+    host = hosts.get(adapter)
+    if not host:
+        raise ValueError('この担当の接続確認には対応していません。保守担当に確認してください。')
+    # A separate bounded process also bounds Windows DNS resolution, which does
+    # not obey socket timeouts. No output or Provider diagnostics are exposed.
+    script = (
+        'import socket,ssl,sys\n'
+        'try:\n'
+        ' with socket.create_connection((sys.argv[1],443),timeout=5) as sock:\n'
+        '  with ssl.create_default_context().wrap_socket(sock,server_hostname=sys.argv[1]): pass\n'
+        'except socket.gaierror: sys.exit(2)\n'
+        'except ssl.SSLError: sys.exit(3)\n'
+        'except OSError: sys.exit(4)\n'
+    )
+    try:
+        result = subprocess.run([sys.executable, '-c', script, host], timeout=8,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except subprocess.TimeoutExpired:
+        return {'reachable': False, 'reason': '接続確認が時間切れになりました。通信を確認して再度お試しください。'}
+    reasons = {0: '接続先のDNS・TLS疎通を確認しました。ログインやモデル応答の成功を保証するものではありません。',
+               2: '接続先の名前を解決できません。無線LANなどの通信を確認してください。',
+               3: '接続先のTLS証明書を確認できません。保護を解除せず、保守担当に確認してください。',
+               4: '接続先へ通信できません。無線LANなどの通信を確認してください。'}
+    return {'reachable': result.returncode == 0,
+            'reason': reasons.get(result.returncode, '接続確認を完了できませんでした。保守担当に確認してください。')}
+
 _WORKFLOW_FAILURE_GUIDANCE = {
+    'network': ('AIサービスとの通信が切れました', '通信の回復と停止前の成果・操作を確認し、画面から停止工程の再開を判断してください。自動再送はしません。', 'waiting'),
     'authentication': ('認証状態の確認が必要です', '本人が対象Providerの認証状態を確認し、保守確認後に再試行を判断してください。', 'waiting'),
     'provider_limit': ('Providerが利用上限を報告しました', '利用枠の回復を確認してから、現在の承認と途中成果を保守担当が確認してください。自動再送はしません。', 'waiting'),
     'timeout': ('担当の実行時間上限で停止しました', '途中成果と処理の成否を確認し、同じ操作を再送せず再開方法を保守担当が判断してください。', 'maintenance'),
@@ -52,6 +129,8 @@ def workflow_failure_plan(code, message='', *, cancelled=False, model_call_state
         category = 'authentication'
     elif USAGE_LIMIT.search(text):
         category = 'provider_limit'
+    elif is_network_failure(code, text):
+        category = 'network'
     elif re.search(r'\btimed? out\b|\btimeout\b|実行時間の上限', text, re.I):
         category = 'timeout'
     else:
@@ -162,6 +241,10 @@ def p0_interruption(task, previous, code, category='MAINTENANCE_REQUIRED'):
     if guidance:
         result.update(failure_category=task['failure_recovery']['category'],
                       next_action=guidance['next_step'], resume_allowed=False, automatic_retry=False)
+    if category != 'SAFETY_BLOCKED' and is_network_failure(code, task.get('summary')):
+        result.update(recovery_status='network_wait', failure_category='network',
+                      next_action='接続と途中成果を確認し、停止した担当から再開する',
+                      resume_allowed=False, automatic_retry=False)
     return result
 
 

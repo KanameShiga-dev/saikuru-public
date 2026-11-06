@@ -32,6 +32,7 @@ class FixtureHandler(Handler):
     def do_POST(self):
         if urlparse(self.path).path not in {'/api/decide', '/api/completion/evidence',
                                             '/api/jobs/formal-acceptance', '/api/jobs/review-confirmation',
+                                            '/api/jobs/acceptance-check',
                                             '/api/jobs/reconfirm-review',
                                             '/api/jobs/evaluation'}:
             return self.send(403, {'error': 'この隔離画面では受領確認だけを行えます。'})

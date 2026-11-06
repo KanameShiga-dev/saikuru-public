@@ -38,7 +38,7 @@
       "id": "KF-004",
       "title": "Failures and errors seen in a single non-final run, not yet read or classified",
       "test_ids": [
-        "tests.test_claude_builder_temp_scope.ClaudeBuilderTempScopeTests.test_non_builder_or_job_without_validation_keeps_environment",
+        "tests.test_claude_builder_temp_scope.ClaudeBuilderTempScopeTests.test_non_builder_keeps_environment",
         "tests.test_g1_g2_adversarial.G1G2AdversarialTests.test_spawned_processes_can_claim_g2_only_once",
         "tests.test_quality_engine_hook_synthetic.HookTests.test_a_failing_recorder_never_holds_up_acceptance",
         "tests.test_quality_engine_hook_synthetic.HookTests.test_accepting_a_stopped_job_without_a_fix_also_records",
