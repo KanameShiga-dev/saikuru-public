@@ -2143,17 +2143,21 @@ function renderDetail(task,version) {
       // 新方式の計画は、表示した分析の digest を確認として送る。表示していない計画では承認しない。
       const confirmation=a.kind==='plan'&&a.workflow_revision_digest?{workflow_confirmation:a.workflow_revision_digest}:{};
       if(a.kind==='ai_start'&&a.payload?.target?.scope_status!=='ready'){
-        if(a.payload?.target?.scope_preparation)actions.append(button('必要ファイルを準備して開始内容を確認',async()=>{
-          await api('/api/jobs/prepare-start',{approval_id:a.id,fingerprint:a.payload.fingerprint,confirmed:true});
+        // 本番の通し試験（11-07）：準備と開始が別の操作で、判断が 1 回多かった。作るSCOPE.mdと開始内容は
+        // この画面に表示済みなので、1 回の操作で準備し、サーバーが作り直した新しい承認で開始する。
+        // サーバーの G2 の検査（指紋・版・1回だけ）は変えない。対象が変われば開始は拒否される。
+        if(a.payload?.target?.scope_preparation)actions.append(button('この内容でAIに計画を作らせる（1回）',async()=>{
+          const prepared=await api('/api/jobs/prepare-start',{approval_id:a.id,fingerprint:a.payload.fingerprint,confirmed:true});
+          await api('/api/decide',{id:prepared.approval_id,allow:true,note:input.value});
           await refresh();
-          notice('SCOPE.mdを準備しました。AIは未開始です。最新の開始内容を確認して承認してください。');
+          notice('必要ファイル（SCOPE.md）を準備し、AIによる計画作成を1回だけ開始しました。計画ができたら、改めて確認をお願いします。');
         },'primary'));
       }else actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',async()=>{
         const chosen=transferChoices.get(a.id)||{};
         await api('/api/decide',{id:a.id,allow:true,note:input.value,...confirmation,...(Object.keys(chosen).length?{transfer_decisions:chosen}:{})});
         transferChoices.delete(a.id);
         // W05.05.UI（F4）：承認の結果を文で伝える。開始・完了を約束しない。
-        if(a.kind==='plan')notice('計画を承認しました。承認した計画で作業を進めます。機能ごとの確認は、各機能の作業の後に行います。');
+        if(a.kind==='plan')notice('計画を承認しました。承認した計画で作業を進めます。'+(a.workflow_revision_digest?'機能ごとの確認は、各機能の作業の後に行います。':''));
         else if(a.kind==='ai_start')notice('AIによる計画作成の開始を承認しました（1回だけ）。計画ができたら、改めて確認をお願いします。');
       },'primary'));
     }
@@ -2549,6 +2553,13 @@ $('new-job').addEventListener('click',()=>{if(!state)return;
   const consentText=consentLabel&&[...consentLabel.childNodes].find(n=>n.nodeType===Node.TEXT_NODE);
   if(consentText)consentText.nodeValue=' 依頼内容・添付ファイルを隔離ジョブ管理DBへ登録することを確認しました。登録だけではAIへ送信されません。';
   const submit=$('new-dialog').querySelector('form button[type="submit"]');if(submit)submit.textContent='依頼を登録して、計画作成の開始の承認を待つ';
+  // 本番の通し試験（11-07）：確認の欄がボタンから離れていて、押した後のエラーで初めて気づいた。
+  // 登録のボタンの近くに同じ内容を書き、ボタンを押すことを同意として送る。サーバーの consent の検査は変えない。
+  if(consent&&consentLabel&&submit){
+    consent.checked=true;consentLabel.hidden=true;
+    let note=$('job-consent-note');
+    if(!note){note=el('p','依頼の内容と添付ファイルは采来の記録に保存されます。登録しただけではAIに送られません。','hint');note.id='job-consent-note';submit.before(note);}
+  }
   $('new-dialog').showModal();checkJobInstructionSize();jobSkills.load(api);
 });
 let folderState=null, folderBusy=false, folderGeneration=0;

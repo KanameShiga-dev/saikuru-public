@@ -97,6 +97,9 @@ BLOCKED = {'.git', '.env', '.ssh', '.aws', '.azure', '.codex', '.claude', '.loca
            'engines', '.venv', '.offline_stage', 'credentials', 'secrets', 'dist', 'build'}
 TEXT = {'.py', '.js', '.ts', '.tsx', '.jsx', '.html', '.css', '.md', '.json', '.toml',
         '.yaml', '.yml', '.txt', '.cs', '.xml', '.ps1', '.psm1', '.psd1', '.sh', '.sql', '.ini', '.cfg'}
+# 2026-11-07 (trial 5): a reviewer could not confirm that the local DB is kept out of publication, because
+# .gitignore has no suffix for Path and was refused; the job got an extra repair round. Read by exact name only.
+TEXT_NAMES = {'.gitignore'}
 
 def safe_path(root, name, *, allow_data=False):
     path = (root / name).resolve()
@@ -119,7 +122,7 @@ def safe_path(root, name, *, allow_data=False):
     if allow_data and (path.name.casefold() in ('config.json', 'config.yml', 'auth.json', 'settings.json')
                        or path.suffix.casefold() in ('.ini', '.cfg')):
         raise ValueError('実設定は読み取り対象外です。')
-    if path.suffix.casefold() not in TEXT:
+    if path.suffix.casefold() not in TEXT and path.name.casefold() not in TEXT_NAMES:
         raise ValueError('対応するテキストファイルを指定してください。')
     if not path.is_file() or path.stat().st_size > 200000:
         raise ValueError('ファイルがないか、読み取りサイズ上限を超えています。')

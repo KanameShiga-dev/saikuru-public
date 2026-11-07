@@ -101,12 +101,46 @@ def _without_search_terms(text):
     return ''.join(parts)
 
 
+HEREDOC = re.compile(r"""<<-?\s*(['"])(\w+)\1""")
+WRITE_ONLY_CAT = re.compile(r'cat\s*>>?\s*[^\s|;&<>\'"]+')
+
+
+def _without_written_bodies(text):
+    """The command with the bodies that `cat` only writes to a file blanked (production trial, 2026-11-07).
+
+    `cat > tests/test_memo.py <<'EOF' ... EOF` writes code to a file without running it, but the word
+    shutil.rmtree in that code made the delete rule ask the user every time. A body is skipped only when its
+    delimiter is quoted (the shell does not expand $(...) inside), the receiving command is `cat` with only a
+    redirection to a file, nothing is piped on, and the body ends. Running the written file later is not
+    inspected, as for any script file (see the module docstring)."""
+    lines, kept, index = text.split('\n'), [], 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        found = list(HEREDOC.finditer(line))
+        if len(found) != 1:
+            continue
+        parts = _segments(line)
+        position = next(i for i in range(0, len(parts), 2) if HEREDOC.search(parts[i]))
+        receiver = HEREDOC.sub('', parts[position]).strip()
+        piped = position + 1 < len(parts) and parts[position + 1] == '|'
+        if piped or not WRITE_ONLY_CAT.fullmatch(receiver):
+            continue
+        indented = found[0].group(0).startswith('<<-')
+        end = next((i for i in range(index, len(lines))
+                    if (lines[i].lstrip('\t') if indented else lines[i]) == found[0].group(2)), None)
+        if end is not None:
+            index = end
+    return '\n'.join(kept)
+
+
 def classify(command):
     """Return None (no outbound effect found) or (category, label, action) with action 'deny' or 'manual'."""
     text = str(command or '')
     if CREDENTIAL.search(text):  # credentials and 采来's data: judged on the whole command, search terms included
         return 'credential', '認証情報・采来の内部データの読み取り', 'deny'
-    screened = _without_search_terms(text)
+    screened = _without_search_terms(_without_written_bodies(text))
     for category, label, pattern in RULES:
         if pattern.search(screened):
             return category, label, 'manual'

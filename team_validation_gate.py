@@ -4,6 +4,7 @@ The builder runs commands through the existing tool approval path. This module
 only checks the recorded exit codes; it never launches a process.
 """
 
+import re
 import time
 
 
@@ -24,21 +25,35 @@ def validate_commands(value):
     return commands
 
 
-def command_index(commands, command):
+CD_PREFIX = re.compile(r'''cd\s+(?:"([^"]+)"|'([^']+)'|([^\s'"]+))\s*&&\s*(.+)''')
+
+
+def command_index(commands, command, project=None):
     """The listed command this run executed, or None.
 
     Only for recording evidence. A Claude worker runs commands in Git Bash, which drops backslashes, so a
-    path written with \\ arrives with /. Other differences (arguments, order, another script) stay different.
+    path written with \\ arrives with /. A leading `cd <the job's folder> &&` does not change what runs or
+    its exit code, and the evidence snapshot covers that folder, so it counts as the listed command.
+    Other differences (another folder, ; or ||, arguments, order, a trailing pipe) stay different.
     """
     def shape(value):
         return ' '.join(str(value).replace('\\', '/').split())
     wanted = shape(command)
+    prefix = CD_PREFIX.fullmatch(wanted) if project else None
+    if prefix and same_folder(next(g for g in prefix.groups()[:3] if g), project):
+        wanted = prefix.group(4)
     return next((i for i, listed in enumerate(commands) if shape(listed) == wanted), None)
 
 
-def record_result(task, commands, command, exit_code, timed_out):
+def same_folder(path, project):
+    def shape(value):
+        return str(value).replace('\\', '/').rstrip('/').casefold()
+    return shape(path) == shape(project)
+
+
+def record_result(task, commands, command, exit_code, timed_out, project=None):
     """Return updated evidence for a user-supplied command, or None."""
-    index = command_index(commands, command) if task.get('role') == 'builder' else None
+    index = command_index(commands, command, project) if task.get('role') == 'builder' else None
     if index is None:
         return None
     runs = list(task.get('validation_runs') or [])

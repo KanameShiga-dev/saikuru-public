@@ -721,7 +721,7 @@ class Context:
         job = self.engine.store.get(self.task['job_id'], 'job')
         listed = commands(job)
         runs = record_result(self.engine.store.get(self.task['id'], 'task'),
-                             listed, command, exit_code, timed_out)
+                             listed, command, exit_code, timed_out, job.get('project'))
         if runs is not None:
             self.engine.store.update(self.task['id'], validation_runs=runs)
             index = runs[-1]['index']
