@@ -5333,7 +5333,9 @@ class Engine:
         return (f"\n\n今回の機能: {wp['wbs_id']}「{wp['title']}」"
                 '\nこの機能の完了条件:\n' + '\n'.join('- ' + text for text in wp['done_when'])
                 + '\n対応する成果物・受入条件:\n' + '\n'.join('- ' + text for text in wp['goal_links'])
-                + '\n計画にある他の機能の完了条件は、この担当の判定に使わない。')
+                + '\n計画にある他の機能の完了条件は、この担当の判定に使わない。'
+                + '\n依頼全体の必須条件でも、他の機能で確かめる項目はpending_checksに書かない。'
+                  'この機能の条件で確かめられなかったものだけを書く。')
 
     def _web_rule_applies(self, job, task):
         """Only a WBS assignee working from an approved file list can be told the Web rule is not needed."""

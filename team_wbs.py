@@ -471,9 +471,20 @@ def feature_basis(store, job_id, wp_id):
 
 def reviewer_pending_checks(members):
     """What the package's reviewers could not verify, for the person to check in the feature review
-    (as the standard workflow hands them to the completion approval)."""
-    return [{'task_id':t['id'],'title':t['title'],'check':check} for t in members if t['role'] == 'reviewer'
-            for check in (t.get('result') or {}).get('pending_checks') or []]
+    (as the standard workflow hands them to the completion approval). Each check appears once; only one every
+    reviewer marked as the AI's stays out of what the person is asked to confirm."""
+    rows = {}
+    for t in members:
+        if t['role'] != 'reviewer':
+            continue
+        result = t.get('result') or {}
+        owners = {d.get('check'):d.get('owner') for d in result.get('pending_check_details') or []}
+        for check in result.get('pending_checks') or []:
+            owner = 'ai' if owners.get(check) == 'ai' else 'user'
+            row = rows.setdefault(check,{'task_id':t['id'],'title':t['title'],'check':check,'owner':owner})
+            if owner == 'user':
+                row['owner'] = 'user'
+    return list(rows.values())
 
 
 def feature_target(basis):

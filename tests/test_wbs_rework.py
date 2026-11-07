@@ -188,6 +188,26 @@ class ReworkTests(unittest.TestCase):
         self.assertEqual([p['check'] for p in target['pending_checks']],['Fictional missing check'])
         self.assertEqual(self.wp()['review_status'],'pending')
 
+    def test_a_check_two_reviewers_report_is_one_item_and_keeps_who_can_do_it(self):
+        # Live run: F1's confirmation asked the person, twice each, to check F2 before F2 existed.
+        from team_wbs import reviewer_pending_checks
+        def reviewer(task_id,*details):
+            return {'id':task_id,'role':'reviewer','title':'Fictional review',
+                    'result':{'pending_checks':[d['check'] for d in details],'pending_check_details':list(details)}}
+        later = {'check':'Fictional later feature','owner':'ai'}
+        by_hand = {'check':'Fictional manual check','owner':'user'}
+        rows = reviewer_pending_checks([reviewer('a',later,{'check':by_hand['check'],'owner':'ai'}),reviewer('b',later,by_hand),
+                                        {'id':'c','role':'builder','title':'Fictional build',
+                                         'result':{'pending_checks':['Fictional builder check']}}])
+        self.assertEqual([(r['check'],r['owner']) for r in rows],[('Fictional later feature','ai'),('Fictional manual check','user')])
+        # A check with no recorded owner stays with the person rather than being treated as handled.
+        unknown = {'id':'d','role':'reviewer','title':'Fictional review','result':{'pending_checks':['Fictional unknown']}}
+        self.assertEqual(reviewer_pending_checks([unknown])[0]['owner'],'user')
+
+    def test_feature_assignees_are_told_to_leave_other_features_checks_out(self):
+        focus = self.engine._package_focus({'work_package_id':self.wp()['id']})
+        self.assertIn('他の機能で確かめる項目はpending_checksに書かない',focus)
+
     def test_independent_approved_feature_and_receipt_are_preserved(self):
         reviews = self.independent_features()
         other = next(w for w in self.store.for_job('work_package',self.job_id)

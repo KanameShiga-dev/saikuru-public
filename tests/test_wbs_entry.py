@@ -281,6 +281,26 @@ assert.ok(source.includes('const owned=ownedPathsLine(w);if(owned)item.append(ow
         ran = subprocess.run([node, '-e', check, str(ROOT / 'web' / 'app.js')], capture_output=True, text=True, encoding='utf-8', timeout=60)
         self.assertEqual(ran.returncode, 0, ran.stderr)
 
+    def test_feature_confirmation_asks_the_person_only_for_their_own_checks(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node.js is required for JavaScript behavior checks')
+        check = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync(process.argv[1],'utf8');
+const context={};
+vm.createContext(context);
+vm.runInContext(source.slice(source.indexOf('function pendingCheckGroups('),source.indexOf('// 機能ごとの担当ファイル。')),context);
+const groups=context.pendingCheckGroups({pending_checks:[{check:'架空の本人確認',owner:'user'},{check:'架空の後続確認',owner:'ai'},{check:'架空の旧形式'},{check:''}]});
+assert.deepEqual([...groups.person],['架空の本人確認','架空の旧形式']);
+assert.deepEqual([...groups.ai],['架空の後続確認']);
+const none=context.pendingCheckGroups({});
+assert.equal(none.person.length+none.ai.length,0);
+assert.ok(source.includes('後の工程でAIが確かめる項目（この確認には含みません）'));
+"""
+        ran = subprocess.run([node, '-e', check, str(ROOT / 'web' / 'app.js')], capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+
     def test_feature_review_to_start_is_shown_as_the_users_decision(self):
         # Live run: the job waited for the person while the screen said "running" and "your decisions: 0".
         node = shutil.which('node')
