@@ -594,6 +594,32 @@ class WbsNormalPathTests(WbsFixture):
             for kept in ('情報の取り扱い（Security by Default）', '公開・push・課金は禁止', '【依頼条件を代用品へ置き換えない】'):
                 self.assertIn(kept, prompt, task['title'])
 
+    def test_a_feature_review_may_cite_the_features_own_completion_condition(self):
+        # Live run: the reviewer is told to report on done_when, and its finding citing one stopped the whole job.
+        from team_engine import ProviderError
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        job = self.jobs()[0]
+        self.decide(self.approval('ai_start'), True, '架空の開始承認')
+        self.drain()
+        plan = self.approval('plan')
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.drain()
+        review = next(t for t in self.store.for_job('task', job['id'])
+                      if t['role'] == 'reviewer' and t.get('work_package_id'))
+        condition = self.store.get(review['work_package_id'], 'work_package')['done_when'][0]
+        self.assertIn('機能別のレビューでは、この機能の完了条件の文面でもよい', self.prompts[review['id']])
+        engine = self.server.app.engine
+
+        def finding(requirement):
+            return {'status': 'needs_changes', 'summary': '架空の指摘', 'checks': ['架空の確認'],
+                    'blocking_reasons': [{'requirement': requirement, 'impact': '架空の影響'}]}
+
+        engine._validate(review, finding(condition))
+        with self.assertRaises(ProviderError) as refused:
+            engine._validate(review, finding('架空の計画にない条件'))
+        self.assertEqual(refused.exception.code, 'format')
+        self.assertIn('架空の計画にない条件', str(refused.exception))
+
     def attempted_writes(self, planned, label, paths):
         """Run the flow up to the builder of `label`; what that builder's Write requests get back, per path."""
         results, simulated = {}, self.answer

@@ -4776,7 +4776,7 @@ class Engine:
                  'まだ最終成果物がない中間工程は空配列にする。作成していないものを列挙しない。'
                if ctx.task['role'] == 'builder' and job.get('p0_contract_version') == 1 else '')
             + ('\n\n修正を要する指摘はblocking_reasonsへ記録し、requirementには承認済みの'
-               'deliverablesまたはacceptance_criteriaの文面を正確に記す。'
+               'deliverablesまたはacceptance_criteriaの文面を正確に記す。機能別のレビューでは、この機能の完了条件の文面でもよい。'
                '緊急の安全問題は「安全」、直接の実行阻害は「実行阻害」と記す。'
                'そこへ結び付かない改善提案はwarningsへ記録し、依頼を進める。'
                if ctx.task['role'] == 'reviewer' and job.get('p0_contract_version') == 1 else '')
@@ -4888,9 +4888,12 @@ class Engine:
             reasons = result.get('blocking_reasons') or []
             allowed = (set((review_job.get('goal_contract') or {}).get('deliverables') or []) |
                        set((review_job.get('goal_contract') or {}).get('acceptance_criteria') or []) |
+                       set(self._review_criteria(review_job, task)) |
                        {'安全', '実行阻害'})
-            if reasons and any(row.get('requirement') not in allowed for row in reasons):
-                raise ProviderError('停止理由を承認済みの成果物・受入条件または安全・実行阻害へ対応付けてください。', 'format')
+            unmatched = [str(row.get('requirement')) for row in reasons if row.get('requirement') not in allowed]
+            if unmatched:
+                raise ProviderError('停止理由を承認済みの成果物・受入条件または安全・実行阻害へ対応付けてください。'
+                                    '（対応付けできなかった条件：' + '／'.join(unmatched) + '）', 'format')
             if result.get('status') == 'needs_changes' and not reasons:
                 checks = result.get('checks') or []
                 if result.get('stage_complete') is True and checks and all(
