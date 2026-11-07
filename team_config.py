@@ -249,6 +249,56 @@ def validate_config(config):
             raise ValueError('現行の個人方針でAstraをワーカーに使うことは禁止されています。')
 
 
+_RUNTIME_FACTS = None
+
+
+def runtime_facts():
+    """What runs on this PC, checked once without AI and cached; the assignees get it as facts, never as permission."""
+    global _RUNTIME_FACTS
+    if _RUNTIME_FACTS is None:
+        # The person's own view: a policy inherited from a parent process (for example Bypass) is not theirs, and
+        # a module path inherited from PowerShell 7 keeps Windows PowerShell from loading its own modules.
+        env = {k: v for k, v in os.environ.items() if k.upper() not in ('PSEXECUTIONPOLICYPREFERENCE', 'PSMODULEPATH')}
+        def ask(command):
+            try:
+                done = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace',
+                                      timeout=20, env=env,
+                                      creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except (OSError, subprocess.SubprocessError):
+                return None
+            return (done.stdout or done.stderr).strip()[:80] if done.returncode == 0 else None
+        powershell = shutil.which('powershell.exe')
+        python = shutil.which('python')
+        node = shutil.which('node')
+        _RUNTIME_FACTS = {
+            'powershell_policy': ask([powershell, '-NoProfile', '-NonInteractive', '-Command', 'Get-ExecutionPolicy'])
+                                 if powershell else 'missing',
+            'python': ask([python, '--version']) if python else 'missing',
+            'node': ask([node, '--version']) if node else 'missing'}
+    return _RUNTIME_FACTS
+
+
+def runtime_rule(facts):
+    """The facts above in the words every assignee reads."""
+    policy = facts.get('powershell_policy')
+    if policy == 'missing':
+        powershell = 'Windows PowerShell は見つからない。'
+    elif policy in ('RemoteSigned', 'Unrestricted', 'Bypass'):
+        powershell = f'Windows PowerShell は、設定を変えずにプロジェクト内の .ps1 を実行できる（実行ポリシー：{policy}）。'
+    elif policy:
+        powershell = (f'Windows PowerShell は、設定を変えずには .ps1 を実行できない（実行ポリシー：{policy}）。'
+                      '利用者が使う手順に .ps1 の実行を含めない。')
+    else:
+        powershell = 'Windows PowerShell で .ps1 を実行できるかは確認できなかった。'
+    def version(key, label):
+        value = facts.get(key)
+        return f'{label} は見つからない。' if value == 'missing' else f'{label} が使える（{value}）。' if value else f'{label} は確認できなかった。'
+    return ('\nこのPCで確かめた事実：' + powershell + version('python', 'Python') + version('node', 'Node.js')
+            + 'Claude の担当のコマンドは Git Bash で動き、\\ は消える。コマンドとパスの区切りは / で書く。'
+            '\n成果物は、利用者がこのPCで設定を変えずに、説明どおりに使えるものにする。'
+            'テストが -ExecutionPolicy Bypass などの特別な指定で通っても、説明の手順が同じ条件で動かなければ完了ではない。')
+
+
 def environment_status(commands, check_auth=True):
     result = {}
     for name, command in commands.items():

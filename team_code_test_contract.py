@@ -131,6 +131,19 @@ def _auth_test_required(text):
                           r'|認証|ログイン|権限|テストアカウント', text))
 
 
+def _ui_test_required(text):
+    """Whether what is to be built has a screen. Explicit exclusions are removed first, as for authentication."""
+    screen = r'(?:Web画面|web画面|画面操作テスト|画面テスト|画面操作|画面|ブラウザ|UI|ユーザーインターフェース)'
+    exclusions = (
+        screen + r'(?:は|を|が|も)?(?:不要|なし|無し|ない|作らない|使わない|対象外|含めない|設けない|ありません)',
+        r'(?i)\b(?:no|without)\s+(?:ui|gui|browser|screen|web\s+(?:ui|page|screen))\b',
+    )
+    for pattern in exclusions:
+        text = re.sub(pattern, '', text)
+    return bool(re.search(r'(?i)\b(web|website|browser|html|frontend|front-end|user interface|ui)\b'
+                          r'|webシステム|webアプリ|ブラウザ|画面|画面操作|ユーザーインターフェース', text))
+
+
 def planning_issues(result, job):
     """Catch test setup omissions before presenting a plan for approval."""
     # This contract was added after existing jobs had already been stored.
@@ -143,9 +156,12 @@ def planning_issues(result, job):
                              for x in (result.get('goal_contract') or job.get('goal_contract') or {}).get(key, [])]
                           + [str(t.get('title') or '') + ' ' + str(t.get('instruction') or '')
                              for t in result.get('tasks') or [] if isinstance(t, dict)])
-    ui_required = bool(re.search(r'(?i)\b(web|website|browser|html|frontend|front-end|user interface|ui)\b'
-                                 r'|webシステム|webアプリ|ブラウザ|画面|画面操作|ユーザーインターフェース',
-                                 scope_text))
+    # What is built is said by the request, the deliverables and the acceptance criteria. The plan's summary and task
+    # instructions also discuss the test approach ("画面操作テストは対象外"), which must not turn into a screen.
+    contract = result.get('goal_contract') or job.get('goal_contract') or {}
+    ui_required = _ui_test_required(' '.join([str(job.get('goal') or '')]
+                                             + [str(x) for key in ('deliverables', 'acceptance_criteria')
+                                                for x in contract.get(key, [])]))
     auth_required = _auth_test_required(scope_text)
     if not plan.get('required'):
         if (job.get('code_test_contract_version') and ui_required

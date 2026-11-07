@@ -32,12 +32,17 @@ HEX_IDENTIFIER = re.compile(r'(?<![A-Za-z0-9_])[0-9a-fA-F]{32}(?:[0-9a-fA-F]{32}
 CARD = re.compile(r'(?<!\d)(?:\d[ -]?){13,16}(?!\d)')
 
 
-def has_personal_number(text):
-    """Do not split 32-character IDs or 64-character SHA-256 digests into a personal number."""
+def _outside_identifiers(text, pattern):
+    """Matches of pattern that are not inside a 32-character ID or a 64-character SHA-256 digest."""
     identifiers = [(match.start(), match.end()) for match in HEX_IDENTIFIER.finditer(text)
                    if re.search(r'[a-fA-F]', match.group())]
-    return any(not any(start <= match.start() and match.end() <= end for start, end in identifiers)
-               for match in MY_NUMBER.finditer(text))
+    return [match for match in pattern.finditer(text)
+            if not any(start <= match.start() and match.end() <= end for start, end in identifiers)]
+
+
+def has_personal_number(text):
+    """Do not split 32-character IDs or 64-character SHA-256 digests into a personal number."""
+    return bool(_outside_identifiers(text, MY_NUMBER))
 
 
 def load_policy():
@@ -67,7 +72,8 @@ def _luhn(digits):
 
 
 def has_card_number(text):
-    for match in CARD.finditer(text):
+    """A digest such as a command's SHA-256 can hold a Luhn-valid run of digits; it is not a card number."""
+    for match in _outside_identifiers(text, CARD):
         digits = re.sub(r'\D', '', match.group(0))
         if 13 <= len(digits) <= 16 and _luhn(digits):
             return True

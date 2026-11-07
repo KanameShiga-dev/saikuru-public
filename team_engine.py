@@ -24,6 +24,7 @@ from pathlib import Path
 from team_adapters import ADAPTERS, Cancelled, ProviderError
 
 from team_store import uid, now, StaleAttempt
+from team_config import runtime_facts, runtime_rule
 
 from team_questions import validate_questions, native_questions, answers_for, legacy_questions
 
@@ -201,7 +202,7 @@ REVIEW_STATUS_RULE = ('修正が必要なとき、または作業担当が実行
                       '采来が記録した実行結果で確かめられる検証を、別の形で再実行させない。この環境で実行できない検証を求めない。'
     '各担当のpending_checksを最新成果物の証拠と照合する。解消した項目は、根拠をchecksに記録し、根拠がない必須項目だけをpending_check_detailsとともに自分のpending_checksへ引き継ぐ。')
 # Facts about this PC that every assignee needs, so nobody plans, demands or asks for what cannot run here.
-ENVIRONMENT_RULE = ('\n実行環境：Windows・PowerShell、管理者権限なし。シンボリックリンクの作成はできない。'
+ENVIRONMENT_RULE = ('\n実行環境：Windows、管理者権限なし。シンボリックリンクの作成はできない。'
                     'Developer Mode・レジストリ・実行ポリシー・ファイアウォール・サービスなど、OSやセキュリティの設定は変更しない（変更のコマンドは利用者の承認が必要）。'
                     'OS設定や管理者権限が必要な検証は追加しない。依頼・承認済み計画で必要な検証は省略せず、プロジェクト内の隔離環境・架空データで実施できる方法を計画する。'
                     '新しい依存パッケージの導入、外部アカウント、外部サービス、OS設定変更が必要なら勝手に準備せず、必要な範囲と費用を計画時に質問して承認を待つ。'
@@ -560,7 +561,7 @@ class Context:
                    if self.task['role'] != 'planner' else '')
                 + ((WBS_REQUEST_COMMANDS_RULE if getattr(self, 'workflow_contract', False) else REQUEST_COMMANDS_RULE)
                    if not getattr(self, 'document_scope', False) and self.task['role'] in ('planner', 'builder', 'reviewer') else '')
-                + ENVIRONMENT_RULE
+                + ENVIRONMENT_RULE + runtime_rule(runtime_facts())
                 + ("\n参考PDFのデザイン（配色・書体・文字サイズ・余白）に合わせる・統一する依頼では、builderが learn_design で参考PDFからデザインプロファイル（design/<名前>.design.json）を作り、"
                    "generate_media（PPTX・PDF・MP4）・generate_office（Word）・write_document（HTML）に design_profile を指定して反映する。"
                    "学習結果（design/<名前>.design.md）を完了報告に要約し、元PDFに無い色・書体を足さない。計画担当はこの手順をbuilderのinstructionに明記する。"
@@ -723,7 +724,7 @@ class Context:
                              listed, command, exit_code, timed_out)
         if runs is not None:
             self.engine.store.update(self.task['id'], validation_runs=runs)
-            index = listed.index(str(command).strip())
+            index = runs[-1]['index']
             proof = {'version': 1, 'job_id': job['id'], 'task_id': self.task['id'], 'command': listed[index],
                      'exit_code': runs[-1]['exit_code'], 'timed_out': runs[-1]['timed_out'],
                      'observed_at_ns': runs[-1]['observed_at_ns']}

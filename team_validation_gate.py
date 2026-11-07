@@ -24,11 +24,23 @@ def validate_commands(value):
     return commands
 
 
+def command_index(commands, command):
+    """The listed command this run executed, or None.
+
+    Only for recording evidence. A Claude worker runs commands in Git Bash, which drops backslashes, so a
+    path written with \\ arrives with /. Other differences (arguments, order, another script) stay different.
+    """
+    def shape(value):
+        return ' '.join(str(value).replace('\\', '/').split())
+    wanted = shape(command)
+    return next((i for i, listed in enumerate(commands) if shape(listed) == wanted), None)
+
+
 def record_result(task, commands, command, exit_code, timed_out):
-    """Return updated evidence for an exact user-supplied command, or None."""
-    if task.get('role') != 'builder' or str(command).strip() not in commands:
+    """Return updated evidence for a user-supplied command, or None."""
+    index = command_index(commands, command) if task.get('role') == 'builder' else None
+    if index is None:
         return None
-    index = commands.index(str(command).strip())
     runs = list(task.get('validation_runs') or [])
     runs.append({'index': index, 'exit_code': exit_code if type(exit_code) is int else None,
                  'timed_out': timed_out is True, 'observed_at_ns': time.time_ns()})
