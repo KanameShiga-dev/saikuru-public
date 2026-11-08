@@ -19,7 +19,7 @@ description: 采来（saikuru）の変更を、公開版へ取り込んでもら
 
 ## 2. 入れないもの（このPC固有・社外に出さないもの）
 - `data/` 以下（設定・DB・控え・添付）、`.env`、変更依頼ZIP自体、`__pycache__`。
-- 台帳ルートの値：導入先は `C:\Projects`、公開版は `C:\AI_Work`。`team_ledger.py`・`team_elicitation.py`・`web/index.html`・`web/ledger.html`・`web/app.js` の台帳ルートは公開版の値のまま出す。
+- 作業フォルダーの値：`data/config.json` の `workspace_root` は環境ごとの設定。導入先のパスをコードや文書に書かない。
 - 情報漏洩リスクの点検報告（PCの弱点を含む）、ライセンスの検討メモ、作業の引き継ぎメモ、下書き類（例：`docs/SECURITY_RISK_REVIEW_*.md`、`docs/TEAM_LICENSE_DISCUSSION.md`、`docs/SESSION_HANDOFF_*.md`）。
 - 第三者のスキル（例：`skills/yomiyasu`）。取り込みは各環境で「スキルの取り込み」の手順で行う。
 - 個人名・メールアドレス・社内のホスト名やパスが文書やコメントに入っていないかを確かめ、見つけたら利用者に確認する。
