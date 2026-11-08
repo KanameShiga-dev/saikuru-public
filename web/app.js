@@ -449,7 +449,7 @@ function renderDecisionBanner(items){
   $('decision-banner-title').textContent=`あなたの判断が必要：${items.length}件`;
   list.replaceChildren(...items.map(item=>{
     const li=el('li'),what=el('div',undefined,'what'),job=state.jobs.find(j=>j.id===item.task.job_id);
-    what.append(el('strong',item.label),el('span',(job?.title?job.title+' ／ ':'')+item.task.title));
+    what.append(el('strong',item.label),el('span',item.completion&&job?.title?job.title:(job?.title?job.title+' ／ ':'')+item.task.title));
     if(item.detail)what.append(el('small',item.detail));
     if(item.completion)what.append(el('small','工程終了は実機検証済みの保証ではありません。成果物と検証結果を確認してください。'));
     const open=item.start?button('確認を始める',item.start,'primary'):el('button','内容を確認','primary');
@@ -1411,6 +1411,62 @@ function acceptanceNavigation(approval,job){
   },'secondary'));
   return box;
 }
+// 受け取りの調査（11-08）：通常の開発の依頼は「できたこと・試し方・AI の確認」と 2 つのボタンにする。
+// 未完了の項目や指摘がある依頼、確認が途中まで済んだ依頼は、従来の画面で扱う。
+function simpleReceipt(a,job){
+  const p=a.payload;
+  return job.code_test_plan?.required===true&&job.p0_contract_version!==1&&!job.workflow_contract_version
+    &&!a.review_acknowledgement&&!p.pending_items?.length&&!p.review_findings?.length&&!p.reference_items?.length;
+}
+function receiptBox(a,job,summary,drafts){
+  const box=el('section',undefined,'approval-box');box.dataset.userDecision='1';
+  box.append(el('h3','できあがりを受け取る'));
+  if(summary)box.append(summary);
+  box.append(section('依頼した内容',job.goal||job.title));
+  const evidence=Object.values(job.validation_evidence||{});
+  const passed=evidence.length>0&&evidence.every(e=>e.exit_code===0&&!e.timed_out);
+  const results=el('ul');
+  for(const text of job.code_test_plan.cases||[])results.append(el('li',text));
+  const verdicts=el('ul');
+  if(passed)verdicts.append(el('li','テスト：合格しました'));
+  verdicts.append(el('li','レビュー：修正が必要な問題は見つかりませんでした'));
+  if(job.security_review_required)verdicts.append(el('li','セキュリティ：修正が必要な問題は見つかりませんでした'));
+  const made=el('section',undefined,'detail-section');made.append(el('h3','テストで確かめた内容'),results);
+  const ai=el('section',undefined,'detail-section');ai.append(el('h3','AI の確認の結果'),verdicts,el('p','AI の確認です。実際に動かして確かめられるのは、あなただけです。','hint'));
+  box.append(made,ai);
+  if(job.code_test_plan.ui_test_required)box.append(deliverableAcceptancePanel(job));
+  else{
+    const files=evidence[0]?.snapshot?.files||{};
+    const trial=el('section',undefined,'detail-section');
+    trial.append(el('h3','試し方'),el('p','保存先：'+job.project));
+    if(files['README.md']){
+      // README は信頼できない入力なので textContent だけで表示する。
+      const readme=el('div','読み込み中…','text-block');trial.append(el('p','このフォルダーの README.md の内容です。','hint'),readme);
+      api('/api/job/readme?job_id='+encodeURIComponent(job.id)).then(v=>{readme.textContent=v.content;},error=>{readme.textContent=error.message;});
+    }else trial.append(el('p','このフォルダーを開いて、できたものを試してください。'));
+    box.append(trial);
+  }
+  const details=el('details');details.append(el('summary','詳しい記録を見る'),el('div',reportText(a.payload),'text-block'));
+  box.append(details);
+  const input=el('textarea');input.id='note-'+a.id;input.rows=3;input.placeholder='直してほしいこと（直してもらうときに書きます）';input.setAttribute('aria-label','直してほしいこと');input.value=drafts[input.id]||'';
+  box.append(input);
+  const actions=el('div',undefined,'actions');
+  // ブラウザ標準の confirm は、アプリ内の表示では出ずに拒否扱いになるので、画面の中で確かめる。
+  const fix=button('直してもらう',()=>api('/api/decide',{id:a.id,allow:false,note:input.value}),'secondary');
+  const receive=el('button','受け取る','primary');receive.type='button';
+  const back=el('button','やめる','secondary');back.type='button';
+  const yes=button('はい、受け取る',async()=>{
+    await api('/api/jobs/review-confirmation',{approval_id:a.id,confirmed:true});
+    await api('/api/jobs/formal-acceptance',{approval_id:a.id,confirmation:'正式受領',note:input.value});
+    notice('受け取りました。この依頼は終了しました。');
+  },'primary');
+  const question=el('p','この成果を受け取って、依頼を終わらせます。受け取ったあとは取り消せません。','notice');
+  receive.addEventListener('click',()=>{actions.replaceChildren(back,yes);actions.before(question);yes.focus();});
+  back.addEventListener('click',()=>{question.remove();actions.replaceChildren(fix,receive);receive.focus();});
+  actions.append(fix,receive);
+  box.append(actions);
+  return box;
+}
 async function showHandoffHistory(jobId,container,before){
   try{
     const query='/api/handoff?job='+encodeURIComponent(jobId)+(before?'&before='+before:'');
@@ -2045,6 +2101,7 @@ function renderDetail(task,version) {
       continue;
     }
     if(a.payload.questions?.length){if(summary)body.append(summary);const form=questionForm(a);form.dataset.userDecision='1';body.append(form);continue;}
+    if(a.kind==='completion'&&simpleReceipt(a,job)){$('detail-title').textContent=job.title;body.append(receiptBox(a,job,summary,drafts));continue;}
     const box=el('section',undefined,'approval-box');box.dataset.userDecision='1';box.append(el('h3',a.kind==='ai_start'?'AIによる計画作成の開始を承認':a.kind==='plan'?'開発計画の確認・承認':a.kind==='completion'?'依頼全体の正式受領':'操作の承認'));
     if(summary)box.append(summary);
     if(a.kind==='ai_start'){

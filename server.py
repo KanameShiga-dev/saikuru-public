@@ -545,6 +545,14 @@ class Handler(BaseHTTPRequestHandler):
                 from consultation_read_tools import safe_path
                 artifact=safe_path(Path(job['project']).resolve(),relative)
                 return self.send(200,{'path':relative,'content':artifact.read_text(encoding='utf-8')})
+            if path == '/api/job/readme':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                query = parse_qs(urlparse(self.path).query)
+                job = self.app.store.get((query.get('job_id') or [''])[0], 'job')
+                from consultation_read_tools import safe_path
+                readme = safe_path(Path(job['project']).resolve(), 'README.md')
+                return self.send(200, {'content': readme.read_text(encoding='utf-8')[:20000]})
             if path == '/api/job/p0-artifact':
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')

@@ -151,18 +151,14 @@ def planning_issues(result, job):
     if not job.get('code_test_contract_version'):
         return []
     plan = result.get('code_test_plan') or {}
-    scope_text = ' '.join([str(job.get('goal') or ''), str(result.get('summary') or '')]
-                          + [str(x) for key in ('deliverables', 'acceptance_criteria')
-                             for x in (result.get('goal_contract') or job.get('goal_contract') or {}).get(key, [])]
-                          + [str(t.get('title') or '') + ' ' + str(t.get('instruction') or '')
-                             for t in result.get('tasks') or [] if isinstance(t, dict)])
     # What is built is said by the request, the deliverables and the acceptance criteria. The plan's summary and task
-    # instructions also discuss the test approach ("画面操作テストは対象外"), which must not turn into a screen.
+    # instructions also discuss the test approach ("画面操作テストは対象外", "認証・権限機能は元の依頼にない"), which
+    # must not turn into a screen or a login; the planner repeats such words when answering this very check.
     contract = result.get('goal_contract') or job.get('goal_contract') or {}
-    ui_required = _ui_test_required(' '.join([str(job.get('goal') or '')]
-                                             + [str(x) for key in ('deliverables', 'acceptance_criteria')
-                                                for x in contract.get(key, [])]))
-    auth_required = _auth_test_required(scope_text)
+    built = ' '.join([str(job.get('goal') or '')]
+                     + [str(x) for key in ('deliverables', 'acceptance_criteria') for x in contract.get(key, [])])
+    ui_required = _ui_test_required(built)
+    auth_required = _auth_test_required(built)
     if not plan.get('required'):
         if (job.get('code_test_contract_version') and ui_required
                 and any(isinstance(t, dict) and t.get('role') == 'builder' for t in result.get('tasks') or [])):
