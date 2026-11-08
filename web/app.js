@@ -716,6 +716,20 @@ function handoffNote(wf){
   }
   box.append(el('p',WAIT_NEXT_LABELS[c.next_owner]||'次に動く人を確認できません。','hint'));return box;
 }
+// WBS の行：機能の中の作業とレビューを順に見せる。内容は文字だけで表示する。
+const RULE_NAMES={R2:'完了条件',R4:'使い方の説明',R5:'安全'},RULE_OUTCOMES={pass:'合格',fail:'不合格',unknown:'未確認'};
+function wpTaskRows(wp,number){
+  const rows=state.tasks.filter(t=>t.work_package_id===wp.id&&t.status!=='cancelled').sort((a,b)=>(a.created_at||0)-(b.created_at||0));
+  const list=el('ul',undefined,'wp-tasks');
+  rows.forEach((t,index)=>{
+    const kind=t.role==='reviewer'?(t.agent_name==='common-security-reviewer'?'セキュリティのレビュー':'レビュー'):t.workflow_authority?.kind==='package_repair'?'差し戻しの修正':'作業';
+    const line=el('li',`${number}.${index+1} ${kind}：${t.role==='reviewer'?'':t.title+' — '}${statuses[t.status]||t.status}`);
+    const rules=t.result?.rule_results||[];
+    if(rules.length)line.append(el('span','　'+rules.map(r=>`${RULE_NAMES[r.rule]||r.rule}：${RULE_OUTCOMES[r.outcome]||r.outcome}`).join('／'),'hint'));
+    list.append(line);
+  });
+  return list;
+}
 function workflowPanel(job){
   const wf=job.workflow||{},progress=wf.progress||{},packages=wf.work_packages||[];
   const panel=el('section',undefined,'workflow-panel');panel.append(el('h4',`機能の一覧（${packages.length}件）`));
@@ -734,12 +748,14 @@ function workflowPanel(job){
   if(progress.state==='inconclusive')panel.append(el('p','記録を照合できないため、進み具合を判断できません。完成とは扱いません。','notice'));
   if(wf.feature_confirmation_count>0)panel.append(el('p',`あなたの確認を待っている機能：${wf.feature_confirmation_count}件（1件ずつ確認します）`,'hint'));
   const list=el('ol',undefined,'wp-list');
-  for(const wp of packages){
+  packages.forEach((wp,packageIndex)=>{
     const st=wpState(wp,job),item=el('li',undefined,'wp-item');item.dataset.state=st.key;item.dataset.focusKey='wp:'+wp.id;item.tabIndex=-1;
     const head=el('p',undefined,'wp-head');head.append(el('strong',wp.title),document.createTextNode('　'),el('span',st.label,'badge wp-state'));
+    if(wp.workflow_generation>0)head.append(el('span',`差し戻し ${wp.workflow_generation} 回`,'badge'));
     head.append(el('small','　'+(wp.wbs_id||''),'tech-only'));item.append(head);
     item.append(el('p',`次に操作する人：${st.owner}`,'hint'));
     if(wp.done_when?.length)item.append(el('p','完了の条件：'+wp.done_when.join('／'),'hint'));
+    item.append(wpTaskRows(wp,packageIndex+1));
     if(st.key==='approved'&&wp.feature_target_digest)item.append(el('p','確認した版 '+shortVersion(wp.feature_target_digest),'hint tech-only'));
     const actions=el('div',undefined,'actions');
     if((wp.available_actions||[]).includes('request_feature_review')){
@@ -751,7 +767,7 @@ function workflowPanel(job){
     if(actions.children.length)item.append(actions);
     if((wp.available_actions||[]).includes('rework_job'))item.append(featureReworkForm(wp,job));
     list.append(item);
-  }
+  });
   if(!packages.length)panel.append(el('p','機能の一覧はまだありません（計画の承認後に表示されます）。','hint'));
   else panel.append(list);
   for(const extra of [packageLimitNote(wf,packages.length),handoffNote(wf)])if(extra)panel.append(extra);

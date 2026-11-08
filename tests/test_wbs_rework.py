@@ -40,7 +40,7 @@ class ReworkTests(unittest.TestCase):
         return (self.store.db.execute('SELECT * FROM objects ORDER BY id').fetchall(),
                 self.store.db.execute('SELECT * FROM events ORDER BY seq').fetchall())
 
-    def finish_next(self, status='done', summary='Fictional inspected result'):
+    def finish_next(self, status='done', summary='Fictional inspected result', rule_results=None):
         view = self.engine.workflow_dispatch_view(self.job_id)
         self.assertEqual(view['status'],'ready',view)
         task = self.store.get(view['candidate_task_id'],'task')
@@ -62,6 +62,7 @@ class ReworkTests(unittest.TestCase):
                   'artifacts':artifacts if task['role'] == 'builder' else [],
                   'test_files':tests,'test_change_reason':'Fictional approved test','blocking_reasons':[],
                   'pending_checks':[],'questions':[],'question':'','context_updates':[]}
+        if rule_results: result['rule_results'] = rule_results
         self.engine._finish(task,result)
         self.store.close_attempt(task['id'],'closed','fictional_offline_result')
         return self.store.get(task['id'])
@@ -109,6 +110,25 @@ class ReworkTests(unittest.TestCase):
         self.assertEqual({t['agent_name'] for t in reviews},{'common-reviewer','common-security-reviewer'})
         self.assertTrue(all(t['work_package_id'] == self.wp()['id'] for t in reviews))
         self.assertEqual(self.engine.workflow_dispatch_view(self.job_id)['candidate_task_id'],reviews[0]['id'])
+
+    def test_each_review_is_told_its_project_rules(self):
+        self.finish_next()
+        reviews = {t['agent_name']:t for t in self.tasks() if t.get('workflow_authority',{}).get('kind') == 'package_review'}
+        self.assertIn('R2:',reviews['common-reviewer']['instruction'])
+        self.assertIn('R5:',reviews['common-security-reviewer']['instruction'])
+
+    def test_a_failed_rule_sends_the_feature_back_even_if_the_review_said_done(self):
+        self.finish_next()
+        review = self.finish_next(rule_results=[{'rule':'R2','outcome':'fail','note':'Fictional missing evidence'}])
+        self.assertEqual(review['result']['status'],'needs_changes')
+        self.assertEqual(self.wp()['workflow_generation'],1)
+        self.assertEqual(self.store.get(self.engine.workflow_dispatch_view(self.job_id)['candidate_task_id'])['role'],'builder')
+
+    def test_an_unknown_rule_does_not_send_the_feature_back(self):
+        self.finish_next()
+        review = self.finish_next(rule_results=[{'rule':'R2','outcome':'unknown','note':'Fictional'}])
+        self.assertEqual(review['result']['status'],'done')
+        self.assertEqual(self.wp().get('workflow_generation',0),0)
 
     def test_explicit_feature_decision_unlocks_dependent_without_formal_receipt(self):
         review = self.ready_feature()

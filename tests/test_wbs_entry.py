@@ -450,7 +450,7 @@ class WbsNormalPathTests(WbsFixture):
             return copy.deepcopy(PLAN)
         report = {'status': 'done', 'summary': '架空の報告', 'checks': ['架空の確認'], 'pending_checks': [], 'pending_check_details': [],
                   'question': '', 'questions': [], 'context_updates': [], 'warnings': [], 'stage_complete': True,
-                  'blocking_reasons': []}
+                  'blocking_reasons': [], 'rule_results': []}
         if task['role'] == 'builder':
             project = Path(ctx.project)
             # The simulated assignee can only do what its own task instruction asks (the prompt also carries the whole

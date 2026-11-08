@@ -11,6 +11,21 @@ import re
 import time
 
 MAX_PACKAGES = 6  # Preserve the existing initial plan's 1..6 Task bound.
+# The standard project rules a package review judges (design of 2026-11-08). Saikuru itself checks R1, every criterion
+# assigned to a package (validate_work_packages), and R3, the tests ran on the current version (team_validation_gate).
+REVIEW_RULES = {
+    'common-reviewer': {'R2': 'この機能の完了条件ごとに、実行の証拠がある',
+                        'R4': 'この機能が使い方の説明を担当するなら、説明（README.mdなど）がある。担当でなければpass'},
+    'common-security-reviewer': {'R5': '秘密情報・外部送信・破壊的な操作の問題がない'}}
+
+
+def review_rules_text(agent):
+    rules = '；'.join(f'{key}: {text}' for key, text in REVIEW_RULES[agent].items())
+    return ('\n【プロジェクト規定】次の規定ごとにrule_resultsへ1件ずつ報告する（outcomeはpass/fail/unknown、noteに根拠）: '
+            + rules + '。failがあるときはstatusをneeds_changesにする。')
+
+
+
 GUIDE = ('\n新方式の計画はwork_packagesとcheckpoint_pathsを含める。work_packagesは'
          'wbs_id,title,goal_links,done_when,depends_onを持つ。wbs_idは英字始まりの一意のラベルで、'
          'Task/session/attemptのIDではない。各tasks項目に既存ラベルのwbs_idを付け、'
@@ -23,6 +38,7 @@ GUIDE = ('\n新方式の計画はwork_packagesとcheckpoint_pathsを含める。
          'owned_pathsはこのパッケージが変更するファイルの相対パス。checkpoint_pathsの全ファイルをいずれかのパッケージへ割り当て、'
          '同じファイルを複数のパッケージに割り当てない。変更するファイルがなければ空配列。実行時に担当外のファイルは変更できない。'
          '各パッケージは成果物と受入条件の両方へ対応させ、全体の成果物・受入条件を漏らさない。'
+         '使い方の説明（README.md）は、いずれか1つのパッケージのowned_pathsに含める。'
          'input_artifactsは既に存在する同じ依頼の登録済み先行成果物のjob_id,path,sha256。'
          'これから作る成果物はここへ捏造せずdepends_onで示し、既存入力がなければ空配列。'
          '作業の単位は確認可能な成果と完了条件とし、トークン数だけで分割しない。'

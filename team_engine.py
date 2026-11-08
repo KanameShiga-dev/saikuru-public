@@ -102,6 +102,11 @@ RESULT_SCHEMA_CRITERIA = object_schema(dict(RESULT_SCHEMA['properties'],
         'criterion': STR,
         'outcome': {'type': 'string', 'enum': ['passed', 'failed', 'user_pending']},
         'evidence': STR})}))
+RESULT_SCHEMA_RULES = object_schema(dict(RESULT_SCHEMA['properties'],
+    rule_results={'type': 'array', 'maxItems': 5, 'items': object_schema({
+        'rule': {'type': 'string', 'enum': ['R2', 'R4', 'R5']},
+        'outcome': {'type': 'string', 'enum': ['pass', 'fail', 'unknown']},
+        'note': STR})}))
 
 PLAN_SCHEMA = object_schema({'summary': STR, 'tasks': {'type': 'array', 'items': object_schema({
 
@@ -3188,17 +3193,17 @@ class Engine:
         return task
 
     def _queue_package_reviews(self, job, wp, builder):
-        from team_wbs import package_members
+        from team_wbs import package_members, review_rules_text
         members = package_members(self.store,job['id'],wp)
         if any(t['role'] == 'reviewer' for t in members): return
         review = self._issue_package_task(job,wp,'package_review',builder['id'],
             'この機能の完了条件、成果物、テストと記録を読み取り専用で確認する。未確認を成功と推測しない。'
-            '機能承認や依頼全体の受領を代行しない。' + REVIEW_STATUS_RULE,
+            '機能承認や依頼全体の受領を代行しない。' + REVIEW_STATUS_RULE + review_rules_text('common-reviewer'),
             role='reviewer',after=builder['id'],repair=builder.get('repair',0),agent='common-reviewer')
         if job.get('security_review_required') or self.config.get('security_review','always') == 'always':
             self._issue_package_task(job,wp,'package_review',builder['id'],
                 'この機能の変更を読み取り専用で確認する。認証・権限・入力・秘密情報・外部送信の影響と根拠を確認し、'
-                '秘密情報は読まない。本人の確認・受領を代行しない。' + REVIEW_STATUS_RULE,
+                '秘密情報は読まない。本人の確認・受領を代行しない。' + REVIEW_STATUS_RULE + review_rules_text('common-security-reviewer'),
                 role='reviewer',after=review['id'],repair=builder.get('repair',0),agent='common-security-reviewer')
 
     def _finish_work_package(self, task, result):
@@ -5404,6 +5409,12 @@ class Engine:
                     self.store.event('criterion_evidence_recorded', '条件別の報告を記録しました。利用者の確認・受領とは別です。',
                                      task['id'], job['id'])
 
+            if result.get('status') == 'done' and any(row['outcome'] == 'fail' for row in result.get('rule_results') or []):
+                result = dict(result, status='needs_changes',
+                              summary='（統括：プロジェクト規定に不合格のため差し戻します）' + str(result.get('summary', '')))
+                self.store.event('review_rule_failed', 'プロジェクト規定の不合格を、修正担当への差し戻しとして扱いました。',
+                                 task['id'], job['id'])
+
             # A review that stops without a question leaves the user nothing to decide; whatever the model, send it to
             # the repair step instead (bounded by max_repairs, then the job stops as before). See REVIEW_STATUS_RULE.
             if (task['role'] == 'reviewer' and result.get('status') == 'blocked' and not result.get('questions')
@@ -5955,6 +5966,8 @@ class Engine:
             from team_p0_contract import criterion_review
             if criterion_review(job_for_schema, task):
                 schema = RESULT_SCHEMA_CRITERIA
+            if task['role'] == 'reviewer' and (task.get('workflow_authority') or {}).get('kind') == 'package_review':
+                schema = RESULT_SCHEMA_RULES
             if task['role'] == 'planner':
                 ctx.check()
                 if not self._claim_g2_for_run(task['id'], task['attempt']):
