@@ -9,7 +9,8 @@ import threading
 import time
 
 from team_archive import LIVE as ARCHIVE_LIVE, overlaps, validate_path
-from team_ledger import ROOT, inspect, stamp
+from team_ledger import inspect, stamp
+from team_workspace import root as workspace_root
 
 LIVE = {'preparing', 'moving'}
 
@@ -44,7 +45,7 @@ def empty_git_directory(path):
 
 def repository(path):
     for candidate in [path, *path.parents]:
-        if not candidate.is_relative_to(ROOT):
+        if not candidate.is_relative_to(workspace_root()):
             break
         if (candidate / '.git').exists():
             if empty_git_directory(candidate):
@@ -134,7 +135,7 @@ class Moves:
         empty_markers = set()
         for base in (source, destination.parent):
             for ancestor in [base, *base.parents]:
-                if not ancestor.is_relative_to(ROOT):
+                if not ancestor.is_relative_to(workspace_root()):
                     break
                 if empty_git_directory(ancestor):
                     empty_markers.add(str(ancestor / '.git'))

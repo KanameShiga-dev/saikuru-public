@@ -72,20 +72,10 @@ def reply_to_elicitation(ctx, params):
         ctx.check()
         ctx.event('資料作成範囲の専用ツール承認: '+document_tool[1])
         return {'action':'accept','content':content}
-    # A session-local app confirmation can reuse this user's explicit scope.
     # Every other request reaches the board even with automatic_operations enabled.
-    project_ok = Path(ctx.project).resolve() == Path(r'C:\AI_WorkSpace\Projects\Games\bravia-New-Games').resolve()
-    target = 'bravestrategypcruntimesmoke'
-    text = message.casefold()
-    scoped = (project_ok and ctx.task['role'] == 'builder'
-              and params.get('serverName') in ('node_repl', 'computer-use', 'computer_use')
-              and re.search(r'(?<![a-z0-9_])' + target + r'(?![a-z0-9_])', text)
-              and ('computer use' in text or 'computer-use' in text
-                   or text.strip() == 'allow codex to use bravestrategypcruntimesmoke?')
-              and not any(word in text for word in ('always', 'permanent', 'all apps', '永久', 'delete', 'upload', 'payment', 'password')))
     answer = ctx.approve({'source': 'codex', 'operation': 'mcpServer/elicitation/request',
-        'force_manual': not scoped, 'details': {'server': params.get('serverName'),
+        'force_manual': True, 'details': {'server': params.get('serverName'),
             'mode': mode, 'message': message, 'field': name}})
-    ctx.event('MCP承認要求へ回答しました（対象ゲームの既存承認）' if scoped else 'MCP承認要求へボードの判断を返しました。')
+    ctx.event('MCP承認要求へボードの判断を返しました。')
     return {'action': 'accept' if answer['allow'] else 'decline',
             'content': content if answer['allow'] else None}

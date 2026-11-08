@@ -22,9 +22,9 @@ from server import App, DataLock, Handler
 from team_attachments import Attachments
 from team_config import default_config
 from team_engine import Engine
-from team_ledger import ROOT as LEDGER_ROOT
 from team_p0_contract import artifact_records
 from team_store import Store
+import team_workspace
 
 
 def prepare_action_fixture(app, project):
@@ -114,6 +114,8 @@ class FixtureActionHandler(ReadOnlyHandler):
 def make_server(port, base, allow_fixture_actions=False):
     project = base / 'project'
     project.mkdir()
+    # The disposable folder is this fixture's work folder, so the fictional project passes the folder checks.
+    team_workspace.configure({'workspace_root': str(base)})
     handler = FixtureActionHandler if allow_fixture_actions else ReadOnlyHandler
     server = ThreadingHTTPServer(('127.0.0.1', port), handler)
     app = App.__new__(App)
@@ -179,12 +181,7 @@ def main():
     parser.add_argument('--allow-fixture-actions', action='store_true',
                         help='Allow selected real job and decision APIs against disposable fictional data only')
     args = parser.parse_args()
-    temp_parent = None
-    if args.allow_fixture_actions:
-        temp_parent = ROOT.parent.resolve()
-        if not temp_parent.is_relative_to(LEDGER_ROOT.resolve()):
-            raise ValueError('操作確認モードは C:/AI_WorkSpace 内の統合作業領域から起動してください。')
-    with tempfile.TemporaryDirectory(prefix='saikuru-p0-ui-api-', dir=temp_parent) as folder:
+    with tempfile.TemporaryDirectory(prefix='saikuru-p0-ui-api-') as folder:
         server = make_server(args.port, Path(folder), args.allow_fixture_actions)
         print(server.app.origin, flush=True)
         try:

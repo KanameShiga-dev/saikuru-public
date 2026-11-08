@@ -6,24 +6,18 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from team_config import default_config
 from server import make_server
 import server as server_module
-import team_ledger
-import team_harness
 import shutil
-from team_store import now
+import tempfile
 
 root=Path(__file__).resolve().parent
-team_ledger.ROOT=Path('C:/AI_WorkSpace/Legacy/Projects')
-team_harness.ROOT=Path('C:/AI_WorkSpace/Legacy/Projects')
 server_module.ROOT=root/'capture-runtime'
 shutil.copytree(root.parents[1]/'web',server_module.ROOT/'web',dirs_exist_ok=True)
-for display_file in (server_module.ROOT/'web').glob('*'):
-    if display_file.suffix in ('.html','.js'):
-        text=display_file.read_text(encoding='utf-8').replace('C:\\AI_WorkSpace','C:\\AI_WorkSpace\\Legacy\\Projects').replace('C:\AI_WorkSpace','C:\AI_WorkSpace\Legacy\Projects')
-        display_file.write_text(text,encoding='utf-8')
 data=root/'capture-data-anonymous'; data.mkdir(exist_ok=True)
-project=Path('C:/AI_WorkSpace/Legacy/Projects/Demo'); project.mkdir(parents=True,exist_ok=True)
+# The work folder must lie outside Saikuru's own folder, so the demo uses the OS temp folder.
+workspace=Path(tempfile.gettempdir())/'saikuru-capture-workspace'
+project=workspace/'Demo'; project.mkdir(parents=True,exist_ok=True)
 (project/'README.md').write_text('# Demo project\nManual screenshot example.\n',encoding='utf-8')
-config=default_config(); config['approved_roots']=[str(project)]
+config=default_config(); config['approved_roots']=[str(project)]; config['workspace_root']=str(workspace)
 (data/'config.json').write_text(json.dumps(config,ensure_ascii=False,indent=2),encoding='utf-8')
 server=make_server(data,8798)
 app=server.app; app.engine.paused=True

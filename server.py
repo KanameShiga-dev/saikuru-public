@@ -29,6 +29,7 @@ from team_cli_update import CliUpdateMonitor
 from team_harness import Harnesses
 from team_ui_automation import UiAutomation
 from team_consultation import Consultations
+import team_workspace
 
 
 class WorkflowRequestError(ValueError):
@@ -89,6 +90,7 @@ class App:
         self.harnesses = Harnesses(self.ledger)
         self.ui_automation = UiAutomation(directory, settings=lambda: self.config.get('decision', {}))
         self.config = load_config(directory)
+        team_workspace.configure(self.config)
         self.commands = discover()
         self.models = ModelCatalog(self.commands)
         # Determine the credential path before checking CLI sign-in. A stored long-lived
@@ -318,7 +320,8 @@ class App:
                 'approvals': approvals, 'events': self.store.events(),
                 'history': {'days': self.history_days(), 'hidden_jobs': jobs_total - len(shown)},
                 'config': self.config, 'providers': self.health, 'paused': self.engine.paused,
-                'sample_project': str(ROOT / 'sample-project'), 'server_time': time.time(),
+                'sample_project': str(ROOT / 'sample-project'), 'workspace_root': str(team_workspace.root()),
+                'server_time': time.time(),
                 'usage': self.usage.snapshot(), 'cli_update': self.cli_update.snapshot(),
                 'claude_update': self.claude_update.snapshot(), 'copilot_update': self.copilot_update.snapshot(),
                 'notifications': self.notifications.snapshot()}
@@ -619,10 +622,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
                 query = parse_qs(urlparse(self.path).query)
-                from team_ledger import inside, ROOT as ledger_root
+                from team_ledger import inside
+                from team_workspace import root as ledger_root
                 from team_instruction_health import inspect_instructions
                 project = inside((query.get('project') or [''])[0])
-                return self.send(200, inspect_instructions(project, ledger_root, deep=True))
+                return self.send(200, inspect_instructions(project, ledger_root(), deep=True))
             if path in ('/api/ledger', '/api/ledger/export'):
                 if not self.authorized():
                     raise PermissionError('画面を再読み込みしてください。')
@@ -1370,6 +1374,7 @@ def main():
         server = make_server(args.data, args.port)
     except DeploymentError as exc:
         raise SystemExit(f'起動を中止しました（DB ペアの検査）: {exc}')
+    team_workspace.prepare_default()
     if args.port == 8790:
         threading.Thread(target=mobile_loop, args=(server.app,), daemon=True).start()
     server.app.usage.start()

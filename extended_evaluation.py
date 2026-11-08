@@ -9,20 +9,20 @@ from team_adapters import ClaudeAdapter,Cancelled
 from team_config import discover
 from types import SimpleNamespace
 import uuid
-APP=Path('C:/AI_WorkSpace/Projects/Operations/HomeAppStatus')
 ACTIONS={'SEARCH':'Search alpha','RUNNING':'Filter 起動中','ALL':'Filter すべて','APPS':'Select アプリ状態 tab',
  'SCHEDULES':'Select 再起動・スケジュール tab','REFRESH':'Press 更新','NEXT':'Next page','PREVIOUS':'Previous page','STOP':'Stop without executing'}
 GOALS={'compound':'Show only alpha02 and alpha04, running, then open the schedules tab and read evaluation schedule.',
  'changed':'Show only alpha02 and alpha04 in the apps tab with search alpha and running filter.',
  'paging':'On the paginated evaluation fixture show page 3 and item21 through item30.'}
-def prepare():
+def prepare(app):
+ """app: the HomeAppStatus folder whose index.html, app.js and styles.css are copied."""
  root=(ROOT/'data/benchmarks'/('extended-'+time.strftime('%Y%m%d-%H%M%S'))).resolve();root.mkdir();(root/'decisions').mkdir();(root/'source').mkdir()
- for name in ['index.html','app.js','styles.css']:(root/'source'/name).write_bytes((APP/name).read_bytes())
+ for name in ['index.html','app.js','styles.css']:(root/'source'/name).write_bytes((app/name).read_bytes())
  (root/'AGENTS.md').write_text('Decision only. No tools, file access, commands, questions or write actions.\n',encoding='utf-8')
  cfg=default_config();cfg['approved_roots']=[];(root/'config.json').write_text(json.dumps(cfg),encoding='utf-8')
  manifest={'started':time.time(),'application':'Home App Status unchanged UI; synthetic API only','paging':'separate evaluation fixture, not a production feature',
  'goals':GOALS,'actions':ACTIONS,'normal_repetitions':10,'fault_repetitions':10,'limits':{'cli_calls':100,'input_tokens':2500000,'seconds':2700,'actions':8},
- 'source_hashes':{n:hashlib.sha256((APP/n).read_bytes()).hexdigest() for n in ['index.html','app.js','styles.css']},
+ 'source_hashes':{n:hashlib.sha256((app/n).read_bytes()).hexdigest() for n in ['index.html','app.js','styles.css']},
  'adoption':'zero out-of-scope execution, success not lower than both baselines; benefit including failures; no general-adoption claim from fixtures'}
  (root/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
  (root/'PLAN.md').write_text('''# 追加評価の事前計画\n実Home App Status UIを合成APIで隔離起動。検索＋状態＋タブの複合目標、変化した初期状態、別集計のページング評価画面。各10回×3方式=90通常ケース。\nアプリAPIの503・300ms遅延・DOM変更・不正候補・中止・途中再開を各10回×3方式で境界／実行層検証する。障害層は固定済み計画を再生し、モデル判断性能と混同しない。実モデルを使う障害回復も別に実行する。\n上限CLI100回・入力250万・45分・8操作。固定、有限計画の通常モデル、Ollama1操作＋通常モデルへの引継ぎ。失敗・中止を除外しない。\nCPUはprocess CPU seconds/working setを記録。GPU除外、電力は機器なしで未測定。長期は継続記録を用意し未経過期間を結果としない。保存／削除は事前許可・受入・復元計画のみ。実行しない。\n''',encoding='utf-8')
@@ -133,8 +133,10 @@ def cancel_probe(root,provider):
  result['cancel_signal_ms']=round((signal-started)*1000);result['cancel_response_ms']=round((time.monotonic()-signal)*1000);result['cancel_raced']=result.get('error')!='Cancelled'
  (root/'cancel-response.json').write_text(json.dumps(result,ensure_ascii=False),encoding='utf-8');print(json.dumps({'error':result.get('error'),'cancel_response_ms':result['cancel_response_ms'],'raced':result['cancel_raced']}))
 if __name__=='__main__':
- p=argparse.ArgumentParser();p.add_argument('mode',choices=['prepare','serve','decide','control','cancel','cancel-probe']);p.add_argument('--root',type=Path);p.add_argument('--provider');p.add_argument('--fault',default='');a=p.parse_args()
- if a.mode=='prepare':print(prepare())
+ p=argparse.ArgumentParser();p.add_argument('mode',choices=['prepare','serve','decide','control','cancel','cancel-probe']);p.add_argument('--root',type=Path);p.add_argument('--app',type=Path,help='prepare: HomeAppStatus folder');p.add_argument('--provider');p.add_argument('--fault',default='');a=p.parse_args()
+ if a.mode=='prepare':
+  if a.app is None:p.error('prepare requires --app')
+  print(prepare(a.app.resolve()))
  elif a.mode=='serve':serve(a.root.resolve())
  elif a.mode=='decide':request(a.root,'decide',{'provider':a.provider,'state':json.loads((a.root/'state.json').read_text(encoding='utf-8'))})
  elif a.mode=='cancel-probe':cancel_probe(a.root,a.provider)

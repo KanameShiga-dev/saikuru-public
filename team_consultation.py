@@ -481,13 +481,13 @@ class Consultations:
         """Pick the save folder written in the plan; fall back to the source project folder.
 
         A file path means its parent folder. Only folders under the project root
-        (team_folders.BASE) are used; a missing folder there is created.
+        (team_workspace.root) are used; a missing folder there is created.
         """
-        from team_folders import BASE
+        from team_workspace import root
         from team_config import ROOT as app_root
         documents = ('.md', '.html', '.htm', '.txt', '.svg', '.pptx', '.pdf', '.mp4', '.docx', '.xlsx')
         source=Path(source).resolve(strict=True)
-        boundary=BASE.resolve();app_root=app_root.resolve()
+        boundary=root().resolve();app_root=app_root.resolve()
         pattern = re.compile(r'"([A-Za-z]:[\\/][^"<>|*?]+)"|\x27([A-Za-z]:[\\/][^\x27<>|*?]+)\x27|([A-Za-z]:[\\/][^\s`\x27"<>|*?（）()「」『』、。，,]+)')
         lines = text.splitlines()
         # Upstream rules (narrow save keywords, strict errors) plus local additions:

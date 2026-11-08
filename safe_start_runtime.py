@@ -17,7 +17,6 @@ from types import MappingProxyType
 from datetime import datetime
 
 
-APPROVED_BASE = Path(r'C:\AI_WorkSpace\Saikuru\Work\Sessions\saikuru-no007-g123-test-20261017')
 SOURCE_NAMES = ('safe_server.py', 'safe_start_runtime.py', 'web/safe-start.html')
 MAX_SNAPSHOT = 128 * 1024 * 1024
 HEX256 = re.compile(r'[0-9a-f]{64}\Z')
@@ -83,7 +82,7 @@ class SafeManifest:
                  'created_at', 'allowed_job_ids', 'source_hashes', 'manifest_sha256')
 
     def __init__(self, raw, manifest_path, manifest_sha256, source_root,
-                 approved_base=APPROVED_BASE):
+                 approved_base):
         required = {'schema_version', 'mode', 'host', 'port', 'diagnostic_root',
                     'source_sha256', 'snapshot', 'allowed_job_ids'}
         if not isinstance(raw, dict) or set(raw) != required:

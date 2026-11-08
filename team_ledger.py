@@ -9,7 +9,8 @@ import subprocess
 import threading
 import time
 
-ROOT = Path(r'C:\AI_WorkSpace')
+from team_workspace import root
+
 SKIP = {'.git', '.venv', 'venv', 'node_modules', 'library', 'temp', 'obj', 'bin',
         'build', 'builds', 'dist', 'out', 'data', 'backups', 'gacha-backups',
         '_archive', '_migration', '__pycache__', 'assets', 'packages', 'projectsettings',
@@ -17,9 +18,8 @@ SKIP = {'.git', '.venv', 'venv', 'node_modules', 'library', 'temp', 'obj', 'bin'
         'outputs', 'captures', 'certs', 'profiles', 'records', 'chrome-amazon-automation-profile',
         'diagnostics', 'tests', 'examples', 'docs', 'deploy', 'manual', 'archive', 'work', '_project_archives'}
 CONTAINERS = {'Claude', 'Codex', 'tools', 'Projects', 'samples'}
-# The ledger root may hold the application itself; it is never a ledger project.
+# The work folder may hold the application itself; it is never a ledger project.
 APP = Path(__file__).resolve().parent
-MULTI_PROJECTS = {'Codex/miscProject', 'Codex/学習資料'}
 MARKERS = {'.git', 'package.json', 'pyproject.toml', 'requirements.txt',
            'Cargo.toml', 'go.mod', 'platformio.ini', 'ProjectSettings', 'server.py'}
 DOCS = ('AGENTS.md', 'README.md', 'README.txt', 'HANDOFF.md', 'PLAN.md',
@@ -38,8 +38,8 @@ def inside(path):
     if not isinstance(path, (str, Path)) or not Path(path).is_absolute():
         raise ValueError('絶対パスを指定してください。')
     path = Path(path).resolve()
-    if not path.is_relative_to(ROOT.resolve()):
-        raise ValueError('台帳の調査・登録範囲は C:\\AI_WorkSpace 以下です。')
+    if not path.is_relative_to(root()):
+        raise ValueError('台帳の調査・登録範囲は作業フォルダー（' + str(root()) + '）の中です。')
     return path
 
 
@@ -49,6 +49,7 @@ def directory_names(path):
 
 def inspect(path):
     path = inside(path)
+    family = path.relative_to(root()).parts[:1] == ('family',)
     names = directory_names(path)
     tech = []
     for marker, label in [('package.json', 'Node.js'), ('pyproject.toml', 'Python'),
@@ -73,7 +74,7 @@ def inspect(path):
     if (path / 'server/requirements.txt').is_file():
         tech.append('Python')
     readme_title = ''
-    if path.parts[2:3] != ('family',):
+    if not family:
         readme = path / 'README.md'
         if readme.is_file() and not readme.is_symlink():
             with readme.open(encoding='utf-8-sig', errors='replace') as stream:
@@ -85,7 +86,7 @@ def inspect(path):
     git = {'repository': '.git' in names, 'branch': '', 'head': '',
            'changes': None, 'staged': None, 'untracked': None, 'error': ''}
     git['parent_repository'] = next((str(parent) for parent in path.parents
-        if parent != ROOT and parent.is_relative_to(ROOT) and (parent / '.git').exists()), '')
+        if parent != root() and parent.is_relative_to(root()) and (parent / '.git').exists()), '')
     if git['repository']:
         def run(args):
             p = subprocess.run(['git', '--no-optional-locks', '-C', str(path)] + args,
@@ -107,10 +108,10 @@ def inspect(path):
     category = 'ソース' if git['repository'] or tech else '資料・候補（未確認）'
     if any(word in path.name.lower() for word in ('deploy', 'tvinstall', 'offline')):
         category = '配備・ビルド用コピー（関係未確認）'
-    if path.parts[2:3] == ('family',):
+    if family:
         category = '家庭関連（内容未調査）'
     from team_instruction_health import inspect_instructions
-    instruction_health = inspect_instructions(path, ROOT)
+    instruction_health = inspect_instructions(path, root())
     return {'instruction_health': instruction_health, 'path': str(path), 'technology': sorted(set(tech)), 'git': git, 'readme_title': readme_title,
             'documents': [str(path / d) for d in DOCS if (path / d).is_file()],
             'suggested_category': category, 'exists': True, 'checked_at': stamp()}
@@ -202,9 +203,9 @@ class Ledger:
         for item in projects:
             item['worker_allowed'] = None if approved is None else os.path.normcase(item['path']) in allowed
             if instruction_checks:
-                item['instruction_presence'] = instruction_presence(item['path'], ROOT)
+                item['instruction_presence'] = instruction_presence(item['path'], root())
         return {'projects': projects, 'archives': archives, 'moves': moves, 'last_scan': json.loads(scan[0]) if scan else None,
-                'root': str(ROOT), 'computer_use_policy': '基本禁止', 'schema_version': 1}
+                'root': str(root()), 'computer_use_policy': '基本禁止', 'schema_version': 1}
 
     def put_observation(self, path):
         observation = inspect(path)
@@ -255,8 +256,8 @@ class Ledger:
 
     def add(self, body):
         path = inside(body.get('path', ''))
-        if not path.is_dir() or path == ROOT or path.is_relative_to(APP) or APP.is_relative_to(path):
-            raise ValueError('C:\\AI_WorkSpace 以下の既存プロジェクトフォルダを指定してください。')
+        if not path.is_dir() or path == root() or path.is_relative_to(APP) or APP.is_relative_to(path):
+            raise ValueError('作業フォルダーの中の既存プロジェクトフォルダを指定してください。')
         with self.lock:
             self.backup()
             with self.db:
@@ -273,23 +274,22 @@ class Ledger:
             try:
                 names = directory_names(path)
                 marker = bool(names & MARKERS) or any(n.endswith(('.sln', '.csproj', '.ino')) for n in names)
-                parent_multi = path.parent.relative_to(ROOT).as_posix() in MULTI_PROJECTS if path != ROOT else False
-                is_multi = path.relative_to(ROOT).as_posix() in MULTI_PROJECTS
-                project_category = path.parent == ROOT / 'Projects'
-                categorized_project = depth == 3 and path.parent.parent == ROOT / 'Projects'
+                project_category = path.parent == base / 'Projects'
+                categorized_project = depth == 3 and path.parent.parent == base / 'Projects'
                 candidate = (depth == 1 and path.name not in CONTAINERS) or (
-                    depth == 2 and path.parent.name in CONTAINERS and not project_category) or categorized_project or marker or parent_multi
+                    depth == 2 and path.parent.name in CONTAINERS and not project_category) or categorized_project or marker
                 if candidate:
                     found.add(path)
                 # Family records, dependencies and repository internals are never traversed.
-                if depth >= 4 or path.name == 'family' or (marker and not is_multi):
+                if depth >= 4 or path.name == 'family' or marker:
                     return
                 for child in sorted(path.iterdir()):
                     if child.is_dir() and not child.is_symlink() and not getattr(child, 'is_junction', lambda: False)() and not child.name.startswith(('.', '_project_archive_pending_')) and child.name.lower() not in SKIP and not (depth >= 2 and child.name.lower() == 'tools') and child.resolve() != APP:
                         walk(child, depth + 1)
             except (OSError, ValueError):
                 errors.append(str(path) + ': フォルダ情報を取得できません。')
-        walk(ROOT.resolve(), 0)
+        base = root()
+        walk(base, 0)
         with self.lock:
             backup = self.backup()
             with self.db:
@@ -303,10 +303,10 @@ class Ledger:
                     item = json.loads(raw)
                     item['observation']['exists'] = Path(item['path']).is_dir()
                     self.db.execute('UPDATE projects SET body=? WHERE id=?', (json.dumps(item, ensure_ascii=False), object_id))
-                report = {'at': stamp(), 'root': str(ROOT), 'max_depth': 4,
+                report = {'at': stamp(), 'root': str(base), 'max_depth': 4,
                     'visited_directories': seen, 'discovered': len(found), 'errors': errors,
                     'excluded': sorted(SKIP), 'backup': backup,
-                    'scope_note': '深さ4まで。Git/技術構成のあるフォルダは内部探索を停止（miscProject・学習資料は内包プロジェクトも調査）。家庭関連は直下のメタ情報のみ。資料・候補も含む。除外範囲内や深い場所は手動登録可能。'}
+                    'scope_note': '深さ4まで。Git/技術構成のあるフォルダは内部探索を停止。家庭関連は直下のメタ情報のみ。資料・候補も含む。除外範囲内や深い場所は手動登録可能。'}
                 self.db.execute('INSERT INTO scans(at,body) VALUES (?,?)', (stamp(), json.dumps(report, ensure_ascii=False)))
         self.export()
         return report
@@ -320,7 +320,7 @@ class Ledger:
         def cell(value):
             return str(value).replace('|', '/').replace('\n', ' ')
         lines = ['# 開発プロジェクト台帳', '', '正本：project_ledger.sqlite3。編集・再調査は作業ボードの「プロジェクト台帳」から行います。',
-                 '', '調査対象：C:\\AI_Work。実行・完了判定は未実施。資料・候補・配備コピーも含みます。', '',
+                 '', '調査対象：' + snapshot['root'] + '。実行・完了判定は未実施。資料・候補・配備コピーも含みます。', '',
                  '| 名称 | 場所 | 分類 | 技術構成 | 管理状況 |', '|---|---|---|---|---|']
         for p in snapshot['projects']:
             lines.append('| ' + ' | '.join(map(cell, [p['name'], p['path'], p['category'],
@@ -333,7 +333,7 @@ class Ledger:
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='C:\\AI_WorkSpace の開発プロジェクト台帳')
+    parser = argparse.ArgumentParser(description='作業フォルダーの開発プロジェクト台帳')
     parser.add_argument('action', choices=['scan', 'list', 'export', 'backup'])
     parser.add_argument('--data', type=Path, default=Path(__file__).parent / 'data')
     args = parser.parse_args()

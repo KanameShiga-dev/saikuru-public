@@ -1,9 +1,10 @@
-"""Folder navigation confined to the existing local project boundary."""
+"""Folder navigation confined to the work folder (config: workspace_root) and the bundled sample project."""
 import re
 from pathlib import Path
 from team_config import ROOT
+from team_workspace import root
 
-BASE = Path('C:/AI_WorkSpace').resolve()
+SAMPLE = (ROOT / 'sample-project').resolve()
 
 
 def folder(value):
@@ -13,22 +14,22 @@ def folder(value):
     if not path.is_absolute():
         raise ValueError('フォルダは絶対パスで指定してください。')
     path = path.resolve()
-    if not path.is_relative_to(BASE) or not path.is_dir():
-        raise ValueError('C:\\AI_Work内の既存フォルダを指定してください。')
-    if path.is_relative_to(ROOT) and not path.is_relative_to(ROOT / 'sample-project'):
+    if not (path.is_relative_to(root()) or path.is_relative_to(SAMPLE)) or not path.is_dir():
+        raise ValueError('作業フォルダー内の既存フォルダを指定してください。')
+    if path.is_relative_to(ROOT) and not path.is_relative_to(SAMPLE):
         raise ValueError('統括サービスの内部フォルダは選択できません。')
     return path
 
 
 def project_folder(value):
     path = folder(value)
-    if path == BASE or ROOT.is_relative_to(path):
+    if path == root() or ROOT.is_relative_to(path):
         raise ValueError('個別のプロジェクトフォルダを選択してください。')
     return path
 
 
 def listing(value):
-    path = folder(value or str(BASE))
+    path = folder(value or str(root()))
     entries = []
     try:
         for item in path.iterdir():
@@ -46,7 +47,7 @@ def listing(value):
         selectable = True
     except ValueError:
         selectable = False
-    return {'path': str(path), 'parent': str(path.parent) if path != BASE else None,
+    return {'path': str(path), 'parent': str(path.parent) if path not in (root(), SAMPLE) else None,
             'entries': sorted(entries, key=lambda e: e['name'].casefold()), 'selectable': selectable}
 
 
@@ -59,7 +60,7 @@ def create(parent, name):
             re.fullmatch(r'(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?', name)):
         raise ValueError('フォルダ名に使用できない文字・予約名が含まれています。')
     target = parent / name
-    if not target.resolve().is_relative_to(BASE):
+    if not (target.resolve().is_relative_to(root()) or target.resolve().is_relative_to(SAMPLE)):
         raise ValueError('作成先が作業フォルダの外です。')
     try:
         target.mkdir()  # No overwrite, no recursive parent creation.

@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 let state=null, selected=null, busy=false, archivePreview=null, pollTimer=null, movePreview=null, harnessPreview=null;
-const categoryDrafts=new Map();
+
 const labels={name:'プロジェクト名',purpose:'目的・利用者',category:'分類（ソース／配備コピー／資料など）',status:'管理状況（未評価／運用中／保留／完了など）',owner:'管理担当',source_path:'元ソースのパス（配備コピーの場合・未確認なら空欄）',build_method:'ビルド・起動方法',verification_method:'検証方法・証拠の保存場所',completion_criteria:'完了と判断する条件',next_action:'次に行うこと・未確認事項',notes:'制約・注意点・関連情報',harness_proposal:'ハーネス化提案（下書き）'};
 const limits={name:160,purpose:1500,category:80,status:80,owner:120,source_path:1000,build_method:2000,verification_method:2000,completion_criteria:2000,next_action:2000,notes:3000,harness_proposal:8000};
 const managementGroups=[
@@ -15,7 +15,7 @@ function defaultManagementValues(p){return {name:p.path.split(/[\\/]/).filter(Bo
 function renderManagementFields(p){
  const defaults=defaultManagementValues(p);$('fields').replaceChildren();
  for(const[id,title,keys]of managementGroups){
-  const section=node('details',undefined,'detail-section management-group');section.id='management-'+id;section.dataset.inputKind='manual';
+  const section=node('details',undefined,'detail-section management-group');section.id='management-'+id;section.setAttribute('role','tabpanel');section.setAttribute('aria-labelledby','ledger-tab-'+(id==='basic'?'basic':id==='harness'?'harness':'execution'));section.dataset.inputKind='manual';
   const summary=node('summary',title+' ');summary.append(node('span','○ 入力なし','input-indicator'));section.append(summary);
   for(const key of keys){
    let generate=null;
@@ -72,6 +72,7 @@ function renderHarnessPreview(container,preview){
  container.replaceChildren();
  const survey=preview.survey,summary=node('div',undefined,'harness-survey');
  summary.append(node('h4','読み取り専用調査の結果'));
+ for(const warning of survey.instruction_health?.warnings||[])summary.append(node('p','指示ファイルの警告：'+warning.message,'archive-warning'));
  summary.append(node('p',`対象: ${preview.project.path}`,'path'));
  summary.append(node('p',`検出言語: ${survey.languages.join('、')||'未確認'} ／ 確認ファイル数: ${survey.file_count_scanned}${survey.capped?'（上限で打ち切り）':''}`));
  summary.append(node('p',`マニフェスト: ${survey.manifest_names.join('、')||'未確認'} ／ 依存名: ${survey.dependency_names.join('、')||'未確認'}`));
@@ -198,7 +199,7 @@ function navigateProject(p){
   $('save-message').textContent='入力中の内容があります。管理項目は保存し、GitHub公開先の入力は控えてから、別のプロジェクトを開いてください。';
   $('save-message').scrollIntoView({block:'nearest'});return;
  }
- $('editor').close();openProjectDetails(p);$('editor').scrollTop=0;
+ openProjectDetails(p);$('editor').scrollTop=0;
 }
 function renderRelations(p){
  const {parent,gitPath,gitParent,children}=projectRelations(p),box=$('project-relations');box.replaceChildren();
@@ -219,57 +220,121 @@ function renderRelations(p){
 function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
 async function api(path,body){const response=await fetch(path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Team-UI':'1'},body:JSON.stringify(body)});let data;try{data=await response.json();}catch{throw Error('PC側に接続できません。再読み込みしてください。');}if(!response.ok)throw Error(data.error||'処理に失敗しました。');return data;}
 function message(text,error=false){$('message').textContent=text;$('message').className=error?'error':'';}
-async function load(){state=await api('/api/ledger');const old=$('category').value;const categories=[...new Set(state.projects.map(p=>p.category))].sort();$('category').replaceChildren(node('option','すべて'));$('category').firstChild.value='';for(const c of categories){const option=node('option',c);option.value=c;$('category').append(option);}$('category').value=categories.includes(old)?old:'';const s=state.last_scan;$('scan-info').textContent=s?`最終調査：${s.at} ／ 登録候補 ${s.discovered}件 ／ 調査フォルダ ${s.visited_directories}件`:'まだ調査していません。';$('scope').textContent=s?`${s.root}：${s.scope_note} 除外：${s.excluded.join('、')}`:'C:\\AI_WorkSpace 以下のみ調査します。';$('scan-errors').textContent=s?.errors.length?`未確認：${s.errors.join(' ／ ')}`:'前回調査で取得エラーはありません。';render();refreshArchive();refreshMoves();schedulePoll();}
+async function load(){state=await api('/api/ledger');const old=$('category').value;const categories=[...new Set(state.projects.map(p=>p.category))].sort();$('category').replaceChildren(node('option','すべて'));$('category').firstChild.value='';for(const c of categories){const option=node('option',c);option.value=c;$('category').append(option);}$('category').value=categories.includes(old)?old:'';const s=state.last_scan;$('scan-info').textContent=s?`最終調査：${s.at} ／ 登録候補 ${s.discovered}件 ／ 調査フォルダ ${s.visited_directories}件`:'まだ調査していません。';$('scope').textContent=s?`${s.root}：${s.scope_note} 除外：${s.excluded.join('、')}`:'作業フォルダーの中だけを調査します。';$('scan-errors').textContent=s?.errors.length?`未確認：${s.errors.join(' ／ ')}`:'前回調査で取得エラーはありません。';render();refreshArchive();refreshMoves();schedulePoll();}
+function isRetiredProject(p){
+ return /(?:アーカイブ|削除)済(?:み)?|^(?:アーカイブ|削除|archived|deleted)$/i.test(String(p.status||'').trim());
+}
+function instructionPresence(p){return p.instruction_presence||(instructionReports.get(p.id)||p.observation.instruction_health)?.presence||{agents:null,claude:null,status:'unknown',message:'指示ファイルの有無は未確認です。'};}
+function matchesInstructions(p,filter){
+ const presence=instructionPresence(p);
+ if(filter==='missing')return presence.agents===false||presence.claude===false;
+ if(filter==='agents_missing')return presence.agents===false;
+ if(filter==='claude_missing')return presence.claude===false;
+ return !filter||presence.status===filter;
+}
+function renderIssueTable(){
+ let panel=$('development-issues');
+ if(!panel){panel=node('section');panel.id='development-issues';$('list').before(panel);}
+ panel.replaceChildren(node('h2','開発課題表'));
+ panel.append(node('p','課題の記録だけではAI作業や承認は開始しません。警告・改善は作業を止めずに管理します。'));
+ const filter=node('select');filter.setAttribute('aria-label','課題の状態で絞り込み');
+ for(const [value,label]of [['active','未解決'],['all','すべて'],['resolved','解決済み']]){const option=node('option',label);option.value=value;filter.append(option);}
+ panel.append(filter);
+ const add=node('button','課題を追加');add.type='button';panel.append(add);
+ const editor=node('div'),view=node('div');panel.append(editor,view);
+ const statusLabels={open:'未対応',in_progress:'対応中',resolved:'解決済み',deferred:'保留'};
+ function edit(issue={}){
+  editor.replaceChildren();const form=node('form');form.append(node('h3',issue.id?'課題を編集':'課題を登録'));
+  for(const [key,label,max]of [['project','対象プロジェクト',160],['title','課題名',240],['impact','目的・工程への影響',2000],['next_action','次の対応・完了条件',2000],['owner','担当',120]]){
+   const field=node('label',label),input=node(max>240?'textarea':'input');input.name=key;input.maxLength=max;input.value=issue[key]||(key==='project'?'采来':'');input.required=['project','title'].includes(key);field.append(input);form.append(field);
+  }
+  for(const [key,label,choices]of [['severity','進行への影響',{warning:'警告・改善（継続）',blocker:'進行を妨げる課題'}],['status','状態',statusLabels]]){
+   const field=node('label',label),input=node('select');input.name=key;for(const [value,text]of Object.entries(choices)){const option=node('option',text);option.value=value;input.append(option);}input.value=issue[key]||(key==='severity'?'warning':'open');field.append(input);form.append(field);
+  }
+  const save=node('button','課題を保存');save.type='submit';const cancel=node('button','閉じる');cancel.type='button';cancel.onclick=()=>editor.replaceChildren();const feedback=node('p');feedback.setAttribute('role','status');form.append(save,cancel,feedback);editor.append(form);
+  form.onsubmit=async event=>{event.preventDefault();save.disabled=true;try{await api('/api/ledger/issues/save',{...Object.fromEntries(new FormData(form)),...(issue.id?{id:issue.id,revision:issue.revision}:{})});await load();message('課題を保存しました。');}catch(error){feedback.textContent=error.message;save.disabled=false;}};
+ }
+ function draw(){
+  view.replaceChildren();const rows=(state.development_issues||[]).filter(i=>filter.value==='all'||(filter.value==='resolved'?i.status==='resolved':i.status!=='resolved'));
+  view.append(node('p',`${rows.length}件`));const table=node('table'),head=node('tr');
+  for(const text of ['対象','課題','区分','状態','工程への影響・次の対応','操作'])head.append(node('th',text));const thead=node('thead');thead.append(head);table.append(thead);const tbody=node('tbody');
+  for(const issue of rows){const row=node('tr',undefined,issue.severity==='warning'?'issue-warning':'issue-blocker');row.append(node('td',issue.project),node('td',issue.title),node('td',issue.severity==='warning'?'⚠ 警告・継続':'進行障害'),node('td',statusLabels[issue.status]));const detail=node('td');detail.append(node('p',issue.impact||'未記入'),node('p','次の対応：'+(issue.next_action||'未記入')),node('p','担当：'+(issue.owner||'未定')));row.append(detail);const action=node('td'),button=node('button','編集');button.type='button';button.onclick=()=>edit(issue);action.append(button);row.append(action);tbody.append(row);}table.append(tbody);view.append(table);
+ }
+ filter.onchange=draw;add.onclick=()=>edit();draw();
+}
 function render(){
- const q=$('search').value.toLowerCase(),category=$('category').value;
- const items=state.projects.filter(p=>(!category||p.category===category)&&JSON.stringify([p.name,p.path,p.purpose,p.observation.technology]).toLowerCase().includes(q));
- $('count').textContent=`${items.length}件表示 ／ 台帳 ${state.projects.length}件（資料・候補を含む）`;
+ renderIssueTable();
+ const q=$('search').value.toLowerCase(),category=$('category').value,showRetired=$('show-retired').checked,instructionFilter=$('instruction-filter').value;
+ const hidden=showRetired?0:state.projects.filter(isRetiredProject).length;
+ const items=state.projects.filter(p=>(showRetired||!isRetiredProject(p))&&(!category||p.category===category)&&matchesInstructions(p,instructionFilter)&&JSON.stringify([p.name,p.path,p.purpose,p.observation.technology]).toLowerCase().includes(q));
+ const order=$('sort-order')?.value||'new',seen=p=>String(p.first_seen||''),edited=p=>BigInt(/^\d+$/.test(p.manual_updated_at||'')?p.manual_updated_at:0),cmp={new:(a,b)=>seen(b).localeCompare(seen(a)),old:(a,b)=>seen(a).localeCompare(seen(b)),edited:(a,b)=>(edited(b)>edited(a)?1:edited(b)<edited(a)?-1:seen(b).localeCompare(seen(a))),name:(a,b)=>String(a.name||a.path).localeCompare(String(b.name||b.path),'ja'),path:(a,b)=>a.path.localeCompare(b.path)};
+ items.sort(cmp[order]);
+ $('count').textContent=`${items.length}件表示 ／ 台帳 ${state.projects.length}件（資料・候補を含む）${hidden?` ／ アーカイブ・削除 ${hidden}件は非表示`:''}`;
  $('list').replaceChildren();
- const categories=[...new Set(state.projects.map(p=>p.category).filter(Boolean))];
+ const recorded=(state.warning_issues||[]).filter(i=>i.status==='open'&&(!q||JSON.stringify([i.job_title,i.summary]).toLowerCase().includes(q)));
+ if(recorded.length){const section=node('section',undefined,'progress-warning');section.append(node('h2',`記録済みの警告・改善課題 ${recorded.length}件`),node('p','現在の作業を止めずに記録した課題です。'));for(const issue of recorded){const row=node('details');row.append(node('summary',issue.summary),node('p','依頼：'+issue.job_title),node('p','状態：未対応 ／ 進行への影響：停止不要'));section.append(row);}$('list').append(section);}
+
  for(const p of items){
   const card=node('article',undefined,'project'),button=node('button',p.name);button.type='button';button.dataset.projectId=p.id;
+  if(selected?.id===p.id&&!$('editor').hidden){card.classList.add('selected');button.setAttribute('aria-current','true');}
   card.append(button,node('p',p.path,'path'));
+  const editedMs=/^\d{16,}$/.test(p.manual_updated_at||'')?Number(BigInt(p.manual_updated_at)/1000000n):0,short=v=>String(v||'').slice(0,16).replace(/^\d{4}-/,''),editedText=editedMs?new Date(editedMs).toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).replace(/\//g,'-'):'';
+  card.append(node('p',`登録 ${short(p.first_seen)||'不明'} ／ 更新 ${editedText||(p.observation.checked_at?short(p.observation.checked_at)+'（調査）':'なし')}`,'dates'));
   const badges=node('div');
   for(const b of [p.category,p.status,p.worker_allowed?'AI作業対象に登録済み':'AI作業の許可なし'])badges.append(node('span',b,'badge'));
   card.append(badges,node('p',`目的：${p.purpose}`),node('p',`技術構成：${p.observation.technology.join(' / ')||'未確認'}`));
-  const form=node('form',undefined,'card-category-form'),label=node('label','分類を編集');
-  const draft=categoryDrafts.get(p.id);
-  const input=node('input');input.type='text';input.value=draft?.value??p.category??'';input.maxLength=limits.category;input.required=true;
-  const suggestions=node('datalist');suggestions.id='category-options-'+p.id;
-  for(const value of categories){const option=node('option');option.value=value;suggestions.append(option);}
-  input.setAttribute('list',suggestions.id);
-  const save=node('button','分類を保存');save.type='submit';save.disabled=!input.value.trim()||input.value.trim()===p.category;
-  const feedback=node('small');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');
-  input.addEventListener('input',()=>{
-   const value=input.value.trim();
-   if(value===p.category)categoryDrafts.delete(p.id);
-   else categoryDrafts.set(p.id,{value:input.value,expectedUpdatedAt:draft?.expectedUpdatedAt??p.manual_updated_at});
-   save.disabled=!value||value===p.category;
-  });
-  label.append(input);form.append(label,suggestions,save,feedback);
-  form.addEventListener('submit',async e=>{
-   e.preventDefault();const value=input.value.trim();if(!value||value===p.category)return;
-   save.disabled=true;feedback.className='';feedback.textContent='分類を保存しています…';
-   try{await api('/api/ledger/update',{id:p.id,fields:{category:value},expected_updated_at:categoryDrafts.get(p.id)?.expectedUpdatedAt??p.manual_updated_at});}
-   catch(err){feedback.textContent=err.message;feedback.className='error';save.disabled=false;return;}
-   categoryDrafts.delete(p.id);
-   try{await load();message(`${p.name} の分類を保存しました。`);}
-   catch(err){feedback.textContent='分類は保存しました。表示の更新に失敗しました: '+err.message;feedback.className='error';}
-  });
-  card.append(form);
+  const keyFields=['purpose','owner','build_method','verification_method','completion_criteria'],known=keyFields.filter(k=>p[k]&&p[k]!=='未確認').length;
+  const fill=node('div',undefined,'fill'),meter=node('span',undefined,'meter'),bar=node('i');bar.style.width=(known/keyFields.length*100)+'%';meter.append(bar);meter.setAttribute('aria-hidden','true');
+  fill.append(node('span',`主要な管理項目 ${known}/${keyFields.length} 確認済み`),meter);if(known<keyFields.length)fill.append(node('span',`未確認 ${keyFields.length-known}項目`,'unknown'));card.append(fill);
   if((state.archives||[]).some(r=>r.project_id===p.id&&r.state==='completed'))card.append(node('p','アーカイブ保存済み（詳細に保存先）'));
+  const presence=instructionPresence(p);
+  if(presence.status!=='both_present')card.append(node('p',(presence.status==='unknown'?'未確認：':'指示ファイル不足：')+presence.message,'archive-warning'));
+  const instructionWarnings=((instructionReports.get(p.id)||p.observation.instruction_health)?.warnings||[]).filter(w=>!['missing_instructions','presence_unknown'].includes(w.code));
+  if(instructionWarnings.length)card.append(node('p',`指示ファイルの警告 ${instructionWarnings.length}件（調査時点）。詳細を開いて再確認してください。`,'archive-warning'));
   if(!p.observation.exists)card.append(node('p','フォルダが見つかりません（履歴は保持）。','error'));
   $('list').append(card);
  }
  if(!items.length)$('list').append(node('p','該当するプロジェクトはありません。'));
 }
 function renderMetadata(p){const o=p.observation,g=o.git,dl=node('dl');const info={'確認日時':o.checked_at,'フォルダ':o.exists?'存在確認済み':'見つかりません','README表題':o.readme_title||'未確認','所属Gitリポジトリ':g.parent_repository||'親リポジトリなし','技術構成':o.technology.join(' / ')||'未確認','Git管理':g.repository?'あり':'直下の .git なし','ブランチ':g.branch||'未確認','HEAD':g.head||'未確認','変更件数':g.repository&&g.changes!==null?`追跡対象 ${g.changes} ／ ステージ ${g.staged} ／ 未追跡 ${g.untracked}`:'未確認','Git取得結果':g.error||'上記は調査時点の情報です。','関連資料':o.documents.join('\n')||'既定の資料名は見つかりません。','Computer Use':'基本禁止','AI作業の許可':p.worker_allowed?'既存の作業対象に登録済み':'台帳登録のみ。作業の許可なし。'};for(const[k,v]of Object.entries(info))dl.append(node('dt',k),node('dd',v));$('metadata').replaceChildren(dl);}
-function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').textContent=p.name;$('path').textContent=p.path;$('save-message').textContent='';renderMetadata(p);renderManagementFields(p);$('archive-feedback').textContent='';$('archive-feedback').className='';$('github-repositories').value='';archivePreview=null;renderRelations(p);$('move-destination').value='';$('move-feedback').textContent='';movePreview=null;for(const section of $('editor').querySelectorAll('details.detail-section'))section.open=false;refreshArchive();updateSectionIndicators();$('editor').showModal();}
+// 2026-10-03 UI改善：詳細はダイアログではなく、一覧の右側の常設パネルに表示する。
+function showEditor(){const ed=$('editor');ed.hidden=false;$('editor-placeholder').hidden=true;markSelected();if(matchMedia('(max-width:980px)').matches)ed.scrollIntoView({behavior:'smooth',block:'start'});else ed.scrollTop=0;}
+function hideEditor(){$('editor').hidden=true;$('editor-placeholder').hidden=false;markSelected();}
+function markSelected(){for(const card of document.querySelectorAll('#list .project')){const b=card.querySelector('button[data-project-id]'),on=!$('editor').hidden&&b?.dataset.projectId===selected?.id;card.classList.toggle('selected',on);if(b){if(on)b.setAttribute('aria-current','true');else b.removeAttribute('aria-current');}}}
+let instructionRequest=0;const instructionReports=new Map();
+// 2026-10-19 （利用者の要望）表示が場所をとりすぎるため、1行の要約にまとめ、説明・ファイル別の容量・再確認は折りたたむ。
+// 不足や警告があるときだけ、黄色の印をつけて最初から開く。
+function showInstructionHealth(report){
+ const box=$('instruction-health');box.replaceChildren();
+ const format=b=>`${(b/1024).toFixed(1)} KiB（${b.toLocaleString()} bytes）`,short=b=>`${(b/1024).toFixed(1)} KiB`;
+ const sizeWarnings=(report.warnings||[]).filter(w=>!['missing_instructions','presence_unknown'].includes(w.code));
+ const presenceOk=!report.presence||report.presence.status==='both_present',problem=!presenceOk||sizeWarnings.length>0;
+ const fold=node('details',undefined,'instruction-health-fold'+(problem?' warning':''));fold.open=problem;
+ const parts=[presenceOk?'両方あり':(report.presence?.message||'指示ファイルの不足').replace(/。$/,''),sizeWarnings.length?`サイズ警告 ${sizeWarnings.length}件`:'サイズ警告なし'];
+ const summary=node('summary');summary.append(node('strong',(problem?'⚠ ':'✓ ')+'指示ファイル：'),document.createTextNode(parts.join('・')+`（最大 ${short(report.codex_candidate_max_bytes||0)}／上限候補 ${short(report.codex_limit_bytes)}）`));
+ fold.append(summary);
+ if(report.presence&&!presenceOk)fold.append(node('p',report.presence.message,'archive-warning'));
+ for(const w of sizeWarnings)fold.append(node('p','警告：'+w.message,'archive-warning'));
+ if(!sizeWarnings.length)fold.append(node('p','確認した範囲にサイズ警告はありません。実際に全指示が読まれたことは未確認です。'));
+ fold.append(node('p',`Codex上限候補：${format(report.codex_limit_bytes)} ／ 階層合計の最大候補：${format(report.codex_candidate_max_bytes||0)}。${report.limit_basis}`));
+ fold.append(node('p','判定はプロジェクト直下の指示ファイルです。親・共通指示の継承、代替名、AIの実際の読み込みは別途確認してください。'),node('p',report.hint));
+ for(const f of report.files||[])fold.append(node('p',`${f.path}：${format(f.bytes)} ／ ${f.lines===null?'行数未確認':f.lines+'行'}`,'path'));
+ fold.append(node('p',`Claude Codeは200行未満を推奨。200行は読み込み打ち切りではありません。CLAUDE.mdは4 MiB超で読み込み対象外（現在の公式仕様）。確認：${report.checked_at}。${report.scope}。${report.note||''}`));
+ const retry=node('button','容量を再確認');retry.type='button';retry.onclick=()=>refreshInstructionHealth(selected);fold.append(retry);
+ box.append(fold);
+}
+async function refreshInstructionHealth(p){
+ if(!p)return;const request=++instructionRequest;
+ $('instruction-health').replaceChildren(node('p','指示ファイルの容量を読み取り専用で確認しています…'));
+ try{const report=await api('/api/instruction-health?project='+encodeURIComponent(p.path));if(request!==instructionRequest||selected?.id!==p.id)return;instructionReports.set(p.id,report);if(report.presence)p.instruction_presence=report.presence;showInstructionHealth(report);render();}
+ catch(err){if(request!==instructionRequest)return;const box=$('instruction-health');box.replaceChildren(node('p','指示ファイルの容量は未確認です。'+err.message,'archive-warning'));const retry=node('button','再確認');retry.type='button';retry.onclick=()=>refreshInstructionHealth(p);box.append(retry);}
+}
+function openProjectDetails(p){selected=p;harnessPreview=null;$('editor-title').textContent=p.name;$('path').textContent=p.path;$('save-message').textContent='';renderMetadata(p);renderManagementFields(p);$('archive-feedback').textContent='';$('archive-feedback').className='';$('github-repositories').value='';archivePreview=null;renderRelations(p);$('move-destination').value='';$('move-feedback').textContent='';movePreview=null;for(const section of $('editor').querySelectorAll('details.detail-section'))section.open=false;refreshArchive();updateSectionIndicators();selectLedgerTab('basic');showEditor();refreshInstructionHealth(p);}
 $('edit-form').addEventListener('input',updateSectionIndicators);
 $('edit-form').addEventListener('change',updateSectionIndicators);
-$('edit-form').addEventListener('submit',async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const fields=Object.fromEntries(new FormData(e.target));await api('/api/ledger/update',{id:selected.id,fields,expected_updated_at:selected.manual_updated_at});await load();$('editor').close();message('台帳を保存しました。変更前のDBと編集履歴も保持しています。');}catch(err){$('save-message').textContent=err.message;$('management-section').open=true;}finally{button.disabled=false;}});
-$('close').onclick=()=>$('editor').close();$('search').oninput=render;$('category').onchange=render;
-$('scan').onclick=async()=>{if(busy)return;busy=true;$('scan').disabled=true;message('C:\\AI_WorkSpace を調査しています。プロジェクトのコードは実行しません。');try{const r=await api('/api/ledger/scan',{});await load();message(`再調査して登録しました。候補 ${r.discovered}件、取得エラー ${r.errors.length}件。`);}catch(e){message(e.message,true);}finally{busy=false;$('scan').disabled=false;}};
+$('edit-form').addEventListener('submit',async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const fields=Object.fromEntries(new FormData(e.target));await api('/api/ledger/update',{id:selected.id,fields,expected_updated_at:selected.manual_updated_at});await load();const fresh=state.projects.find(p=>p.id===selected.id);if(fresh)openProjectDetails(fresh);message('台帳を保存しました。変更前のDBと編集履歴も保持しています。');$('save-message').textContent='保存しました。';}catch(err){$('save-message').textContent=err.message;selectLedgerTab('basic');$('management-section').open=true;}finally{button.disabled=false;}});
+$('show-retired').checked=false;$('close').onclick=hideEditor;$('search').oninput=render;$('category').onchange=render;$('instruction-filter').onchange=render;$('sort-order').value=localStorage.getItem('ledger-sort')||'new';$('sort-order').onchange=()=>{localStorage.setItem('ledger-sort',$('sort-order').value);render();};$('show-retired').onchange=render;
+$('scan').onclick=async()=>{if(busy)return;busy=true;$('scan').disabled=true;message('作業フォルダーを調査しています。プロジェクトのコードは実行しません。');try{const r=await api('/api/ledger/scan',{});await load();message(`再調査して登録しました。候補 ${r.discovered}件、取得エラー ${r.errors.length}件。`);}catch(e){message(e.message,true);}finally{busy=false;$('scan').disabled=false;}};
 $('backup').onclick=async()=>{try{const r=await api('/api/ledger/backup',{});message(`バックアップ：data/${r.backup}`);}catch(e){message(e.message,true);}};
 $('export').onclick=async()=>{try{const data=await api('/api/ledger/export'),url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=node('a');a.href=url;a.download='project-ledger.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('現在の台帳をJSONで書き出しました。');}catch(e){message(e.message,true);}};
 $('add').onclick=()=>{$('add-message').textContent='';$('add-dialog').showModal();};$('add-close').onclick=()=>$('add-dialog').close();
@@ -291,11 +356,11 @@ async function prepareRemoval(operation){
    result=await api('/api/ledger/preview-status?id='+encodeURIComponent(request.request_id));
    if(result.status!=='working')break;
    await new Promise(resolve=>setTimeout(resolve,1000));
-   if(selected?.id!==project.id||!$('editor').open)return;
+   if(selected?.id!==project.id||$('editor').hidden)return;
   }
   if(result.status==='failed')throw Error(result.error);
   if(result.status!=='ready')throw Error('対象確認に時間がかかっています。対象のアプリを停止してから、確認をやり直してください。');
-  if(selected?.id!==project.id||!$('editor').open)return;
+  if(selected?.id!==project.id||$('editor').hidden)return;
   archivePreview=result.preview;
   $('archive-confirm-title').textContent=operation==='delete'?'プロジェクトを削除（復旧用ZIPを保存）':'アーカイブして元フォルダを削除';
   $('archive-form').querySelector('button[type="submit"]').textContent=operation==='delete'?'非公開化・接続解除して削除':'非公開化・接続解除してアーカイブ';
@@ -335,10 +400,10 @@ $('move-preview').onclick=async()=>{
  try{
   if(Object.keys(labels).some(key=>String(new FormData($('edit-form')).get(key)||'')!==String(project[key]||'')))throw Error('管理項目に未保存の入力があります。台帳に保存してから移動してください。');
   const request=await api('/api/ledger/move/preview',{id:project.id,destination:$('move-destination').value.trim()});let result;
-  for(let attempt=0;attempt<900;attempt++){result=await api('/api/ledger/move/preview-status?id='+encodeURIComponent(request.request_id));if(result.status!=='working')break;await new Promise(resolve=>setTimeout(resolve,1000));if(selected?.id!==project.id||!$('editor').open)return;}
+  for(let attempt=0;attempt<900;attempt++){result=await api('/api/ledger/move/preview-status?id='+encodeURIComponent(request.request_id));if(result.status!=='working')break;await new Promise(resolve=>setTimeout(resolve,1000));if(selected?.id!==project.id||$('editor').hidden)return;}
   if(result.status==='failed')throw Error(result.error);
   if(result.status!=='ready')throw Error('対象確認が終わっていません。時間を置いてもう一度確認してください。');
-  if(selected?.id!==project.id||!$('editor').open)return;
+  if(selected?.id!==project.id||$('editor').hidden)return;
   movePreview=result.preview;const box=$('move-plan');box.replaceChildren();
   for(const[k,v]of Object.entries({'移動元':movePreview.source,'移動先':movePreview.destination,'所属Git':movePreview.git_root||'検出なし','移動先の所属Git':movePreview.destination_git_root||'検出なし','Git追跡ファイル':movePreview.tracked_files+'件','移動範囲のGit差分':movePreview.git_changes+'件','台帳で移るノード':movePreview.affected.length+'件','更新する元ソース参照':movePreview.references.length+'件'}))box.append(node('p',k+'：'+v,'path'));
   for(const warning of movePreview.warnings)box.append(node('p',warning,'archive-warning'));
@@ -353,3 +418,19 @@ $('move-form').onsubmit=async e=>{e.preventDefault();const button=e.submitter;bu
 load().catch(e=>message(e.message,true));
 
 $('list').addEventListener('click',e=>{const button=e.target.closest('button[data-project-id]');if(!button)return;try{openProjectDetails(state.projects.find(p=>p.id===button.dataset.projectId));}catch(err){const error=node('p','詳細画面を開けません：'+err.message,'error');button.parentElement.append(error);message(error.textContent,true);}});
+
+// Keep every field mounted: switching tabs preserves unsaved drafts.
+function selectLedgerTab(tab){
+ const groups={basic:['basic'],execution:['source','verification','next'],harness:['harness'],observations:[],management:[]};
+ for(const b of document.querySelectorAll('[data-ledger-tab]')){const on=b.dataset.ledgerTab===tab;b.setAttribute('aria-selected',String(on));b.tabIndex=on?0:-1;b.setAttribute('aria-controls',b.dataset.ledgerTab==='observations'?'metadata-section relationship-section':b.dataset.ledgerTab==='management'?'ledger-danger':groups[b.dataset.ledgerTab].map(id=>'management-'+id).join(' '));}
+ for(const [id] of managementGroups){const pane=$('management-'+id);if(pane){pane.hidden=!groups[tab].includes(id);if(!pane.hidden)pane.open=true;}}
+ $('management-section').hidden=!groups[tab].length;$('management-section').open=true;
+ $('metadata-section').hidden=$('relationship-section').hidden=tab!=='observations';
+ $('ledger-danger').hidden=tab!=='management';
+}
+for(const b of document.querySelectorAll('[data-ledger-tab]')){
+ b.onclick=()=>selectLedgerTab(b.dataset.ledgerTab);
+ b.onkeydown=e=>{const all=[...document.querySelectorAll('[data-ledger-tab]')],i=all.indexOf(b);let next;
+ if(e.key==='ArrowRight')next=all[(i+1)%all.length];else if(e.key==='ArrowLeft')next=all[(i+all.length-1)%all.length];else if(e.key==='Home')next=all[0];else if(e.key==='End')next=all.at(-1);
+ if(next){e.preventDefault();selectLedgerTab(next.dataset.ledgerTab);next.focus();}};
+}

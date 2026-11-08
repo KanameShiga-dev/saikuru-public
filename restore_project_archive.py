@@ -5,7 +5,8 @@ from pathlib import Path
 import shutil
 import zipfile
 
-from team_archive import ARCHIVE_ROOT, digest
+from team_archive import archive_root, digest
+from team_workspace import root as workspace_root
 from team_ledger import Ledger, inside
 
 
@@ -16,7 +17,7 @@ def restore(archive_id, destination):
     if not record or not record.get('zip_sha256') or not record.get('manifest_sha256'):
         raise ValueError('ZIP・照合記録の検証済みSHA-256がありません。')
     archive, manifest_path = Path(record['archive']).resolve(), Path(record['manifest']).resolve()
-    if not archive.is_relative_to(ARCHIVE_ROOT) or not manifest_path.is_relative_to(ARCHIVE_ROOT):
+    if not archive.is_relative_to(archive_root()) or not manifest_path.is_relative_to(archive_root()):
         raise ValueError('アーカイブの場所が不正です。')
     with archive.open('rb') as src:
         if digest(src) != record['zip_sha256']:
@@ -35,8 +36,8 @@ def restore(archive_id, destination):
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     dest = inside(destination)
     app = Path(__file__).parent.resolve()
-    if dest.exists() or dest == inside(r'C:\AI_WorkSpace') or dest.is_relative_to(app) or app.is_relative_to(dest) or dest.is_relative_to(ARCHIVE_ROOT):
-        raise ValueError('新しい空の復元先を C:\\AI_WorkSpace 以下に指定してください。既存フォルダには上書きしません。')
+    if dest.exists() or dest == workspace_root() or dest.is_relative_to(app) or app.is_relative_to(dest) or dest.is_relative_to(archive_root()):
+        raise ValueError('新しい空の復元先を作業フォルダーの中に指定してください。既存フォルダには上書きしません。')
     if not dest.parent.is_dir():
         raise ValueError('復元先の親フォルダを先に作成してください。')
     name = Path(record['source']).name

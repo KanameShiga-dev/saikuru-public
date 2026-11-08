@@ -186,7 +186,7 @@ class SafeStartTests(unittest.TestCase):
         code = '''import runpy,sys
 from pathlib import Path
 entry=runpy.run_path(sys.argv[1],run_name='safe_entry_under_test')
-args=entry['parse_args'](['--manifest',sys.argv[2],'--manifest-sha256',sys.argv[3],'--evidence-dir',sys.argv[4]])
+args=entry['parse_args'](['--approved-base',sys.argv[5],'--manifest',sys.argv[2],'--manifest-sha256',sys.argv[3],'--evidence-dir',sys.argv[4]])
 prepared=entry['preflight'](args,Path(sys.argv[1]).parent,Path(sys.argv[5]))
 guard=entry['BootstrapGuard'](prepared,bind_port=0)
 guard.install()
@@ -395,7 +395,7 @@ else:
         self.assertNotIn('<form', template.lower())
 
     def test_s12_invalid_start_fails_closed(self):
-        common = ['--manifest', str(self.manifest_path), '--manifest-sha256', sha(self.manifest_path),
+        common = ['--approved-base', str(self.base), '--manifest', str(self.manifest_path), '--manifest-sha256', sha(self.manifest_path),
                   '--evidence-dir', str(self.evidence)]
         for extra in (['--normal'], ['--resume'], ['--data', 'x'], ['--port', '8790'], ['--port', '0'], ['--host', '0.0.0.0']):
             with self.subTest(extra=extra), patch('sys.stderr', io.StringIO()), self.assertRaises(SystemExit) as error:

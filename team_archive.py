@@ -11,10 +11,14 @@ import time
 import zipfile
 from contextlib import ExitStack
 
-from team_ledger import ROOT, inside, stamp
+from team_ledger import inside, stamp
+from team_workspace import root
 from team_github_retirement import plan as github_plan, retire as github_retire
 
-ARCHIVE_ROOT = ROOT / '_project_archives'
+def archive_root():
+    return root() / '_project_archives'
+
+
 LIVE = {'preparing', 'github_retiring', 'compressing', 'verifying', 'verified', 'deleting'}
 
 
@@ -26,10 +30,10 @@ def overlaps(a, b):
 def validate_path(path):
     raw = Path(path)
     resolved = inside(raw)
-    if resolved == ROOT or resolved.is_relative_to(ARCHIVE_ROOT):
+    if resolved == root() or resolved.is_relative_to(archive_root()):
         raise ValueError('作業ルート・アーカイブ保管場所は対象にできません。')
     for part in [raw] + list(raw.parents):
-        if part == ROOT.parent:
+        if part == root().parent:
             break
         if part.exists() and part.lstat().st_file_attributes & 0x400:
             raise ValueError('リンク・ジャンクションを含むパスは対象にできません。')
@@ -202,7 +206,7 @@ class Archives:
             raise ValueError('元フォルダがありません。台帳・アーカイブ履歴を確認してください。')
         if overlaps(path, Path(__file__).parent) or overlaps(path, self.ledger.directory):
             raise ValueError('稼働中の采来 — サイクル —・台帳DBを含むフォルダは対象にできません。')
-        if (path / '.git').is_file() or any((p / '.git').exists() for p in path.parents if p != ROOT and p.is_relative_to(ROOT)):
+        if (path / '.git').is_file() or any((p / '.git').exists() for p in path.parents if p != root() and p.is_relative_to(root())):
             raise ValueError('親Gitプロジェクトの一部分・外部Git作業ツリーは対象にできません。')
         others = self.ledger.snapshot()['projects']
         if any(p['id'] != project['id'] and Path(p['path']).is_dir() and Path(p['path']).resolve().is_relative_to(path) for p in others):
@@ -217,9 +221,9 @@ class Archives:
                     raise ValueError('対象プロジェクトの作業が実行中です。')
         if any(r['state'] in LIVE for r in self.records()):
             raise ValueError('別のアーカイブを実行中です。完了後に操作してください。')
-        if ARCHIVE_ROOT.exists():
-            inside(ARCHIVE_ROOT)
-            if ARCHIVE_ROOT.lstat().st_file_attributes & 0x400:
+        if archive_root().exists():
+            inside(archive_root())
+            if archive_root().lstat().st_file_attributes & 0x400:
                 raise ValueError('保管フォルダがリンクになっています。処理できません。')
         return path
 
@@ -236,14 +240,14 @@ class Archives:
         items = inventory(path, check)
         total = sum(f['size'] + sum(s['size'] for s in f['streams']) for f in items['files'].values())
         github = github_plan(path, body.get('github_repositories', []))
-        free = shutil.disk_usage(ROOT).free
+        free = shutil.disk_usage(root()).free
         required = total + (len(items['files']) + len(items['directories']) + sum(len(f['streams']) for f in items['files'].values())) * 4096 + 100 * 1024**2
         if free < required:
             raise ValueError('圧縮用の空き容量が不足しています。元フォルダは削除しません。')
         token, object_id = secrets.token_urlsafe(32), secrets.token_hex(12)
         preview = {'token': token, 'id': object_id, 'project_id': project['id'], 'source': str(path), 'operation': operation,
             'github_plan': github, 'stream_count': sum(len(f['streams']) for f in items['files'].values()),
-            'archive': str(ARCHIVE_ROOT / object_id / 'project.zip'), 'quarantine': str(path.parent / ('_project_archive_pending_' + object_id)),
+            'archive': str(archive_root() / object_id / 'project.zip'), 'quarantine': str(path.parent / ('_project_archive_pending_' + object_id)),
             'files': len(items['files']), 'bytes': total, 'directories': len(items['directories']),
             'fingerprint': signature(items), 'expires': time.time() + 900, 'free_bytes': free}
         with self.engine.store.lock:

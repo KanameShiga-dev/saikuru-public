@@ -21,7 +21,6 @@ from types import ModuleType
 from urllib.parse import urlsplit
 
 
-APPROVED_BASE = Path(r'C:\AI_WorkSpace\Saikuru\Work\Sessions\saikuru-no007-g123-test-20261017')
 SOURCE_NAMES = ('safe_server.py', 'safe_start_runtime.py', 'web/safe-start.html')
 SAFE_GET = frozenset(('/health', '/', '/diagnostics', '/api/safe-start/status',
                       '/api/safe-start/jobs', '/api/safe-start/approvals'))
@@ -91,6 +90,8 @@ def _unique_object(pairs):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='Read-only safe snapshot diagnostics',
                                      allow_abbrev=False)
+    parser.add_argument('--approved-base', required=True,
+                        help='Absolute folder approved for the manifest and diagnostics')
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--manifest-sha256', required=True)
     parser.add_argument('--evidence-dir', required=True)
@@ -98,10 +99,12 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if not re.fullmatch('[0-9a-f]{64}', args.manifest_sha256):
         parser.error('manifest SHA-256 must be 64 lowercase hexadecimal characters')
+    if not Path(args.approved_base).is_absolute():
+        parser.error('approved base must be an absolute path')
     return args
 
 
-def preflight(args, source_root, approved_base=APPROVED_BASE):
+def preflight(args, source_root, approved_base):
     """Only fixed manifest/source reads occur before the guard is installed."""
     base = _plain_path(approved_base, directory=True)
     if not Path(args.manifest).is_absolute() or not Path(args.manifest).is_relative_to(base):
@@ -444,12 +447,13 @@ def main(argv=None):
     evidence = guard = None
     try:
         source_root = Path(__file__).resolve().parent
-        prepared = preflight(args, source_root)
+        approved_base = Path(args.approved_base)
+        prepared = preflight(args, source_root, approved_base)
         guard = BootstrapGuard(prepared)
         guard.install()
         module = load_verified_runtime(prepared)
         manifest = module.SafeManifest(prepared['raw'], prepared['manifest_path'],
-                                       args.manifest_sha256, source_root)
+                                       args.manifest_sha256, source_root, approved_base)
         template = prepared['code']['web/safe-start.html'].decode('utf-8')
         if template.count('{{CONTENT}}') != 1:
             raise BootstrapError('template_invalid')

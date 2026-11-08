@@ -7,7 +7,7 @@ CODE = 'import shutil, os\n\ndef tearDown(self):\n    shutil.rmtree(self.dir, ig
 
 
 def written(header, delimiter='EOF'):
-    return 'cd C:/AI_WorkSpace/Projects/Learning/fictional-memo && mkdir -p tests\n' + header + '\n' + CODE + delimiter + '\necho written'
+    return 'cd C:/Work/Projects/Learning/fictional-memo && mkdir -p tests\n' + header + '\n' + CODE + delimiter + '\necho written'
 
 
 class WrittenBodyTests(unittest.TestCase):

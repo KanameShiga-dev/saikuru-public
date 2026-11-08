@@ -11,7 +11,8 @@ import time
 import tomllib
 import xml.etree.ElementTree as ET
 
-from team_ledger import ROOT, inside
+from team_ledger import inside
+from team_workspace import root as workspace_root
 
 SKIP_DIRS = {'.git', '.venv', 'venv', 'node_modules', 'library', 'temp', 'obj', 'bin',
              'build', 'builds', 'dist', 'out', 'coverage', '.next', '.gradle', 'target',
@@ -215,9 +216,9 @@ def create_start_scope(project, content):
 def _project_path(path):
     raw = Path(path)
     lexical = Path(os.path.abspath(raw))
-    root = ROOT.resolve()
+    root = workspace_root()
     if not lexical.is_relative_to(root):
-        raise ValueError('プロジェクトは C:\\AI_WorkSpace 以下に限ります。')
+        raise ValueError('プロジェクトは作業フォルダー（' + str(root) + '）の中に限ります。')
     current = lexical
     while current != root:
         if current.exists() and _is_reparse(current):
@@ -352,7 +353,7 @@ def _survey(path, observation):
         if item and item not in tech:
             tech.append(_clean(item, 80))
     packages = sorted(x for x in dependencies if x and not SECRET_VALUE.search(x))[:35]
-    parent_git = any((parent / '.git').exists() for parent in path.parents if parent != ROOT and parent.is_relative_to(ROOT))
+    parent_git = any((parent / '.git').exists() for parent in path.parents if parent != workspace_root() and parent.is_relative_to(workspace_root()))
     candidate_set = set(relocation_candidates)
     suggested_moves = []
     protected_docs = {'readme.md', 'agents.md', 'goal.md', 'scope.md', 'architecture.md',
@@ -564,8 +565,7 @@ class Harnesses:
         path = _project_path(project['path'])
         survey = _survey(path, project.get('observation') or {})
         from team_instruction_health import inspect_instructions
-        from team_ledger import ROOT
-        survey['instruction_health'] = inspect_instructions(path, ROOT, deep=True)
+        survey['instruction_health'] = inspect_instructions(path, workspace_root(), deep=True)
         ledger_fingerprint = hashlib.sha256(json.dumps(project, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
         generated = _make_files(project, survey)
         from team_harness_fill import collect, supplement, FILES

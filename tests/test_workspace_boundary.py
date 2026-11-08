@@ -19,8 +19,10 @@ class WorkspaceTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name); self.home = self.base/'Saikuru'; self.source = self.home/'Source'
         self.source.mkdir(parents=True); (self.base/'scripts').mkdir()
-        from team_ledger import ROOT
-        tools_root = Path(os.environ.get('SAIKURU_WORKSPACE_TOOLS_ROOT', str(ROOT)))
+        # Source and Worktrees sit at <workspace>/Saikuru/<Source|Worktrees/name>; the formal tools live beside them.
+        here = Path(__file__).resolve().parent.parent
+        default_tools = here.parents[2] if here.parent.name == 'Worktrees' else here.parents[1]
+        tools_root = Path(os.environ.get('SAIKURU_WORKSPACE_TOOLS_ROOT', str(default_tools)))
         real_home = tools_root/'Saikuru'
         if not (real_home/'new_worktree.py').is_file() or not (tools_root/'scripts/new_workspace_worktree.py').is_file():
             self.skipTest('Formal workspace tools not installed; set SAIKURU_WORKSPACE_TOOLS_ROOT for a portable fixture run')
