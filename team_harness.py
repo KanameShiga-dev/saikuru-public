@@ -59,6 +59,8 @@ def execution_workspace(project, approved_paths):
     from team_checkpoint import _git, _status, _path, scope_paths
     paths = None if approved_paths is None else scope_paths(approved_paths)
     execution = Path(os.path.abspath(project))
+    if (execution/'.git').is_dir() and _git(execution, ['worktree','list','--porcelain']).count(b'worktree ') == 1:
+        return _own_repository(execution, paths)  # A repository managed through Worktrees keeps the rule below.
     if execution.parent.name == 'Worktrees':
         layout = 'saikuru_dedicated'
         home = execution.parent.parent
@@ -123,13 +125,7 @@ def execution_workspace(project, approved_paths):
         raise ValueError('workspace_branch_or_head_invalid')
     if paths is None:
         return None
-    for name in paths: _path(execution, name)
-    if any(row.startswith(b'160000 ') for row in _git(execution, ['ls-files','--stage','-z']).split(b'\0')):
-        raise ValueError('workspace_submodule_unsupported')
-    try:
-        dirty = _status(_git(execution, ['status','--porcelain=v1','-z','--untracked-files=all','--ignore-submodules=all']), set(paths))
-    except ValueError:
-        raise ValueError('workspace_dirty_outside_approved_scope') from None
+    dirty = _dirty_within_scope(execution, paths)
     return {'schema_version':1, 'status':'ready', 'workspace_layout':layout, 'execution_root':str(execution),
         'integration_root':str(source), 'execution_branch':branch, 'execution_head':head,
         'integration_branch':integration_branch, 'integration_head':integration_head,
@@ -137,6 +133,57 @@ def execution_workspace(project, approved_paths):
         'creation_provenance':'not_attested_by_git_registration', 'approved_paths':paths,
         'dirty_changes':dirty, 'integration_dirty':'not_inspected',
         'permission_effect':'none', 'automatic_git_mutation':False}
+
+
+def _dirty_within_scope(execution, paths):
+    from team_checkpoint import _git, _status, _path
+    for name in paths: _path(execution, name)
+    if any(row.startswith(b'160000 ') for row in _git(execution, ['ls-files','--stage','-z']).split(b'\0')):
+        raise ValueError('workspace_submodule_unsupported')
+    try:
+        return _status(_git(execution, ['status','--porcelain=v1','-z','--untracked-files=all','--ignore-submodules=all']), set(paths))
+    except ValueError:
+        raise ValueError('workspace_dirty_outside_approved_scope') from None
+
+
+def _own_repository(execution, paths):
+    """A request's folder that is itself a Git repository: one person's one request works directly in it."""
+    from team_checkpoint import _git
+    if _is_reparse(execution) or _is_reparse(execution/'.git'):
+        raise ValueError('workspace_link_not_allowed')
+    execution = execution.resolve()
+    def scalar(args): return _git(execution, args).decode('utf-8').strip()
+    if Path(scalar(['rev-parse','--show-toplevel'])).resolve() != execution:
+        raise ValueError('workspace_repository_mismatch')
+    branch = scalar(['symbolic-ref','--quiet','HEAD'])
+    head = scalar(['rev-parse','--verify','HEAD'])
+    if paths is None:
+        return None
+    dirty = _dirty_within_scope(execution, paths)
+    return {'schema_version':1, 'status':'ready', 'workspace_layout':'project_repository', 'execution_root':str(execution),
+        'integration_root':str(execution), 'execution_branch':branch, 'execution_head':head,
+        'integration_branch':branch, 'integration_head':head, 'approved_paths':paths,
+        'dirty_changes':dirty, 'integration_dirty':'not_inspected',
+        'permission_effect':'none', 'automatic_git_mutation':False}
+
+
+def new_project_folder(project):
+    """An empty folder, which the start preparation turns into a Git repository for a WBS request."""
+    path = Path(os.path.abspath(project))
+    return path.is_dir() and not _is_reparse(path) and not any(path.iterdir())
+
+
+def initialize_project_repository(project):
+    """Make the prepared new folder a Git repository, so a WBS request needs no preparation by the person."""
+    from team_checkpoint import _git
+    from team_test_environment import prepare_project_test_temp
+    root = Path(os.path.abspath(project))
+    with (root/'.gitignore').open('x', encoding='utf-8', newline='\n') as stream:
+        stream.write('.local/\n.env\n')
+    _git(root, ['init','-q','-b','main'])
+    _git(root, ['add','--','SCOPE.md','.gitignore'])
+    _git(root, ['-c','user.name=Saikuru','-c','user.email=saikuru@localhost','commit','-q','-m','Start the project'])
+    prepare_project_test_temp(root)
 
 
 def workspace_projection(project, approved_paths):

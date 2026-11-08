@@ -205,6 +205,35 @@ class WbsEntryTests(WbsFixture):
         self.assertEqual(self.jobs(), [])
         self.assertEqual(self.register(workflow='wbs'), 200)  # the formal Worktree is still accepted
 
+    def test_a_new_empty_folder_needs_no_preparation_and_is_made_ready_by_the_start_step(self):
+        self.enable()
+        engine = self.server.app.engine
+        new = self.root.parent.parent.parent / 'new-project'
+        new.mkdir()
+        engine.config['approved_roots'].append(str(new))
+        self.assertEqual(engine.wbs_entry_problems(str(new)), [])
+        job = engine.create_job('架空のWBS依頼', '合成の依頼を登録する。', str(new), False, workflow='wbs')
+        start = next(a for a in self.store.for_job('approval', job['id']) if a['kind'] == 'ai_start')
+        engine.prepare_plan_start(start['id'], start['payload']['fingerprint'], True)
+        self.assertTrue((new / '.git').is_dir())
+        self.assertTrue((new / '.local' / 'test-tmp').is_dir())
+        from team_harness import execution_workspace
+        boundary = execution_workspace(str(new), ['memo.py'])
+        self.assertEqual((boundary['status'], boundary['workspace_layout'], boundary['dirty_changes']),
+                         ('ready', 'project_repository', []))
+
+    def test_with_the_p0_switch_off_only_a_wbs_request_carries_the_contract(self):
+        # The production settings: the switch stays off for ordinary requests.
+        self.enable()
+        self.server.app.engine.config['p0_contract_enabled'] = False
+        self.assertEqual(self.register(), 200)
+        ordinary = self.jobs()[0]
+        self.assertNotIn('p0_contract_version', ordinary)
+        self.server.app.engine.cancel_job(ordinary['id'])
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        selected = next(j for j in self.jobs() if j['id'] != ordinary['id'])
+        self.assertEqual(selected['p0_contract_version'], 1)
+
     def test_wbs_without_the_builder_test_temp_folder_is_rejected_with_the_reason(self):
         # M09 live run: the plan was made, then the Claude builder stopped before its call for want of .local/test-tmp.
         self.enable()
@@ -244,12 +273,9 @@ class WbsEntryTests(WbsFixture):
                 self.assertEqual(self.register(workflow=value), 400)
         self.assertEqual(self.jobs(), [])
 
-    def test_v10_documentation_p0_off_and_light_route_are_not_wbs_targets(self):
+    def test_v10_documentation_and_light_route_are_not_wbs_targets(self):
         self.enable()
         self.assertEqual(self.register(workflow='wbs', kind='documentation', document_format='md'), 400)
-        self.server.app.engine.config['p0_contract_enabled'] = False
-        self.assertEqual(self.register(workflow='wbs'), 400)
-        self.server.app.engine.config['p0_contract_enabled'] = True
         self.assertEqual(self.register(workflow='wbs', route='light_eval'), 400)
         self.assertEqual(self.jobs(), [])
 

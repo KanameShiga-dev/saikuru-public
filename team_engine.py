@@ -1450,6 +1450,30 @@ class Engine:
 
 
 
+    def wbs_entry_problems(self, project, role_profiles=None):
+        """What keeps this folder from a WBS request, in the words the intake screen shows before planning."""
+        if self.config.get('workflow_contract_enabled', False) is not True:
+            return [{'code': 'wbs_disabled', 'message': '「機能ごとに分けて進める」は、設定で有効になっていないため選べません。',
+                     'fix': '進め方を「従来どおり」に変えてください。'}]
+        from team_harness import new_project_folder, workspace_registration_problem
+        if new_project_folder(project):
+            return []  # The start preparation makes it a Git repository with its test temp folder.
+        problem = workspace_registration_problem(project)
+        if problem:
+            return [{'code': 'wbs_folder_not_ready',
+                     'message': 'このフォルダーでは「機能ごとに分けて進める」を使えません。すでにファイルがあり、Git で管理されていません。',
+                     'fix': f'空のフォルダーを選ぶか、進め方を「従来どおり」に変えてください（確認コード：{problem}）。'}]
+        # Only the Claude builder uses it (team_adapters._set_scoped_test_temp); the builder is resolved as
+        # new_task does, from this request's assignees or the team settings.
+        builder = (self._role_profiles(role_profiles).get('builder')
+                   or self.config['profiles'][self.config['roles']['builder']])
+        from team_adapters import scoped_test_temp
+        if builder['adapter'] == 'claude' and scoped_test_temp(project) is None:
+            return [{'code': 'wbs_test_temp_required',
+                     'message': 'このフォルダーでは「機能ごとに分けて進める」を使えません。テストの一時ファイルを置く場所がありません。',
+                     'fix': 'フォルダーの中に .local/test-tmp を作り（.local/ は Git の対象外にします）、もう一度登録してください。'}]
+        return []
+
     def create_job(self, title, goal, project, auto_execute, planner_profile=None, document_source=None, attachment_ids=None, document_format=None,
                    skill_mode='auto', skill_ids=None, evaluation_mode=None, evaluation_confirmed=False, role_profiles=None,
                    token_reduction=None, comparison_id=None, route='full', light_scope_file=None, light_acceptance=None,
@@ -1461,23 +1485,11 @@ class Engine:
             raise ValueError('復旧調査の範囲が不正です。')
         if workflow not in ('standard', 'wbs'):
             raise ValueError('進め方の指定が不正です。')
-        if workflow == 'wbs' and self.config.get('workflow_contract_enabled', False) is not True:
-            raise ValueError('機能ごとに分けて進める方式（WBS）は、設定で有効になっていないため選べません。')
         if workflow == 'wbs':
             # Checked before any record or provider call; the plan would otherwise be made and then stall.
-            from team_harness import workspace_registration_problem
-            problem = workspace_registration_problem(project)
-            if problem:
-                raise ValueError('機能ごとに分けて進める方式（WBS）は、正式な Worktree のフォルダーでだけ選べます'
-                                 f'（{problem}）。new_worktree.py などの正式な入口で作った Worktree を選んでください。')
-            # Only the Claude builder uses it (team_adapters._set_scoped_test_temp); the builder is resolved as
-            # new_task does, from this request's assignees or the team settings.
-            builder = (self._role_profiles(role_profiles).get('builder')
-                       or self.config['profiles'][self.config['roles']['builder']])
-            from team_adapters import scoped_test_temp
-            if builder['adapter'] == 'claude' and scoped_test_temp(project) is None:
-                raise ValueError('機能ごとに分けて進める方式（WBS）では、プロジェクトに試験の一時領域 .local/test-tmp が必要です'
-                                 '（リンクでない通常のフォルダー）。.local/ を Git の対象外にしてから作成し、もう一度登録してください。')
+            problems = self.wbs_entry_problems(project, role_profiles)
+            if problems:
+                raise ValueError(' '.join(p['message'] + p['fix'] for p in problems))
         from team_validation_gate import validate_commands
         validation_commands = validate_commands(validation_commands)
         if validation_commands and document_source:
@@ -1561,7 +1573,9 @@ class Engine:
         from team_limited_routing import classify_intake
         intake = classify_intake(title, goal, self.config.get('decision', {}))
         from team_p0_contract import initial as initial_p0_contract
-        p0_development = not document_source and route == 'full' and self.config.get('p0_contract_enabled', True) is not False
+        # WBS runs only on the P0 contract, so choosing it carries the contract whatever the switch says.
+        p0_development = not document_source and route == 'full' and (
+            workflow == 'wbs' or self.config.get('p0_contract_enabled', True) is not False)
 
         with self.store.atomic():
 
@@ -2153,6 +2167,9 @@ class Engine:
                 raise ValueError('開始用ファイルを新規作成できる状態ではありません。既存ファイルは変更しません。')
             from team_harness import create_start_scope
             target = create_start_scope(job['project'], preparation['content'])
+            if job.get('workflow_contract_version') == 1 and not (Path(job['project']) / '.git').exists():
+                from team_harness import initialize_project_repository
+                initialize_project_repository(job['project'])
             self.store.event('g2_scope_prepared', '開始に必要なSCOPE.mdを作成しました。AIは起動していません。',
                              task['id'], job['id'], {'path': str(target)})
             fresh = self._request_g2(job['id'], task['id'], '開始用ファイルを準備しました。内容を確認してAI開始を承認してください。')

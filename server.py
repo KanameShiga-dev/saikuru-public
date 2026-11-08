@@ -518,6 +518,13 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlparse(self.path).query)
                 return self.send(200, self.app.engine.user_recovery_target(
                     (query.get('job_id') or [''])[0], (query.get('task_id') or [None])[0]))
+            if path == '/api/workflow/entry-check':
+                if not self.authorized():
+                    raise PermissionError('画面を再読み込みしてください。')
+                project = (parse_qs(urlparse(self.path).query).get('project') or [''])[0]
+                if canonical(project) not in [canonical(p) for p in self.app.config['approved_roots']]:
+                    raise ValueError('未登録のプロジェクトです。')
+                return self.send(200, {'problems': self.app.engine.wbs_entry_problems(project)})
             if path == '/api/maintenance/state':
                 if not self.maintenance_authorized():
                     raise PermissionError('保守担当の認証が必要です。')

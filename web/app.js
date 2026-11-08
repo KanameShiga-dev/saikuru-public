@@ -2674,7 +2674,7 @@ $('folder-use').addEventListener('click',()=>{
     const result=await api('/api/projects',{path:folderState.path,consent:true});
     const select=$('project-select');
     if(![...select.options].some(o=>o.value===result.path))select.add(new Option(result.path,result.path));
-    select.value=result.path;$('project-notice').textContent='対象フォルダ: '+result.path;
+    select.value=result.path;select.dispatchEvent(new Event('change'));$('project-notice').textContent='対象フォルダ: '+result.path;
     $('folder-dialog').close();select.focus();await refresh();
   });
 });
@@ -2686,6 +2686,22 @@ $('job-kind').addEventListener('change',syncJobKind);
 const routingBox=document.createElement('details');routingBox.id='job-routing-eval';routingBox.hidden=true;
 routingBox.innerHTML='<summary>分離環境で経路を比較する</summary><p class="hint">架空の単一Pythonファイルだけが対象です。通常サービスでは使えません。</p><label>実行経路<select name="route" id="job-route"><option value="full">通常経路</option><option value="light_eval">軽い経路（計画AIのみ省略）</option></select></label><label>変更してよいPythonファイル<input name="light_scope_file" id="job-light-scope" placeholder="例：calculator.py"></label><label>独立した合格条件<textarea name="light_acceptance" id="job-light-acceptance" rows="3" placeholder="例：既存の単体テストをすべて通し、負数の合計も正しく返す"></textarea></label><p class="hint">軽い経路には自動実行、検証モードA、検証用データの確認が必要です。添付・資料作成は使えません。</p>';
 $('job-attachments').before(routingBox);
+// WBS を選んだ時点で、使えるかどうかと直し方を示す。登録時にもサーバーが同じ確認をする。
+const wbsEntryBox=el('div');wbsEntryBox.id='job-wbs-check';wbsEntryBox.setAttribute('aria-live','polite');
+$('job-workflow-hint').after(wbsEntryBox);
+let wbsEntrySequence=0;
+async function checkWbsEntry(){
+  const sequence=++wbsEntrySequence,project=$('project-select').value;
+  wbsEntryBox.replaceChildren();
+  if($('job-workflow').value!=='wbs'||$('job-kind').value==='documentation'||!project)return;
+  try{
+    const {problems}=await api('/api/workflow/entry-check?project='+encodeURIComponent(project));
+    if(sequence!==wbsEntrySequence)return;
+    if(!problems.length){wbsEntryBox.append(el('p','このフォルダーでは「機能ごとに分けて進める」を使えます。','hint'));return;}
+    for(const problem of problems)wbsEntryBox.append(el('p',problem.message+' '+problem.fix,'notice'));
+  }catch(error){if(sequence===wbsEntrySequence)wbsEntryBox.append(el('p','使えるかどうかは未確認です。'+error.message,'notice'));}
+}
+for(const id of ['project-select','job-workflow','job-kind'])$(id).addEventListener('change',checkWbsEntry);
 // 2026-10-08 依頼フォームの点検：「計画を開始する」で問題があれば、どの項目に不備があるかと解消方法をボタンの上に示す。
 // ブラウザ標準の必須チェックは、閉じた欄の項目だと何も表示されないことがあるため使わず、ここでまとめて点検する。
 const jobFields={
