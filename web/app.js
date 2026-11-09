@@ -598,7 +598,7 @@ function wpState(wp,job){
   }
   if(ex==='succeeded'){
     if(rv==='pending'&&featureApproval(wp))return {key:'review',label:'あなたの確認待ち',owner:'あなた'};
-    if(rv==='approved'&&item.feature_approved)return {key:'approved',label:'確認済み',owner:'なし'};
+    if(rv==='approved'&&item.feature_approved)return {key:'approved',label:wp.review_basis==='ai_review'?'AIのレビューに合格':'確認済み',owner:'なし'};
     if(rv==='approved')return {key:'preparing',label:'確認の記録を照合できません（確認済みとは扱いません）',owner:'采来'};
     const label=rv==='invalidated'?'確認の準備中（前回の確認後に関連する内容が変わったため、確認を出し直します）'
       :rv==='changes_requested'?'差し戻し済み（修正後に確認を出し直します）':'確認の準備中';
@@ -741,7 +741,7 @@ function workflowPanel(job){
   const counts=progress.counts||{},uat=progress.uat||{},n=counts.packages||packages.length;
   const tally=el('ul',undefined,'workflow-tally');
   tally.append(el('li',`技術の確認が終わった機能：${counts.technical_complete||0} / ${n}`),
-    el('li',`あなたが確認済みの機能：${counts.feature_approved||0} / ${n}`),
+    el('li',`次へ進めた機能（AIのレビューの合格を含む）：${counts.feature_approved||0} / ${n}`),
     el('li',`受入条件の確認：${uat.confirmed||0} / ${uat.required||0}`),
     el('li',`依頼全体の正式受領：${progress.formal_receipt?'済み':'まだ'}`));
   panel.append(tally,el('p','作業が終わった数は、受入の確認が済んだ数ではありません。','hint'));
@@ -755,6 +755,8 @@ function workflowPanel(job){
     head.append(el('small','　'+(wp.wbs_id||''),'tech-only'));item.append(head);
     item.append(el('p',`次に操作する人：${st.owner}`,'hint'));
     if(wp.done_when?.length)item.append(el('p','完了の条件：'+wp.done_when.join('／'),'hint'));
+    if(wp.human_check)item.append(el('p','この機能は、作業の後であなたの確認で止まります（計画で印を付けました）。','hint'));
+    if(wp.auto_pass_issue)item.append(el('p','AIのレビューの結果だけでは次へ進められなかったため、あなたの確認に切り替えました。','notice'));
     item.append(wpTaskRows(wp,packageIndex+1));
     if(st.key==='approved'&&wp.feature_target_digest)item.append(el('p','確認した版 '+shortVersion(wp.feature_target_digest),'hint tech-only'));
     const actions=el('div',undefined,'actions');
@@ -775,7 +777,7 @@ function workflowPanel(job){
 }
 // 影響を受けない機能ごとに「以前の確認を再利用する」か「再実行する」かを選ぶ。選ばない機能は停止したままになる。
 // 再利用できるのは、成果物・入力・確認の記録が現在も一致する機能だけ。選択は承認の送信と一緒にだけ送られる。
-const transferChoices=new Map();
+const transferChoices=new Map(),featureChecks=new Map();
 function transferChoiceView(a,rev,name){
   const group=el('div',undefined,'progress-group transfer-choices'),picked=transferChoices.get(a.id)||{};transferChoices.set(a.id,picked);
   const offered=new Set((rev.transfer_candidates||[]).map(c=>c.wbs_id)),stopped=rev.transfer_blocked||[];
@@ -817,6 +819,8 @@ function planRevisionView(a){
   const name=id=>titles[id]||id;
   box.append(el('h4',`機能の分け方（${(plan.work_packages||[]).length}件）`));
   box.append(el('p','AIが成果物を D1・D2…、受入条件を A1・A2… の番号で指定した場合も、下では番号を成果物・受入条件の本文に置き換えて表示しています。存在しない番号や言い換えは、AIへの差し戻しになり、ここには表示されません。','hint'));
+  box.append(el('p','AIのレビューに合格した機能は、そのまま次の機能へ進みます。途中で自分でも確かめたい機能にだけ印を付けてください。最後の受け取りは、印に関係なくあなたが行います。','hint'));
+  const marked=featureChecks.get(a.id)||new Set();featureChecks.set(a.id,marked);
   const list=el('ol',undefined,'wp-list');
   for(const w of plan.work_packages||[]){
     const item=el('li',undefined,'wp-item'),head=el('p',undefined,'wp-head');
@@ -827,6 +831,9 @@ function planRevisionView(a){
     const owned=ownedPathsLine(w);if(owned)item.append(owned);
     const inputs=w.input_artifacts||[];
     if(inputs.length){const g=el('ul');for(const r of inputs)g.append(versionLine(r.path,r.sha256));item.append(el('p','使う既存の成果物：','hint'),g);}
+    const mark=el('label',undefined,'check'),check=el('input');check.type='checkbox';check.checked=marked.has(w.wbs_id);
+    check.onchange=()=>{check.checked?marked.add(w.wbs_id):marked.delete(w.wbs_id);};
+    mark.append(check,document.createTextNode('この機能の作業の後で、自分でも確認する'));item.append(mark);
     list.append(item);
   }
   box.append(list);
@@ -2227,10 +2234,11 @@ function renderDetail(task,version) {
         },'primary'));
       }else actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',async()=>{
         const chosen=transferChoices.get(a.id)||{};
-        await api('/api/decide',{id:a.id,allow:true,note:input.value,...confirmation,...(Object.keys(chosen).length?{transfer_decisions:chosen}:{})});
-        transferChoices.delete(a.id);
+        const marked=[...(featureChecks.get(a.id)||[])];
+        await api('/api/decide',{id:a.id,allow:true,note:input.value,...confirmation,...(Object.keys(chosen).length?{transfer_decisions:chosen}:{}),...(marked.length?{feature_checks:marked}:{})});
+        transferChoices.delete(a.id);featureChecks.delete(a.id);
         // W05.05.UI（F4）：承認の結果を文で伝える。開始・完了を約束しない。
-        if(a.kind==='plan')notice('計画を承認しました。承認した計画で作業を進めます。'+(a.workflow_revision_digest?'機能ごとの確認は、各機能の作業の後に行います。':''));
+        if(a.kind==='plan')notice('計画を承認しました。承認した計画で作業を進めます。'+(a.workflow_revision_digest?'印を付けた機能は、作業の後であなたの確認を待ちます。':''));
         else if(a.kind==='ai_start')notice('AIによる計画作成の開始を承認しました（1回だけ）。計画ができたら、改めて確認をお願いします。');
       },'primary'));
     }

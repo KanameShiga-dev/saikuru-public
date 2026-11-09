@@ -2424,7 +2424,7 @@ class Engine:
                          task['id'], job['id'], copy.deepcopy(change))
 
     def decide(self, approval_id, allow, note, answers=None, attachment_ids=None, review_checklist=None,
-               workflow_confirmation=None, transfer_decisions=None, command_change=None):
+               workflow_confirmation=None, transfer_decisions=None, command_change=None, feature_checks=None):
 
         with self.store.lock:
 
@@ -2584,6 +2584,11 @@ class Engine:
                             self.store.update(approval_id, workflow_transfer_decisions=choices)
                             self._publish_workflow_plan(approval, task, job, workflow_confirmation)
                         self._expand_plan(task, task['result'])
+                        if feature_checks:
+                            revision = self.store.get(job['id'], 'job')['plan_revision']
+                            for wp in self.store.for_job('work_package', job['id']):
+                                if wp['plan_revision'] == revision and wp['wbs_id'] in feature_checks:
+                                    self.store.update(wp['id'], human_check=True)
                         if choices:
                             self._apply_evidence_transfers(approval_id, choices)
 
@@ -3231,9 +3236,51 @@ class Engine:
                     return
             self._queue_package_reviews(job,wp,task)
         else:
-            self.store.update(wp['id'],execution_state='succeeded',review_status='not_requested')
-            self.store.event('feature_review_ready','技術確認が終了しました。機能の対象版を作成し、本人の確認を受けてください。',
+            self.store.update(wp['id'],execution_state='succeeded',review_status='not_requested',auto_pass_issue=None,review_basis=None)
+            self.store.event('feature_review_ready','技術確認が終了しました。'
+                             + ('機能の対象版を作成し、本人の確認を受けてください。' if wp.get('human_check') else '次の機能へ進める記録を作ります。'),
                              task['id'],job['id'],{'work_package_id':wp['id']})
+
+    def _pass_reviewed_packages(self):
+        """D2: a feature the person did not mark moves on once its AI reviews pass. Anything that cannot be confirmed goes to the person."""
+        with self.store.lock:
+            candidates = []
+            for wp in self.store.all('work_package'):
+                if (wp.get('execution_state') != 'succeeded' or wp.get('review_status') != 'not_requested'
+                        or wp.get('human_check') or wp.get('auto_pass_issue')): continue
+                job = self.store.get(wp['job_id'],'job')
+                tasks = self.store.for_job('task',job['id'])
+                if (job['status'] == 'running' and wp['plan_revision'] == job['plan_revision']
+                        and not any(a['status'] == 'pending' for a in self.store.for_job('approval',job['id']))
+                        and not any(t['id'] in self.active or t['status'] in ('running','awaiting_approval')
+                                    or (t.get('current_attempt') or {}).get('status') == 'running' for t in tasks)):
+                    candidates.append((job['id'],wp['id']))
+        for job_id, wp_id in candidates:
+            try:
+                self._pass_reviewed_package(job_id,wp_id)
+            except (ValueError,KeyError,TypeError,OSError,ProviderError) as error:
+                code = error.code if isinstance(error,ProviderError) else str(error)
+                self.store.update(wp_id,auto_pass_issue=code[:200])
+                self.store.event('feature_auto_pass_stopped','AIのレビューの結果だけでは次の機能へ進められないため、本人の確認に切り替えました。',
+                                 job_id=job_id,details={'work_package_id':wp_id,'code':code[:200]})
+
+    def _pass_reviewed_package(self, job_id, wp_id):
+        from team_wbs import feature_basis, digest, AI_REVIEW_ROLE, AI_REVIEW_ACTOR
+        basis, target = self._feature_observation(job_id,wp_id)
+        target_digest = digest(target)
+        with self.store.atomic():
+            fresh = feature_basis(self.store,job_id,wp_id)
+            if fresh['signature'] != basis['signature']: raise ValueError('workflow_feature_observation_changed')
+            approval = self.new_approval(fresh['members'][-1],'feature_review',{'feature_target':target,'feature_target_digest':target_digest,
+                'summary':'AIのレビューに合格した対象版の記録です。本人の確認ではありません。'})
+            self.store.update(approval['id'],category='ACCEPTANCE',intended_role=AI_REVIEW_ROLE,status='approved',decided_at=now(),
+                review_acknowledgement={'action':'feature_review_confirmation','target_digest':target_digest,'actor':AI_REVIEW_ACTOR})
+            self.store.update(wp_id,review_status='approved',review_basis='ai_review',
+                              feature_review_approval_id=approval['id'],feature_target_digest=target_digest)
+            self.store.event('feature_review_decided','AIのレビューの合格を対象版に記録し、次へ進めました。',approval['task_id'],job_id,
+                {'approval_id':approval['id'],'work_package_id':wp_id,'target_digest':target_digest,'decision':'approved','actor':AI_REVIEW_ACTOR,
+                 'requirement_revision':fresh['job']['requirement_revision'],'plan_revision':fresh['job']['plan_revision']})
+            self._queue_job_reviews_when_features_done(fresh,approval['task_id'])
 
     def _unbuilt_instruction(self, job, plan, wp):
         """Approved build instructions of the feature's planned builder tasks that have not succeeded yet, else None.
@@ -3394,7 +3441,7 @@ class Engine:
             return {'approval_id':approval['id'],'target_digest':digest(target),'permission_effect':'none'}
 
     def decide_feature_review(self, approval_id, allow, confirmation, note='', *, actor='authenticated_local_app_session'):
-        from team_wbs import feature_basis, digest, feature_review_receipt, approved_source
+        from team_wbs import feature_basis, digest
         if actor != 'authenticated_local_app_session' or getattr(self.store._worker,'task',None) is not None:
             raise ValueError('workflow_user_action_required')
         if type(allow) is not bool: raise ValueError('workflow_feature_confirmation_required')
@@ -3432,15 +3479,20 @@ class Engine:
                  'actor':actor,'requirement_revision':fresh['job']['requirement_revision'],'plan_revision':fresh['job']['plan_revision']})
             if not allow:
                 return self._repair_package(fresh['job'],self.store.get(wp_id),self.store.get(approval['task_id']),note)
-            rows = [w for w in self.store.for_job('work_package',job_id) if w['plan_revision'] == fresh['job']['plan_revision']]
-            if all(w['review_status'] == 'approved' for w in rows):
-                specs = approved_source(fresh['job'],fresh['plan'],fresh['requirements'])
-                for wp in rows:
-                    feature_review_receipt(self.store,fresh['job'],fresh['plan'],fresh['requirements'],wp,{s['wbs_id']:s for s in specs},rows,{})
-                if not any(t.get('workflow_job_task') and t.get('plan_revision') == fresh['job']['plan_revision']
-                           and t['status'] == 'queued' for t in self.store.for_job('task',job_id)):
-                    self._queue_reviews(fresh['job'],approval['task_id'])
+            self._queue_job_reviews_when_features_done(fresh,approval['task_id'])
             return {'status':'approved','work_package_id':wp_id,'formal_receipt':False}
+
+    def _queue_job_reviews_when_features_done(self, fresh, after):
+        from team_wbs import feature_review_receipt, approved_source
+        job_id = fresh['job']['id']
+        rows = [w for w in self.store.for_job('work_package',job_id) if w['plan_revision'] == fresh['job']['plan_revision']]
+        if all(w['review_status'] == 'approved' for w in rows):
+            specs = approved_source(fresh['job'],fresh['plan'],fresh['requirements'])
+            for wp in rows:
+                feature_review_receipt(self.store,fresh['job'],fresh['plan'],fresh['requirements'],wp,{s['wbs_id']:s for s in specs},rows,{})
+            if not any(t.get('workflow_job_task') and t.get('plan_revision') == fresh['job']['plan_revision']
+                       and t['status'] == 'queued' for t in self.store.for_job('task',job_id)):
+                self._queue_reviews(fresh['job'],after)
 
     def request_package_rework(self, job_id, wp_id, confirmation, note, *, expected_wp_revision,
                                actor='authenticated_local_app_session'):
@@ -5700,7 +5752,12 @@ class Engine:
 
                     findings = [{'reviewer': t.get('agent_name', 'reviewer'), 'summary': t['result']['summary']}
                                 for t in reviews if t['result'].get('status') == 'needs_changes']
-                    pending_items, reference_items = self._pending_acceptance_items(job['id'], reviews)
+                    # What the reviews of an AI-passed feature could not verify was shown to nobody yet: it goes to the final acceptance.
+                    from team_wbs import package_members
+                    feature_reviews = [t for w in self.store.for_job('work_package', job['id'])
+                                       if w.get('review_basis') == 'ai_review' and w.get('plan_revision') == job.get('plan_revision')
+                                       for t in package_members(self.store, job['id'], w) if t['role'] == 'reviewer']
+                    pending_items, reference_items = self._pending_acceptance_items(job['id'], reviews + feature_reviews)
                     if job.get('p0_contract_version') == 1:
                         criteria = (job.get('goal_contract') or {}).get('acceptance_criteria') or []
                         pending_items.append({'title': '完成物の起動と操作',
@@ -6299,6 +6356,7 @@ class Engine:
         # preparation is only a short-lived candidate, never a dispatch token.
         session_preflight = {}
         workflow_preflight = {}
+        self._pass_reviewed_packages()
         workflow_jobs, workflow_slots = self._workflow_preflight_candidates()
         for job_id in workflow_jobs:
             if workflow_slots <= 0: break

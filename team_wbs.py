@@ -70,6 +70,9 @@ WAIT_ADVICE = {
     'dependency_feature_review_invalid': ('consistency', 'maintainer'),
 }
 # 人の確認で解消する待機。確認が出ていればその相手（user / authorized_person）、まだ出ていなければ既定の担当。
+# D2: a feature nobody marked for a personal check moves on with this record instead of the person's confirmation.
+AI_REVIEW_ROLE = 'ai_review'
+AI_REVIEW_ACTOR = 'saikuru_ai_review'
 REVIEW_WAITS = {'pending_decision': 'user', 'dependency_feature_review_required': 'system'}
 
 
@@ -604,8 +607,11 @@ def feature_review_receipt(store, job, plan, requirements, wp, specs, records, c
         raise ValueError('dependency_feature_review_required')
     review = store.get(wp.get('feature_review_approval_id'), 'approval')
     payload = review.get('payload') or {}; target = payload.get('feature_target')
+    # A feature the person marked for their own check never counts on an AI review record.
+    by_ai = review.get('intended_role') == AI_REVIEW_ROLE and not wp.get('human_check')
+    actor = AI_REVIEW_ACTOR if by_ai else 'authenticated_local_app_session'
     if (review.get('job_id') != job['id'] or review.get('kind') != 'feature_review'
-            or review.get('status') != 'approved' or review.get('intended_role') != 'end_user'
+            or review.get('status') != 'approved' or review.get('intended_role') != (AI_REVIEW_ROLE if by_ai else 'end_user')
             or not isinstance(target, dict) or review.get('digest') != hashlib.sha256(
                 json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()):
         raise ValueError('dependency_feature_review_invalid')
@@ -622,7 +628,7 @@ def feature_review_receipt(store, job, plan, requirements, wp, specs, records, c
             or target.get('blocking_refs') != []):
         raise ValueError('dependency_feature_target_changed')
     ack = review.get('review_acknowledgement') or {}
-    if (ack.get('action') != 'feature_review_confirmation' or ack.get('actor') != 'authenticated_local_app_session'
+    if (ack.get('action') != 'feature_review_confirmation' or ack.get('actor') != actor
             or ack.get('target_digest') != target_hash):
         raise ValueError('dependency_feature_confirmation_required')
     if decision_lookup is None:
@@ -632,7 +638,7 @@ def feature_review_receipt(store, job, plan, requirements, wp, specs, records, c
     else:
         decision = decision_lookup(review['id']) or {}
     expected = {'approval_id':review['id'], 'work_package_id':wp['id'], 'target_digest':target_hash,
-        'decision':'approved', 'actor':'authenticated_local_app_session',
+        'decision':'approved', 'actor':actor,
         'requirement_revision':job['requirement_revision'], 'plan_revision':job['plan_revision']}
     if any(decision.get(key) != value for key,value in expected.items()):
         raise ValueError('dependency_feature_decision_required')

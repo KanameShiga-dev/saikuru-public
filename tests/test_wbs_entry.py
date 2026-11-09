@@ -541,7 +541,7 @@ class WbsNormalPathTests(WbsFixture):
         self.decide(self.approval('ai_start'), True, '架空の開始承認')
         self.drain()
         plan = self.approval('plan')
-        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'], feature_checks=['W1.01', 'W1.02'])
         self.drain()
         first = self.packages()['W1.01']
         self.assertEqual((first['execution_state'], first['review_status']), ('succeeded', 'not_requested'), self.dump())
@@ -559,6 +559,39 @@ class WbsNormalPathTests(WbsFixture):
                              'decision': 'approved'}})
         self.assertEqual(self.packages()['W1.01']['review_status'], 'approved')
 
+    def test_without_marks_the_features_run_through_to_the_final_acceptance(self):
+        # D2: the only person's step after the plan is the final acceptance, and it still shows what no reviewer could verify.
+        self.reviewer_pending = '架空の未確認：変更が2つのファイルだけか（Gitの差分を読めない）'
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        self.decide(self.approval('ai_start'), True, '架空の開始承認')
+        self.drain()
+        plan = self.approval('plan')
+        status, _ = self.post('/api/decide', {'id': plan['id'], 'allow': True, 'feature_checks': ['W9.99'],
+                                              'workflow_confirmation': plan['workflow_revision_digest']})
+        self.assertNotEqual(status, 200)
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.drain()
+        self.assertEqual({w['review_basis'] for w in self.packages().values()}, {'ai_review'}, self.dump())
+        self.assertEqual(self.jobs()[0]['status'], 'awaiting_acceptance', self.dump())
+        payload = self.approval('completion')['payload']
+        checks = [c for item in payload['pending_items'] + payload['reference_items'] for c in item['checks']]
+        self.assertIn(self.reviewer_pending, checks)
+
+    def test_a_marked_feature_stops_while_an_unmarked_one_moves_on(self):
+        self.assertEqual(self.register(workflow='wbs'), 200)
+        self.decide(self.approval('ai_start'), True, '架空の開始承認')
+        self.drain()
+        plan = self.approval('plan')
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'], feature_checks=['W1.02'])
+        self.drain()
+        packages = self.packages()
+        self.assertEqual(packages['W1.01']['review_basis'], 'ai_review', self.dump())
+        self.assertEqual((packages['W1.02']['execution_state'], packages['W1.02']['review_status']), ('succeeded', 'not_requested'), self.dump())
+        self.assertEqual(self.jobs()[0]['status'], 'running')
+        self.feature_decision('W1.02', True, '架空の確認')
+        self.drain()
+        self.assertEqual(self.jobs()[0]['status'], 'awaiting_acceptance', self.dump())
+
     def test_each_package_task_is_told_which_feature_it_is_on(self):
         # The whole plan reaches every assignee as history, but a review's "this feature" named no feature.
         self.assertEqual(self.register(workflow='wbs'), 200)
@@ -566,7 +599,7 @@ class WbsNormalPathTests(WbsFixture):
         self.decide(self.approval('ai_start'), True, '架空の開始承認')
         self.drain()
         plan = self.approval('plan')
-        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'], feature_checks=['W1.01', 'W1.02'])
         self.drain()
         self.feature_decision('W1.01', True, '架空の確認')
         self.drain()
@@ -599,7 +632,7 @@ class WbsNormalPathTests(WbsFixture):
         self.decide(self.approval('ai_start'), True, '架空の開始承認')
         self.drain()
         plan = self.approval('plan')
-        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'], feature_checks=['W1.01', 'W1.02'])
         self.drain()
         self.feature_decision('W1.01', True, '架空の確認')
         self.drain()
@@ -625,7 +658,7 @@ class WbsNormalPathTests(WbsFixture):
         self.decide(self.approval('ai_start'), True, '架空の開始承認')
         self.drain()
         plan = self.approval('plan')
-        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'], feature_checks=['W1.01', 'W1.02'])
         self.drain()
         rule = 'Webサーバーを作成・変更する依頼では'
         for task in self.store.for_job('task', job['id']):
@@ -648,7 +681,7 @@ class WbsNormalPathTests(WbsFixture):
         self.decide(self.approval('ai_start'), True, '架空の開始承認')
         self.drain()
         plan = self.approval('plan')
-        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'], feature_checks=['W1.01', 'W1.02'])
         self.drain()
         review = next(t for t in self.store.for_job('task', job['id'])
                       if t['role'] == 'reviewer' and t.get('work_package_id'))
@@ -688,7 +721,7 @@ class WbsNormalPathTests(WbsFixture):
             self.decide(self.approval('ai_start'), True, '架空の開始承認')
             self.drain()
             plan = self.approval('plan')
-            self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+            self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'], feature_checks=['W1.01', 'W1.02'])
             self.drain()
             if label != 'W1.01':
                 self.feature_decision('W1.01', True, '架空の確認')
@@ -735,7 +768,7 @@ class WbsNormalPathTests(WbsFixture):
         plan = self.approval('plan')
         self.assertEqual([p['wbs_id'] for p in plan['payload']['work_packages']], ['W1.01', 'W1.02'])
         self.assertEqual(self.store.get(job['id'], 'job')['status'], 'awaiting_approval')
-        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'])
+        self.decide(plan, True, '架空の計画承認', workflow_confirmation=plan['workflow_revision_digest'], feature_checks=['W1.01', 'W1.02'])
         self.assertEqual(self.store.get(job['id'], 'job')['status'], 'running')
         self.assertEqual({k: v['execution_state'] for k, v in self.packages().items()},
                          {'W1.01': 'planned', 'W1.02': 'planned'})

@@ -1049,13 +1049,18 @@ class Handler(BaseHTTPRequestHandler):
                     job = self.app.store.get(task['job_id'], 'job')
                     if job.get('workflow_contract_version') == 1:
                         required = {'id', 'allow'}
-                        allowed = required | {'note', 'workflow_confirmation', 'transfer_decisions'}
+                        allowed = required | {'note', 'workflow_confirmation', 'transfer_decisions', 'feature_checks'}
                         if not required <= set(body) or set(body) - allowed:
                             raise WorkflowRequestError('workflow_request_invalid')
                         if body['allow'] and 'workflow_confirmation' not in body:
                             raise WorkflowRequestError('workflow_request_invalid')
                         if 'transfer_decisions' in body and (not body['allow'] or not isinstance(body['transfer_decisions'], dict)):
                             raise WorkflowRequestError('workflow_request_invalid')
+                        if 'feature_checks' in body:
+                            labels = [w['wbs_id'] for w in pending['payload']['work_packages']]
+                            if (not body['allow'] or not isinstance(body['feature_checks'], list)
+                                    or any(label not in labels for label in body['feature_checks'])):
+                                raise WorkflowRequestError('workflow_request_invalid')
                         if (not body['allow'] and 'workflow_confirmation' in body
                                 and body['workflow_confirmation'] != pending.get('workflow_revision_digest')):
                             raise WorkflowRequestError('workflow_request_invalid')
@@ -1064,7 +1069,7 @@ class Handler(BaseHTTPRequestHandler):
                 engine.decide(body['id'], body['allow'], body.get('note', ''), body.get('answers'), body.get('attachment_ids'),
                               body.get('review_checklist'), workflow_confirmation=body.get('workflow_confirmation'),
                               transfer_decisions=body.get('transfer_decisions'),
-                              command_change=body.get('command_change'))
+                              command_change=body.get('command_change'), feature_checks=body.get('feature_checks'))
                 result = {'ok': True}
             elif path == '/api/jobs/acceptance-check':
                 if set(body) != {'approval_id'}:

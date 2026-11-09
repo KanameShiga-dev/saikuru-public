@@ -130,6 +130,54 @@ class ReworkTests(unittest.TestCase):
         self.assertEqual(review['result']['status'],'done')
         self.assertEqual(self.wp().get('workflow_generation',0),0)
 
+    def reviewed_feature(self):
+        for _ in range(3): self.finish_next()
+        return self.wp()
+
+    def test_an_unmarked_feature_moves_on_when_its_ai_reviews_pass(self):
+        self.reviewed_feature()
+        self.engine._pass_reviewed_packages()
+        wp = self.wp()
+        self.assertEqual((wp['review_status'],wp['review_basis']),('approved','ai_review'))
+        record = self.store.get(wp['feature_review_approval_id'],'approval')
+        self.assertEqual((record['intended_role'],record['status']),('ai_review','approved'))
+        self.assertEqual(record['review_acknowledgement']['actor'],'saikuru_ai_review')
+        view = self.engine.workflow_dispatch_view(self.job_id)
+        self.assertEqual(view['status'],'ready',view)
+        self.assertNotEqual(self.store.get(view['candidate_task_id'])['work_package_id'],wp['id'])
+        self.assertFalse(self.job().get('formal_receipt'))
+
+    def test_a_marked_feature_waits_for_the_person(self):
+        wp = self.store.update(self.wp()['id'],human_check=True)
+        self.reviewed_feature()
+        self.engine._pass_reviewed_packages()
+        self.assertEqual(self.wp()['review_status'],'not_requested')
+        self.assertNotEqual(self.engine.workflow_dispatch_view(self.job_id)['status'],'ready')
+        self.assertEqual(wp['id'],self.wp()['id'])
+
+    def test_an_ai_review_record_never_stands_in_for_a_marked_feature(self):
+        self.reviewed_feature()
+        self.engine._pass_reviewed_packages()
+        self.store.update(self.wp()['id'],human_check=True)
+        self.assertNotEqual(self.engine.workflow_dispatch_view(self.job_id)['status'],'ready')
+
+    def test_a_feature_that_cannot_be_confirmed_goes_to_the_person(self):
+        self.reviewed_feature()
+        (self.workspace.project/'app.py').write_text('Fictional later change\n',encoding='utf-8')
+        self.engine._pass_reviewed_packages()
+        wp = self.wp()
+        self.assertEqual(wp['review_status'],'not_requested')
+        self.assertEqual(wp['auto_pass_issue'],'work_package_validation_required')
+        self.assertEqual([a for a in self.store.for_job('approval',self.job_id) if a['status'] == 'pending' and a['kind'] == 'feature_review'],[])
+        self.assertTrue(self.store.job_events(self.job_id,'feature_auto_pass_stopped'))
+
+    def test_an_ai_passed_feature_can_still_be_sent_back_by_the_person(self):
+        self.reviewed_feature()
+        self.engine._pass_reviewed_packages()
+        wp = self.wp()
+        self.rework_approved_first({'target_digest':wp['feature_target_digest']})
+        self.assertEqual(self.wp()['workflow_generation'],1)
+
     def test_explicit_feature_decision_unlocks_dependent_without_formal_receipt(self):
         review = self.ready_feature()
         self.assertNotEqual(self.engine.workflow_dispatch_view(self.job_id)['status'],'ready')
