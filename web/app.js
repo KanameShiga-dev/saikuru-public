@@ -848,7 +848,10 @@ function planRevisionView(a){
   }
   const ws=rev.workspace_boundary||{};
   const where=el('div',undefined,'progress-group');where.append(el('h4','作業する場所'));
-  if(ws.status==='ready'){
+  if(ws.status==='ready'&&ws.workspace_layout==='project_repository'){
+    where.append(el('p',`依頼のフォルダーで直接作業します。変更するのは上の「変更してよいファイル」だけです。采来は Git のコミットをしません。編集中のファイル：${(ws.dirty_changes||[]).length}件`,'hint'));
+    where.append(el('p',`作業するフォルダー：${ws.execution_root}（${ws.execution_branch}）`,'hint tech-only'));
+  }else if(ws.status==='ready'){
     where.append(el('p',`作業用のコピーで作業します。元のプロジェクトは直接変更しません。編集中のファイル：${(ws.dirty_changes||[]).length}件`,'hint'));
     where.append(el('p',`作業用のコピー：${ws.execution_root}（${ws.execution_branch}）／統合先：${ws.integration_root}（${ws.integration_branch}）`,'hint tech-only'));
     where.append(el('p','統合先の未保存の変更は確認していません。作業用のコピーの作成手順の記録は確認できません。','hint'));
@@ -893,6 +896,8 @@ function deliverableRow(job,item){
 const openJobRows=new Set();
 function jobCounts(job){
   const progress=job.p0_progress||{};
+  const features=progress.workflow?.counts;
+  if(features?.packages)return {done:features.feature_approved,total:features.packages,unit:'機能'};
   if(Array.isArray(progress.completed)||Array.isArray(progress.remaining)){
     const done=(progress.completed||[]).length,total=done+(progress.current?1:0)+(progress.remaining||[]).length;
     if(total>0)return {done,total};
@@ -1049,8 +1054,8 @@ function progressCard(job){
     if(allWorksDone){
       meter.append(el('span',`作業${counts.total}件が終了（依頼は未完了）`,'job-row-count'));
     }else{
-      meter.append(el('span',`${counts.total}工程中 ${counts.done}件完了`,'job-row-count'));
-      const bar=el('progress');bar.max=counts.total;bar.value=counts.done;bar.setAttribute('aria-label',`${job.title}：${counts.total}工程中${counts.done}件完了`);meter.append(bar);
+      meter.append(el('span',`${counts.total}${counts.unit||'工程'}中 ${counts.done}件完了`,'job-row-count'));
+      const bar=el('progress');bar.max=counts.total;bar.value=counts.done;bar.setAttribute('aria-label',`${job.title}：${counts.total}${counts.unit||'工程'}中${counts.done}件完了`);meter.append(bar);
     }
     head.append(meter);
   }
@@ -1436,8 +1441,13 @@ function acceptanceNavigation(approval,job){
 }
 // 受け取りの調査（11-08）：通常の開発の依頼は「できたこと・試し方・AI の確認」と 2 つのボタンにする。
 // 未完了の項目や指摘がある依頼、確認が途中まで済んだ依頼は、従来の画面で扱う。
+// WBS の依頼は受入条件ごとの確認が受領の条件なので、チェックを残した項目を本人の確認として 1 回の操作で記録する。項目ごとに書きたいときは従来の画面へ移れる。
+const fullReceipt=new Set(),receiptUnchecked=new Set();
+const RECEIPT_EVIDENCE='受け取りの画面で、本人が試して確かめた項目としてチェックを残しました（項目ごとの根拠の入力はありません）。';
 function simpleReceipt(a,job){
   const p=a.payload;
+  if(job.workflow_contract_version===1&&job.code_test_plan?.required===true&&!fullReceipt.has(job.id))
+    return !a.review_acknowledgement&&!p.review_findings?.length&&!p.reference_items?.length&&(p.pending_items||[]).every(item=>item.checks?.length);
   return job.code_test_plan?.required===true&&job.p0_contract_version!==1&&!job.workflow_contract_version
     &&!a.review_acknowledgement&&!p.pending_items?.length&&!p.review_findings?.length&&!p.reference_items?.length;
 }
@@ -1446,6 +1456,8 @@ function receiptBox(a,job,summary,drafts){
   box.append(el('h3','できあがりを受け取る'));
   if(summary)box.append(summary);
   box.append(section('依頼した内容',job.goal||job.title));
+  const features=job.p0_progress?.workflow?.packages||[];
+  if(features.length){const built=el('section',undefined,'detail-section'),list=el('ul');for(const w of features)list.append(el('li',`${w.wbs_id} ${w.title}`));built.append(el('h3','作った機能'),list);box.append(built);}
   const evidence=Object.values(job.validation_evidence||{});
   const passed=evidence.length>0&&evidence.every(e=>e.exit_code===0&&!e.timed_out);
   const results=el('ul');
@@ -1469,25 +1481,50 @@ function receiptBox(a,job,summary,drafts){
     }else trial.append(el('p','このフォルダーを開いて、できたものを試してください。'));
     box.append(trial);
   }
+  const checks=(a.payload.pending_items||[]).flatMap((item,i)=>item.checks.map((text,j)=>({text,i,j,key:`${job.id}|${text}`})));
+  if(checks.length){
+    const tried=el('section',undefined,'detail-section');
+    tried.append(el('h3','あなたが試して確かめること'),el('p','試して確かめたものとして記録します。試していない項目はチェックを外してください。','hint'));
+    for(const c of checks){
+      const label=el('label',undefined,'check'),input=el('input');input.type='checkbox';input.checked=!receiptUnchecked.has(c.key);
+      input.addEventListener('change',()=>{input.checked?receiptUnchecked.delete(c.key):receiptUnchecked.add(c.key);});
+      label.append(input,document.createTextNode(c.text));tried.append(label);
+    }
+    box.append(tried);
+  }
   const details=el('details');details.append(el('summary','詳しい記録を見る'),el('div',reportText(a.payload),'text-block'));
   box.append(details);
   const input=el('textarea');input.id='note-'+a.id;input.rows=3;input.placeholder='直してほしいこと（直してもらうときに書きます）';input.setAttribute('aria-label','直してほしいこと');input.value=drafts[input.id]||'';
-  box.append(input);
+  // WBS の依頼はサーバーが依頼全体の差し戻しを受け付けないので、機能ごとの差し戻しを置く。
+  const reworkable=(job.workflow?.work_packages||[]).filter(w=>(w.available_actions||[]).includes('rework_job'));
+  if(job.workflow_contract_version===1){
+    if(reworkable.length){const again=el('section',undefined,'detail-section');again.append(el('h3','直してほしい機能があるとき'),...reworkable.map(w=>featureReworkForm(w,job)));box.append(again);}
+  }else box.append(input);
   const actions=el('div',undefined,'actions');
   // ブラウザ標準の confirm は、アプリ内の表示では出ずに拒否扱いになるので、画面の中で確かめる。
   const fix=button('直してもらう',()=>api('/api/decide',{id:a.id,allow:false,note:input.value}),'secondary');
   const receive=el('button','受け取る','primary');receive.type='button';
   const back=el('button','やめる','secondary');back.type='button';
   const yes=button('はい、受け取る',async()=>{
-    await api('/api/jobs/review-confirmation',{approval_id:a.id,confirmed:true});
-    await api('/api/jobs/formal-acceptance',{approval_id:a.id,confirmation:'正式受領',note:input.value});
+    const id=checks.length?(await api('/api/completion/evidence',{approval_id:a.id,confirmed:true,
+      entries:checks.map(c=>({kind:'pending_check',item_index:c.i,check_index:c.j,evidence:RECEIPT_EVIDENCE}))})).approval_id:a.id;
+    await api('/api/jobs/review-confirmation',{approval_id:id,confirmed:true});
+    await api('/api/jobs/formal-acceptance',{approval_id:id,confirmation:'正式受領',note:input.value});
     notice('受け取りました。この依頼は終了しました。');
   },'primary');
   const question=el('p','この成果を受け取って、依頼を終わらせます。受け取ったあとは取り消せません。','notice');
-  receive.addEventListener('click',()=>{actions.replaceChildren(back,yes);actions.before(question);yes.focus();});
-  back.addEventListener('click',()=>{question.remove();actions.replaceChildren(fix,receive);receive.focus();});
-  actions.append(fix,receive);
+  const untried=el('p','試していない項目があります。試してからチェックするか、上の欄で機能を差し戻すか、下の詳しい画面で項目ごとに記録してください。','form-error');
+  const full=button('項目ごとに記録する（詳しい画面）',()=>{fullReceipt.add(job.id);detailVersion='';},'secondary');
+  receive.addEventListener('click',()=>{
+    untried.remove();
+    if(checks.some(c=>receiptUnchecked.has(c.key))){actions.before(untried);return;}
+    actions.replaceChildren(back,yes);actions.before(question);yes.focus();
+  });
+  const first=job.workflow_contract_version===1?[receive]:[fix,receive];
+  back.addEventListener('click',()=>{question.remove();actions.replaceChildren(...first);receive.focus();});
+  actions.append(...first);
   box.append(actions);
+  if(checks.length)box.append(full);
   return box;
 }
 async function showHandoffHistory(jobId,container,before){
@@ -2533,7 +2570,7 @@ function decisionItems(){
       const job=state.jobs.find(j=>j.id===task.job_id);
       const remaining=completion.payload.pending_items?.length;
       return [{task,key:'job-complete:'+completion.id,label:'依頼全体の作業工程が終了しました',
-        detail:(job?.title||task.title)+'。'+(remaining?'未完了項目があります。成果物・検証結果・残作業を確認してください。':'成果物と検証結果を確認して受け入れてください。'),
+        detail:(job?.title||task.title)+'。'+(remaining&&!isWorkflowJob(job)?'未完了項目があります。成果物・検証結果・残作業を確認してください。':'成果物と検証結果を確認して受け入れてください。'),
         voice:'依頼全体の作業工程が終了しました。成果を確認してください。',completion:true}];
     }
     if(approvals.length)return [{task,key:approvals.map(a=>a.id).sort().join(':'),label:'判断・確認をお願いします'}];
