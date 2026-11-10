@@ -472,6 +472,11 @@ def feature_basis(store, job_id, wp_id):
         raise ValueError('work_package_technical_review_required')
     builders = [t for t in members if t['role'] == 'builder']
     reviews = [t for t in members if t['role'] == 'reviewer']
+    # Earlier rounds of this feature, oldest first (see feature_target: a repair that changed no file).
+    earlier = sorted((t for t in tasks if t.get('work_package_id') == wp['id'] and t['role'] == 'builder'
+                      and t['status'] == 'succeeded'
+                      and t.get('workflow_generation',0) < wp.get('workflow_generation',0)),
+                     key=lambda t:t.get('workflow_generation',0))
     if any(not issued_task_valid(store,t,wp) for t in reviews):
         raise ValueError('work_package_review_authority_required')
     if not builders or any(t.get('agent_name') in {b.get('agent_name') for b in builders} for t in reviews):
@@ -483,7 +488,7 @@ def feature_basis(store, job_id, wp_id):
         proof = feature_review_receipt(store,job,plan,requirements,dep,{s['wbs_id']:s for s in specs},rows,cache)
         dependencies[dep['id']] = {k:proof[k] for k in ('approval_id','target_digest')}; files.update(proof['files'])
     return {'job':job,'plan':plan,'requirements':requirements,'wp':wp,'members':members,'builders':builders,
-            'dependencies':dependencies,'dependency_files':files,
+            'earlier_builders':earlier,'dependencies':dependencies,'dependency_files':files,
             'signature':digest({'job':job,'plan':plan,'requirements':requirements,'wp':wp,'tasks':tasks,
                                 'packages':rows,'approvals':store.for_job('approval',job_id)})}
 
@@ -521,6 +526,12 @@ def feature_target(basis):
             raise ValueError('work_package_validation_required')
         tests.update(snapshot or {})
         for row in task.get('workflow_artifact_records') or []: records[row['path']] = row['sha256']
+    if not records:
+        # A repair round that changed no file (it only re-ran the tests) reports no artifact. The feature's files
+        # are then the ones its latest earlier round recorded; the checks below still compare them with the disk.
+        for task in reversed(basis.get('earlier_builders') or []):
+            records = {row['path']:row['sha256'] for row in task.get('workflow_artifact_records') or []}
+            if records: break
     if not records or not set(records) <= allowed or not set(tests) <= allowed:
         raise ValueError('work_package_artifacts_required')
     observed = artifact_records(job['project'],list(records))

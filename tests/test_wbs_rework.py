@@ -59,7 +59,7 @@ class ReworkTests(unittest.TestCase):
         if getattr(self,'report_owned_test_as_artifact',False):
             artifacts.append('tests/test_app.py' if artifact == 'app.py' else 'tests/test_other.py')
         result = {'status':status,'summary':summary,'checks':['Fictional inspection'],
-                  'artifacts':artifacts if task['role'] == 'builder' else [],
+                  'artifacts':artifacts if task['role'] == 'builder' and not getattr(self,'report_no_artifacts',False) else [],
                   'test_files':tests,'test_change_reason':'Fictional approved test','blocking_reasons':[],
                   'pending_checks':[],'questions':[],'question':'','context_updates':[]}
         if rule_results: result['rule_results'] = rule_results
@@ -211,6 +211,33 @@ class ReworkTests(unittest.TestCase):
         view = self.engine.workflow_dispatch_view(self.job_id)
         self.assertEqual(self.store.get(view['candidate_task_id'])['workflow_authority']['kind'],'package_repair')
         self.assertTrue(any(e['type'] == 'feature_defect_recorded' for e in self.store.events()))
+
+    def test_a_repair_that_changed_no_file_still_lets_the_feature_move_on(self):
+        # Live run 2026-11-10: after a restart the review asked for the tests to be run again; the repair changed
+        # no file, reported no artifact, and the feature could then be neither passed nor confirmed by the person.
+        self.finish_next()
+        self.finish_next(rule_results=[{'rule':'R2','outcome':'fail','note':'Fictional evidence expired'}])
+        self.assertEqual(self.wp()['workflow_generation'],1)
+        self.report_no_artifacts = True
+        repair = self.finish_next()
+        self.assertEqual((repair['role'],repair['workflow_artifact_records']),('builder',[]))
+        self.finish_next(); self.finish_next()
+        self.engine._pass_reviewed_packages()
+        wp = self.wp()
+        self.assertEqual((wp['review_status'],wp['review_basis'],wp.get('auto_pass_issue')),('approved','ai_review',None))
+        target = self.store.get(wp['feature_review_approval_id'],'approval')['payload']['feature_target']
+        self.assertEqual(list(target['source_snapshot']),['app.py'])
+
+    def test_a_repair_that_changed_no_file_does_not_hide_a_later_change(self):
+        self.finish_next()
+        self.finish_next(rule_results=[{'rule':'R2','outcome':'fail','note':'Fictional evidence expired'}])
+        self.report_no_artifacts = True
+        self.finish_next(); self.finish_next(); self.finish_next()
+        (self.workspace.project/'app.py').write_text('Fictional unreported change\n',encoding='utf-8')
+        self.engine._pass_reviewed_packages()
+        wp = self.wp()
+        self.assertEqual(wp['review_status'],'not_requested')
+        self.assertTrue(wp['auto_pass_issue'])
 
     def test_technical_defect_starts_bounded_repair_without_fake_user_confirmation(self):
         self.finish_next(); self.finish_next('needs_changes','Fictional technical defect')
