@@ -48,6 +48,24 @@ class RestartEvidenceTests(unittest.TestCase):
         with patch.dict(os.environ, {'FICTIONAL_SETTING': 'changed'}):
             self.assertFalse(evidence.validity(self.project, recorded, COMMANDS)[0])
 
+    def test_starting_from_another_folder_or_terminal_keeps_it_valid(self):
+        with patch.dict(os.environ, {'PWD': '/fictional/first', 'OLDPWD': '/fictional/before', '_': 'python', 'SHLVL': '1'}):
+            self.restart()
+            recorded = evidence.snapshot(self.project, None, COMMANDS)
+        with patch.dict(os.environ, {'PWD': '/fictional/second', 'OLDPWD': '/fictional/first', '_': 'pythonw', 'SHLVL': '3'}):
+            self.restart()
+            self.assertEqual(evidence.validity(self.project, recorded, COMMANDS)[:1], (True,))
+
+    def test_a_shell_variable_the_project_reads_by_name_still_counts(self):
+        (self.project / 'tool.py').write_text('import os\nFOLDER = os.environ.get("PWD")\n', encoding='utf-8')
+        with patch.dict(os.environ, {'PWD': '/fictional/first'}):
+            self.restart()
+            recorded = evidence.snapshot(self.project, None, COMMANDS)
+            self.assertEqual(recorded['environment_scope'], 'selected')
+        with patch.dict(os.environ, {'PWD': '/fictional/second'}):
+            self.restart()
+            self.assertFalse(evidence.validity(self.project, recorded, COMMANDS)[0])
+
     def test_another_data_folder_has_another_key_and_no_value_is_stored(self):
         with patch.dict(os.environ, {'FICTIONAL_SETTING': 'fictional-value-not-to-store'}):
             self.restart()

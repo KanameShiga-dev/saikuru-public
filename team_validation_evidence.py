@@ -40,6 +40,11 @@ SAFE_STDLIB_IMPORTS = {
 
 _ENVIRONMENT_HMAC_KEY = secrets.token_bytes(32)
 ENVIRONMENT_KEY_FILE = 'evidence-environment.key'
+# A shell rewrites these by itself on every command (current and previous folder, last command, nesting depth).
+# With every value in scope ('all'), starting the server from another folder or terminal expired the evidence
+# although the tests' inputs were the same (live run 2026-11-10). A project that reads one of them by name
+# still has it in scope ('selected').
+SHELL_BOOKKEEPING = frozenset({'PWD', 'OLDPWD', '_', 'SHLVL'})
 
 
 def use_data_directory_key(directory):
@@ -188,7 +193,8 @@ def _environment(dependencies=None):
               'python_packages': packages}
     scope, names = dependencies or ('none', ())
     if scope == 'all':
-        selected = sorted(os.environ.items(), key=lambda item: item[0].casefold())
+        selected = sorted(((name, value) for name, value in os.environ.items() if name not in SHELL_BOOKKEEPING),
+                          key=lambda item: item[0].casefold())
     elif scope == 'selected':
         selected = [(name, os.environ.get(name)) for name in names]
     elif scope == 'none':
