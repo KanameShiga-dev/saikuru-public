@@ -1139,6 +1139,77 @@ function progressCard(job){
   row.addEventListener('toggle',()=>{if(row.open)openJobRows.add(job.id);else openJobRows.delete(job.id);});
   return row;
 }
+// WBS の表：投入した依頼を、計画 → 機能（作業・レビュー・差し戻し）→ 全体のレビュー → 受け取り、の行で常に見せる。
+// 使うのはサーバーの投影（job.workflow）と作業の記録だけで、状態や権限を画面で推測しない。受領した依頼も選んで見られる。
+let wbsJobId=null,wbsSignature='';
+function wbsJobs(){return state.jobs.filter(j=>isWorkflowJob(j)&&j.status!=='cancelled').sort((a,b)=>(b.created_at||0)-(a.created_at||0));}
+function wbsRowState(task,job){
+  const tries=task.attempt>1?`（やり直し ${task.attempt-1} 回）`:'';
+  if(canContinue(task,job))return {key:'stopped',label:'止まっています（続ける／やめる）',owner:'あなた'};
+  if(pendingUser(task.id).length)return {key:'mine',label:'あなたの確認待ち',owner:'あなた'};
+  if(['failed','blocked','interrupted'].includes(task.status))return {key:'stopped',label:'止まっています',owner:'確認中'};
+  if(task.status==='running'||task.status==='awaiting_approval')return {key:'running',label:'作業中'+tries,owner:'AI'};
+  if(task.status==='queued')return {key:'todo',label:'開始待ち',owner:'AI'};
+  if(task.status==='succeeded')return (task.result?.status||task.result_status)==='needs_changes'
+    ?{key:'returned',label:'不合格（差し戻し）',owner:'AI'}:{key:'done',label:'完了'+tries,owner:'AI'};
+  return {key:'todo',label:statuses[task.status]||task.status,owner:'AI'};
+}
+function wbsRows(job){
+  const tasks=state.tasks.filter(t=>t.job_id===job.id&&t.status!=='cancelled').sort((a,b)=>(a.created_at||0)-(b.created_at||0));
+  const rules=t=>(t.result?.rule_results||t.rule_results||[]).map(r=>`${RULE_NAMES[r.rule]||r.rule}：${RULE_OUTCOMES[r.outcome]||r.outcome}`).join('／');
+  const line=(number,kind,task,title)=>({number,kind,title:title||task.title,taskId:task.id,rules:rules(task),...wbsRowState(task,job)});
+  const rows=tasks.filter(t=>t.role==='planner').map(t=>line('0','計画',t));
+  (job.workflow?.work_packages||[]).forEach((wp,index)=>{
+    const st=wpState(wp,job),number=String(index+1);
+    // 技術の確認が済み、本人が「確認を始める」を押す番のとき（サーバーの available_actions）。
+    const toStart=(wp.available_actions||[]).includes('request_feature_review');
+    rows.push({number,kind:'機能',title:wp.title,feature:true,rules:'',
+      key:toStart||st.key==='review'?'mine':['approved','cancelled'].includes(st.key)?'done':st.key,
+      label:(toStart?'あなたの確認待ち（上の「確認を始める」から）':st.label)+(wp.workflow_generation>0?`　差し戻し ${wp.workflow_generation} 回`:''),
+      owner:toStart?'あなた':st.owner==='なし'?'':st.owner});
+    tasks.filter(t=>t.work_package_id===wp.id).forEach((t,i)=>{
+      const kind=t.role==='reviewer'?(t.agent_name==='common-security-reviewer'?'セキュリティのレビュー':'レビュー'):t.workflow_authority?.kind==='package_repair'?'差し戻しの修正':'作業';
+      // レビューの題名はどの機能でも同じ文なので、表では種類で示す。
+      rows.push(line(`${number}.${i+1}`,kind,t,t.role==='reviewer'?kind:null));
+    });
+  });
+  let next=(job.workflow?.work_packages||[]).length+1;
+  const overall=tasks.filter(t=>!t.work_package_id&&t.role!=='planner');
+  if(overall.length){
+    overall.forEach((t,i)=>{const kind=t.role==='reviewer'?(t.agent_name==='common-security-reviewer'?'全体のセキュリティのレビュー':'全体のレビュー'):'作業';
+      rows.push(line(`${next}.${i+1}`,kind,t,t.role==='reviewer'?kind:null));});
+    next+=1;
+  }
+  const received=['accepted','accepted_with_pending_checks'].includes(job.status);
+  rows.push({number:String(next),kind:'受け取り',title:'できあがりを受け取る',rules:'',owner:'あなた',
+    key:received?'done':job.status==='awaiting_acceptance'?'mine':'todo',label:received?'受領済み':job.status==='awaiting_acceptance'?'あなたの確認待ち':'まだ'});
+  return rows;
+}
+function renderWbsBoard(){
+  const section=$('wbs-board');if(!section)return;
+  const jobs=wbsJobs();section.hidden=!jobs.length;if(!jobs.length){wbsSignature='';return;}
+  // 既定は、進行中の依頼のうち最も新しいもの。なければ最も新しい依頼（受領済みを含む）。
+  if(!jobs.some(j=>j.id===wbsJobId))wbsJobId=(jobs.find(j=>!['accepted','accepted_with_pending_checks'].includes(j.status))||jobs[0]).id;
+  const job=jobs.find(j=>j.id===wbsJobId),rows=wbsRows(job),counts=job.workflow?.progress?.counts||{};
+  const head=`${jobStatusLabel(job)}　${counts.packages||0}機能中 ${counts.feature_approved||0}件完了`;
+  // 数秒ごとの更新で作り直すと、選択欄や押そうとした行が動く。内容が変わったときだけ描き直す。
+  const signature=JSON.stringify([jobs.map(j=>[j.id,j.title]),wbsJobId,head,rows]);
+  if(signature===wbsSignature)return;wbsSignature=signature;
+  const select=$('wbs-job');
+  select.replaceChildren(...jobs.map(j=>{const o=el('option',j.title+(['accepted','accepted_with_pending_checks'].includes(j.status)?'（受領済み）':''));o.value=j.id;return o;}));
+  select.value=wbsJobId;$('wbs-summary').textContent=head;
+  const body=$('wbs-rows');body.replaceChildren();
+  for(const row of rows){
+    const tr=el('tr',undefined,row.feature?'wbs-feature':'');tr.dataset.state=row.key;
+    const title=el(row.feature?'th':'td');if(row.feature)title.scope='row';
+    if(row.taskId){const open=el('button',row.title,'wbs-open');open.type='button';open.dataset.focusKey='wbs:'+row.taskId;
+      open.setAttribute('aria-label',`${row.number} ${row.kind}：${row.title}（${row.label}）の内容を開く`);open.addEventListener('click',()=>openTask(row.taskId));title.append(open);}
+    else title.textContent=row.title;
+    tr.append(el('td',row.number,'wbs-number'),title,el('td',row.kind),el('td',row.owner,'wbs-owner'),el('td',row.label,'wbs-state'),el('td',row.rules||'—'));
+    body.append(tr);
+  }
+}
+$('wbs-job')?.addEventListener('change',event=>{wbsJobId=event.target.value;renderWbsBoard();});
 function renderJobProgress(){
   const section=$('job-progress'),list=$('job-progress-list');if(!section||!list)return;
   const jobs=state.jobs.filter(j=>!['cancelled','accepted','accepted_with_pending_checks'].includes(j.status));
@@ -1149,6 +1220,7 @@ function render() {
   $('connection').classList.toggle('paused',!!state.paused);
   $('pause').textContent=state.paused?'新規着手を再開':'新規着手を一時停止';
   renderCliUpdate();
+  renderWbsBoard();
   renderJobProgress();
   const nextProviderVersion=JSON.stringify([state.providers,state.usage,state.config.roles,state.config.profiles,state.config.provider_settings,state.cli_update,state.claude_update,state.copilot_update]);
   if(nextProviderVersion!==providerVersion){

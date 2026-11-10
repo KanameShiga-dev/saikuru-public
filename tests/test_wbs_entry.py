@@ -873,3 +873,58 @@ class UnbuiltInstructionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WbsTableTests(unittest.TestCase):
+    """The always-visible WBS table (web/app.js wbsRows): rows come from the server's projection and task records."""
+
+    def test_rows_follow_plan_features_overall_review_and_receipt(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node.js is required for JavaScript behavior checks')
+        check = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync(process.argv[1],'utf8');
+const piece=(from,to)=>source.slice(source.indexOf(from),source.indexOf(to));
+const task=(id,role,status,extra)=>({id,role,status,job_id:'j',title:'架空の'+id,attempt:1,created_at:Number(id.slice(1)),...extra});
+const review={workflow_authority:{kind:'package_review'}};
+const tasks=[task('t1','planner','succeeded'),
+  task('t2','builder','succeeded',{work_package_id:'w1',attempt:2}),
+  task('t3','reviewer','succeeded',{work_package_id:'w1',...review,result:{status:'needs_changes',rule_results:[{rule:'R2',outcome:'fail'}]}}),
+  task('t4','builder','interrupted',{work_package_id:'w1',workflow_authority:{kind:'package_repair'}}),
+  task('t5','reviewer','cancelled',{work_package_id:'w1',...review}),
+  task('t6','builder','queued',{work_package_id:'w2'}),
+  task('t7','reviewer','succeeded',{agent_name:'common-security-reviewer',slim:true,result_status:'done',rule_results:[{rule:'R5',outcome:'pass'}]})];
+const job={id:'j',title:'架空の依頼',status:'interrupted',workflow_contract_version:1,workflow:{continue_task_ids:['t4'],
+  work_packages:[{id:'w1',title:'架空の機能1',workflow_generation:1,available_actions:[]},{id:'w2',title:'架空の機能2',available_actions:['request_feature_review']}]}};
+const context={state:{tasks,jobs:[job],approvals:[]},statuses:{},userDecision:()=>true,isWorkflowJob:()=>true,
+  RULE_NAMES:{R2:'完了条件',R5:'安全'},RULE_OUTCOMES:{pass:'合格',fail:'不合格'},
+  wpState:wp=>wp.id==='w1'?{key:'rework',label:'差し戻しの修正中',owner:'采来'}:{key:'preparing',label:'確認の準備中',owner:'采来'}};
+vm.createContext(context);
+vm.runInContext(piece('function pending(id)','function maintenanceHeld(')+piece('function wbsRowState(','function renderWbsBoard('),context);
+const rows=context.wbsRows(job);
+assert.deepEqual(Array.from(rows,r=>r.number),['0','1','1.1','1.2','1.3','2','2.1','3.1','4']);
+assert.deepEqual(Array.from(rows,r=>r.kind),['計画','機能','作業','レビュー','差し戻しの修正','機能','作業','全体のセキュリティのレビュー','受け取り']);
+const by=n=>rows.find(r=>r.number===n);
+assert.equal(by('1.1').label,'完了（やり直し 1 回）');
+assert.equal(by('1.2').key,'returned'); assert.match(by('1.2').rules,/完了条件：不合格/); assert.equal(by('1.2').title,'レビュー');
+assert.equal(by('1.3').key,'stopped'); assert.match(by('1.3').label,/続ける／やめる/); assert.equal(by('1.3').owner,'あなた');
+assert.match(by('1').label,/差し戻し 1 回/);
+assert.equal(by('2').key,'mine'); assert.equal(by('2').owner,'あなた');
+assert.equal(by('2.1').label,'開始待ち');
+assert.equal(by('3.1').key,'done'); assert.match(by('3.1').rules,/安全：合格/);
+assert.equal(by('4').label,'まだ');
+job.status='awaiting_acceptance'; assert.equal(context.wbsRows(job).at(-1).key,'mine');
+job.status='accepted'; assert.equal(context.wbsRows(job).at(-1).label,'受領済み');
+"""
+        ran = subprocess.run([node, '-e', check, str(ROOT / 'web' / 'app.js')], capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+
+    def test_a_finished_request_keeps_each_reviews_outcome_but_not_its_report(self):
+        from server import App
+        slim = App.slim_task({'id': 't', 'status': 'succeeded', 'summary': 'Fictional long report',
+                              'result': {'status': 'done', 'summary': 'Fictional long report',
+                                         'rule_results': [{'rule': 'R2', 'outcome': 'pass', 'note': 'Fictional'}]}})
+        self.assertEqual((slim['result_status'], slim['rule_results'][0]['outcome']), ('done', 'pass'))
+        self.assertNotIn('result', slim)
+        self.assertNotIn('result_status', App.slim_task({'id': 't', 'status': 'queued'}))

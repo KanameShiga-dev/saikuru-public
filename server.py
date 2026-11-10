@@ -240,6 +240,12 @@ class App:
         run = task.get('agent_run')
         if isinstance(run, dict):
             slim['agent_run'] = {k: run[k] for k in ('status', 'sandbox') if k in run}
+        # The WBS table of a finished request still shows each review's outcome; the full report stays on demand.
+        result = task.get('result')
+        if isinstance(result, dict):
+            slim['result_status'] = result.get('status')
+            if result.get('rule_results'):
+                slim['rule_results'] = result['rule_results']
         slim['slim'] = True
         return slim
 
