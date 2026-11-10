@@ -84,6 +84,8 @@ class App:
     def __init__(self, directory, port):
         self.data_lock = DataLock(directory)
         self.store = Store(directory)
+        from team_validation_evidence import use_data_directory_key
+        use_data_directory_key(directory)
         from team_attachments import Attachments
         self.attachments = Attachments(self.store)
         self.ledger = Ledger(directory)

@@ -39,6 +39,28 @@ SAFE_STDLIB_IMPORTS = {
 
 
 _ENVIRONMENT_HMAC_KEY = secrets.token_bytes(32)
+ENVIRONMENT_KEY_FILE = 'evidence-environment.key'
+
+
+def use_data_directory_key(directory):
+    """Keep the environment fingerprint key in the data folder, so evidence outlives a restart.
+
+    A key made anew by every process expired every evidence whose tests start another process
+    (environment_scope 'all'), although nothing had changed; after a restart the request could then
+    not be confirmed or received. The key only hides the environment values behind the fingerprint.
+    It stays on this PC: the data folder is outside Git, and it must not be copied into exports.
+    """
+    global _ENVIRONMENT_HMAC_KEY
+    path = Path(directory) / ENVIRONMENT_KEY_FILE
+    try:
+        with open(path, 'xb') as handle:
+            handle.write(secrets.token_bytes(32))
+    except FileExistsError:
+        pass
+    key = path.read_bytes()
+    if len(key) != 32:
+        raise ValueError('検証証跡の鍵ファイルを読み取れません: ' + ENVIRONMENT_KEY_FILE)
+    _ENVIRONMENT_HMAC_KEY = key
 _INLINE_ENV_ASSIGNMENT = re.compile(r"(?im)(?:^|[;&|]\s*|\benv\s+)(?:\$env:)?[A-Z_][A-Z0-9_]*\s*=\s*\S+")
 
 
