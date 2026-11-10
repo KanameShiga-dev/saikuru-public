@@ -346,16 +346,21 @@ class App:
         network_tasks = {job['p0_interruption'].get('interrupted_task_id')
                          for job in state['jobs'] if isinstance(job.get('p0_interruption'), dict)
                          and job['p0_interruption'].get('recovery_status') == 'network_wait'}
+        # A stop the person can restart (続ける／やめる) is theirs to decide; diagnostics stay hidden as before.
+        continuable = {task_id for job in state['jobs']
+                       for task_id in (job.get('workflow') or {}).get('continue_task_ids', [])}
         exposed['tasks'] = [
             ({'id': task['id'], 'job_id': task['job_id'], 'status': task['status'],
               'role': task.get('role'), 'after': task.get('after'),
               'title': ('担当工程' if task.get('status') in ('queued', 'running', 'awaiting_approval', 'succeeded')
-                        else '通信回復後の再開待ち' if task['id'] in network_tasks else '保守対応待ち'),
+                        else '通信回復後の再開待ち' if task['id'] in network_tasks
+                        else '止まった作業' if task['id'] in continuable else '保守対応待ち'),
               'attempt': task.get('attempt', 0),
               'instruction': '', 'result': None, 'agent_name': None, 'common_agents': [],
               'profile': {'adapter': '', 'model': '', 'effort': ''},
               'summary': ('' if task.get('status') in ('queued', 'running', 'awaiting_approval', 'succeeded')
                           else '通信が切れました。途中成果を保持して再開を待っています。' if task['id'] in network_tasks
+                          else '作業が途中で止まりました。途中成果は保存されています。' if task['id'] in continuable
                           else '開発エンジンの確認が必要です。途中成果は保存されています。')}
              if task['id'] in maintenance_tasks else task)
             for task in state['tasks']]
@@ -381,7 +386,11 @@ class App:
                                   'timeout': 'time_limit', 'sandbox_setup': 'execution_environment'}[category]
                     if reason:
                         public_stop['public_reason'] = reason
-                exposed['jobs'].append(dict(job, p0_interruption=public_stop))
+                shown = dict(job, p0_interruption=public_stop)
+                if (job.get('workflow') or {}).get('continue_task_ids') and isinstance(job.get('p0_progress'), dict):
+                    shown['p0_progress'] = dict(job['p0_progress'], current='あなたの判断待ち（続ける／やめる）',
+                                                next_action='続けるか、やめるかを決める')
+                exposed['jobs'].append(shown)
             else:
                 exposed['jobs'].append(job)
         maintenance_tasks.discard(None)
@@ -782,6 +791,10 @@ class Handler(BaseHTTPRequestHandler):
                 if set(body) != {'job_id', 'target', 'confirmed'}:
                     raise ValueError('復旧操作の指定が不正です。')
                 result = engine.user_recovery_retry(body['job_id'], body['target'], body['confirmed'])
+            elif path == '/api/recovery/user-continue':
+                if set(body) != {'job_id', 'task_id', 'target', 'confirmed'} or body['confirmed'] is not True:
+                    raise ValueError('続ける作業の指定が不正です。')
+                result = engine.user_continue(body['job_id'], body['task_id'], body['target'])
             elif path == '/api/recovery/network-check':
                 if set(body) != {'job_id', 'target'}:
                     raise ValueError('接続確認の指定が不正です。')

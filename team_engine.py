@@ -3712,10 +3712,12 @@ class Engine:
             active = any(t['id'] in self.active or t['status'] in ('running','awaiting_approval')
                          or (t.get('current_attempt') or {}).get('status') == 'running' for t in records['tasks'])
             pending = []; actions = []; maintenance = False; unknown_effects = False; stop_codes = set()
-            guidance = []
+            guidance = []; continue_ids = []
             interruption = job.get('p0_interruption') or {}
             current_ids = set(projection['current_task_ids'])
             for task in records['tasks']:
+                # 「続ける」 is offered only where user_continue would accept it now (same check, records only).
+                if self._user_continue_refusal(task, job) is None: continue_ids.append(task['id'])
                 if (task['id'] not in current_ids and task['id'] != interruption.get('interrupted_task_id')
                         and not (job['plan_revision'] == 0 and task.get('role') == 'planner' and task['status'] != 'cancelled')):
                     continue
@@ -3792,7 +3794,8 @@ class Engine:
             waiting = any('dependency' in reason for row in dispatch.get('waiting',[]) for reason in row.get('reasons',[]))
             terminal = job['status'] in ('accepted','accepted_with_pending_checks','cancelled')
             # Starting a feature review is a button only the user can press, so Saikuru is not the one to act.
-            owner = ('maintainer' if maintenance else 'user' if user_pending or preparing else 'authorized_person' if authorized_pending
+            # A stop the person can restart is theirs to decide (続ける／やめる), not a wait for someone else.
+            owner = ('user' if continue_ids else 'maintainer' if maintenance else 'user' if user_pending or preparing else 'authorized_person' if authorized_pending
                      else 'dependency' if waiting else 'none' if terminal else 'saikuru')
             for wp in packages:
                 wp['dependencies'] = [{'id':w['id'],'title':w['title'],'execution_state':w['execution_state'],
@@ -3817,7 +3820,7 @@ class Engine:
                 'requirement_revision':job['requirement_revision'],'progress':projection,'work_packages':packages,
                 'context':context,
                 'dispatch':dispatch,'wait_owner':owner,'uncertain_operation':unknown_effects,
-                'stop_codes':sorted(stop_codes),'pending_decisions':pending,
+                'stop_codes':sorted(stop_codes),'pending_decisions':pending,'continue_task_ids':continue_ids,
                 'feature_confirmation_count':sum(p['kind'] == 'feature_review' for p in pending),
                 'available_actions':sorted(set(actions)),'maintenance_authentication_required':maintenance,
                 'execution_permission':'none','file_validation':'not_performed','decides_nothing':True}
@@ -8319,6 +8322,61 @@ class Engine:
                              current['task_id'], job_id)
         return {'ok': True}
 
+    def _user_continue_refusal(self, task, job):
+        """Why the person at this PC cannot restart this stopped step, or None. Reads records only."""
+        from team_recovery import p0_failure_category
+        stop = job.get('p0_interruption') or {}
+        if (job.get('workflow_contract_version') != 1 or job.get('status') not in ('failed', 'blocked', 'interrupted')
+                or task.get('status') not in ('failed', 'blocked', 'interrupted')):
+            return '続けられる停止はありません。画面を再読み込みしてください。'
+        if (stop.get('recovery_status') == 'safety_blocked' or stop.get('error_category') == 'SAFETY_BLOCKED'
+                or p0_failure_category(task.get('failure_code')) == 'SAFETY_BLOCKED'):
+            return '安全上の理由で止まった作業は、続けられません。'
+        if (canonical(job['project']) not in [canonical(p) for p in self.config['approved_roots']]
+                or self.project_blocked(job['project'])):
+            return '作業フォルダーを確認できないため、続けられません。'
+        if any(canonical(ctx.project) == canonical(job['project']) for ctx in self.active.values()):
+            return '担当がまだ動いています。止まってから、もう一度選んでください。'
+        for other in self.store.all('task'):
+            if other.get('status') == 'running' or (other.get('current_attempt') or {}).get('status') == 'running':
+                if canonical(self.store.get(other['job_id'], 'job')['project']) == canonical(job['project']):
+                    return '担当がまだ動いています。止まってから、もう一度選んでください。'
+        if any(a.get('status') == 'pending' for a in self.store.for_job('approval', job['id'])):
+            return '先に、表示されている確認に答えてください。'
+        if self._has_active_recovery_investigation(task):
+            return '原因の調査が終わっていません。調査を終えるか中止してから、もう一度選んでください。'
+        if task.get('work_package_id'):
+            wp = self.store.get(task['work_package_id'], 'work_package')
+            if (task.get('plan_revision') != job['plan_revision'] or wp.get('plan_revision') != job['plan_revision']
+                    or task.get('workflow_generation', 0) != wp.get('workflow_generation', 0)):
+                return '計画が変わる前の作業のため、続けられません。'
+        return None
+
+    def user_continue(self, job_id, task_id, target):
+        """「続ける」: the one person using this PC restarts a stopped step.
+
+        Saikuru checks what it can check itself (no worker is running in the folder, nothing is waiting
+        for an answer, the stop is not a safety stop) and then starts a fresh attempt from the current
+        files. Existing gates on the new attempt (plan approval, scope, outbound operations) still apply.
+        """
+        note = ('中断または失敗の後に、利用者が「続ける」を選びました。前回の試行がどこまで進んだかは分かりません。'
+                '現在のファイルと保存済みの検証結果を確かめてから、未完了の部分だけを進めてください。'
+                '結果が分からない操作は、無条件に繰り返さないでください。')
+        with self.store.atomic():
+            self._validate_workflow_control_target(target, job_id, 'retry_task', task_id)
+            task = self.store.get(task_id, 'task')
+            job = self.store.get(job_id, 'job')
+            refusal = self._user_continue_refusal(task, job)
+            if refusal:
+                raise ValueError(refusal)
+            if task.get('recovery_check_required'):
+                self.store.release_user_continue(task_id, task['state_revision'], job['state_revision'],
+                                                 (task.get('current_attempt') or {}).get('id'))
+            self._retry_confirmed(task_id, note, user_continue=True)
+            self.store.event('user_continue', '利用者が「続ける」を選び、止まった工程をやり直します。', task_id, job_id,
+                             details={'failure_code': task.get('failure_code'), 'attempt': task.get('attempt')})
+        return {'ok': True, 'decision_required': task.get('role') == 'planner'}
+
     def user_network_check(self, job_id, target):
         """Probe the displayed stopped attempt; neither confirmation nor dispatch."""
         if not isinstance(target, dict) or set(target) != {'task_id', 'binding'}:
@@ -8384,8 +8442,10 @@ class Engine:
                 raise ValueError('Checkpointと現在の承認・検証・変更を確認してください。')
         return self._retry_confirmed(task_id, note, handoff_allowed, expected, workflow_target)
 
-    def _retry_confirmed(self, task_id, note, handoff_allowed=False, recovery_expected=None, workflow_target=None):
-
+    def _retry_confirmed(self, task_id, note, handoff_allowed=False, recovery_expected=None, workflow_target=None,
+                         *, user_continue=False):
+        # user_continue: a fresh attempt from the current files (see user_continue). It claims nothing about
+        # what the stopped attempt did, so the checks that certify those effects do not apply.
 
         with self.store.atomic():
 
@@ -8396,9 +8456,10 @@ class Engine:
             if task_job.get('workflow_contract_version') == 1:
                 if task_job.get('status') not in ('planning', 'running', 'failed', 'blocked', 'interrupted'):
                     raise ValueError('終了済みまたは不明な依頼は再試行できません。')
-                if self.store.has_operation_history(task_job['id']):
+                if not user_continue and self.store.has_operation_history(task_job['id']):
                     self._reviewed_operation_basis(task, task_job)
-                if task.get('recovery_check_required') or task.get('recovery_confirmation') or recovery_expected is not None:
+                if not user_continue and (task.get('recovery_check_required') or task.get('recovery_confirmation')
+                                          or recovery_expected is not None):
                     actual, _ = self._recovery_retry_binding(task_id)
                     if recovery_expected is None or actual != recovery_expected:
                         raise ValueError('再試行の確認後に状態が変化しました。')

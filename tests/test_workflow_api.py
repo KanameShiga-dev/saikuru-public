@@ -297,7 +297,9 @@ class WorkflowApiTests(unittest.TestCase):
         self.store.update(self.f.job_id,status='interrupted',p0_interruption={
             'recovery_status':'maintenance_required','interrupted_task_id':self.f.first['id']})
         code,view=self.view(); self.assertEqual(code,200,view)
-        self.assertEqual(view['wait_owner'],'maintainer'); self.assertTrue(view['uncertain_operation'])
+        # 2026-11-10: the person decides 続ける／やめる for this stop; the standard retry stays closed and diagnostics hidden.
+        self.assertEqual(view['wait_owner'],'user'); self.assertTrue(view['uncertain_operation'])
+        self.assertEqual(view['continue_task_ids'],[self.f.first['id']])
         self.assertIn('workflow_recovery_confirmation_required',view['stop_codes'])
         self.assertNotIn('retry_task',view['available_actions'])
         self.assertNotIn('fictional-private-maintenance-diagnostic',json.dumps(view))

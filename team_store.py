@@ -663,6 +663,34 @@ class Store:
             finally:
                 self._worker.recovery_commit = previous
 
+    def release_user_continue(self, task_id, task_revision, job_revision, attempt_id):
+        """The person at this PC chose 「続ける」: lift the restart fence with a record. Never queues work.
+
+        Unlike confirm_recovery this certifies nothing about the stopped attempt's effects, so it
+        leaves no recovery_confirmation; the caller starts a fresh attempt from the current files.
+        """
+        if getattr(self._worker, 'task', None) is not None:
+            raise ValueError('worker_cannot_confirm_recovery')
+        with self.atomic():
+            task = self.get(task_id, 'task')
+            job = self.get(task['job_id'], 'job')
+            attempt = task.get('current_attempt') or {}
+            if (workflow_version(job) != 1 or task.get('state_revision') != task_revision
+                    or job.get('state_revision') != job_revision
+                    or job.get('status') not in ('failed', 'blocked', 'interrupted')
+                    or task.get('status') not in ('failed', 'blocked', 'interrupted')
+                    or attempt.get('id') != attempt_id or attempt.get('status') not in ('closed', 'fenced')):
+                raise ValueError('workflow_control_target_changed')
+            self.event('user_continue_confirmed', '利用者が「続ける」を選び、中断の確認待ちを解除しました。',
+                task_id, job['id'], details={'attempt_id': attempt_id, 'task_revision': task_revision,
+                                           'job_revision': job_revision})
+            previous = getattr(self._worker, 'recovery_commit', None)
+            self._worker.recovery_commit = task_id
+            try:
+                return self.update(task_id, recovery_check_required=False)
+            finally:
+                self._worker.recovery_commit = previous
+
     def confirm_native_recovery(self, task_id, task_revision, job_revision, attempt_id, target,
                                 database_stamp, assert_process, prior_operation_proof=None):
         """Server-only native confirmation transition; no retry/session permission."""
