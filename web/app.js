@@ -1141,7 +1141,7 @@ function progressCard(job){
 }
 // WBS の表：投入した依頼を、計画 → 機能（作業・レビュー・差し戻し）→ 全体のレビュー → 受け取り、の行で常に見せる。
 // 使うのはサーバーの投影（job.workflow）と作業の記録だけで、状態や権限を画面で推測しない。受領した依頼も選んで見られる。
-let wbsJobId=null,wbsSignature='';
+let wbsJobId=null,wbsSignature='',wbsSeen=null;
 function wbsJobs(){return state.jobs.filter(j=>isWorkflowJob(j)&&j.status!=='cancelled').sort((a,b)=>(b.created_at||0)-(a.created_at||0));}
 function wbsRowState(task,job){
   const tries=task.attempt>1?`（やり直し ${task.attempt-1} 回）`:'';
@@ -1185,11 +1185,18 @@ function wbsRows(job){
     key:received?'done':job.status==='awaiting_acceptance'?'mine':'todo',label:received?'受領済み':job.status==='awaiting_acceptance'?'あなたの確認待ち':'まだ'});
   return rows;
 }
+// 表に出す依頼を選ぶ。新しく登録された依頼があればそれ、なければ今の選択、初回は進行中の最も新しい依頼。
+function wbsPick(jobs){
+  const fresh=wbsSeen&&jobs.find(j=>!wbsSeen.has(j.id));
+  wbsSeen=new Set(jobs.map(j=>j.id));
+  if(fresh)return fresh.id;
+  if(jobs.some(j=>j.id===wbsJobId))return wbsJobId;
+  return (jobs.find(j=>!['accepted','accepted_with_pending_checks'].includes(j.status))||jobs[0]).id;
+}
 function renderWbsBoard(){
   const section=$('wbs-board');if(!section)return;
   const jobs=wbsJobs();section.hidden=!jobs.length;if(!jobs.length){wbsSignature='';return;}
-  // 既定は、進行中の依頼のうち最も新しいもの。なければ最も新しい依頼（受領済みを含む）。
-  if(!jobs.some(j=>j.id===wbsJobId))wbsJobId=(jobs.find(j=>!['accepted','accepted_with_pending_checks'].includes(j.status))||jobs[0]).id;
+  wbsJobId=wbsPick(jobs);
   const job=jobs.find(j=>j.id===wbsJobId),rows=wbsRows(job),counts=job.workflow?.progress?.counts||{};
   const head=`${jobStatusLabel(job)}　${counts.packages||0}機能中 ${counts.feature_approved||0}件完了`;
   // 数秒ごとの更新で作り直すと、選択欄や押そうとした行が動く。内容が変わったときだけ描き直す。
@@ -2372,7 +2379,7 @@ function renderDetail(task,version) {
           const prepared=await api('/api/jobs/prepare-start',{approval_id:a.id,fingerprint:a.payload.fingerprint,confirmed:true});
           await api('/api/decide',{id:prepared.approval_id,allow:true,note:input.value});
           await refresh();
-          notice('必要ファイル（SCOPE.md）を準備し、AIによる計画作成を1回だけ開始しました。計画ができたら、改めて確認をお願いします。');
+          notice('AIに計画作成を頼みました。計画ができたら、確認をお願いします。（作業フォルダーに、AIの作業範囲を決めるファイル SCOPE.md を用意しました。）');
         },'primary'));
       }else actions.append(button(a.kind==='ai_start'?'AIによる計画作成を1回開始する':'承認する',async()=>{
         const chosen=transferChoices.get(a.id)||{};
@@ -2381,7 +2388,7 @@ function renderDetail(task,version) {
         transferChoices.delete(a.id);featureChecks.delete(a.id);
         // W05.05.UI（F4）：承認の結果を文で伝える。開始・完了を約束しない。
         if(a.kind==='plan')notice('計画を承認しました。承認した計画で作業を進めます。'+(a.workflow_revision_digest?'印を付けた機能は、作業の後であなたの確認を待ちます。':''));
-        else if(a.kind==='ai_start')notice('AIによる計画作成の開始を承認しました（1回だけ）。計画ができたら、改めて確認をお願いします。');
+        else if(a.kind==='ai_start')notice('AIに計画作成を頼みました。計画ができたら、確認をお願いします。');
       },'primary'));
     }
     box.append(actions);body.append(box);

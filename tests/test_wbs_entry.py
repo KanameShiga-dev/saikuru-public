@@ -920,6 +920,29 @@ job.status='accepted'; assert.equal(context.wbsRows(job).at(-1).label,'受領済
         ran = subprocess.run([node, '-e', check, str(ROOT / 'web' / 'app.js')], capture_output=True, text=True, encoding='utf-8', timeout=60)
         self.assertEqual(ran.returncode, 0, ran.stderr)
 
+    def test_the_table_moves_to_a_newly_registered_request_and_otherwise_keeps_the_choice(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node.js is required for JavaScript behavior checks')
+        check = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync(process.argv[1],'utf8');
+const context={};vm.createContext(context);
+vm.runInContext('var wbsJobId=null,wbsSeen=null;'+source.slice(source.indexOf('function wbsPick('),source.indexOf('function renderWbsBoard(')),context);
+const pick=jobs=>vm.runInContext('wbsJobId=wbsPick('+JSON.stringify(jobs)+')',context);
+const old={id:'old',status:'accepted'},running={id:'run',status:'running'},fresh={id:'new',status:'awaiting_approval'};
+assert.equal(pick([running,old]),'run');            // first load: the newest request still in progress
+context.wbsJobId='old';
+assert.equal(pick([running,old]),'old');            // the person's choice survives a refresh
+assert.equal(pick([fresh,running,old]),'new');      // a request registered just now is shown
+assert.equal(pick([fresh,running,old]),'new');
+context.wbsJobId='old';
+assert.equal(pick([fresh,running,old]),'old');      // and the person can still go back
+assert.equal(pick([fresh,running]),'new');          // the chosen request is gone: the newest in progress
+"""
+        ran = subprocess.run([node, '-e', check, str(ROOT / 'web' / 'app.js')], capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+
     def test_a_finished_request_keeps_each_reviews_outcome_but_not_its_report(self):
         from server import App
         slim = App.slim_task({'id': 't', 'status': 'succeeded', 'summary': 'Fictional long report',
