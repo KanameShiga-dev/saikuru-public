@@ -17,6 +17,67 @@ MEDIA = {'pptx', 'pdf', 'mp4'}
 OFFICE = {'docx', 'xlsx'}
 BINARY = MEDIA | OFFICE
 ROOT=Path(__file__).resolve().parent
+# A kanji that none of these holds is not written in Japanese (in practice: simplified Chinese forms).
+JAPANESE_CHARSETS = ('shift_jis_2004', 'cp932', 'euc_jisx0213')
+
+
+def _in_japanese(char):
+    for name in JAPANESE_CHARSETS:
+        try:
+            char.encode(name)
+            return True
+        except UnicodeEncodeError:
+            pass
+    return False
+
+
+def non_japanese_kanji(text):
+    """The kanji in `text` that Japanese does not have, in order of first appearance."""
+    found = []
+    for char in text:
+        # Rare kanji beyond U+FFFF are left alone: Japanese names use some that no Japanese set holds
+        # (the \ud842\udfb7 of \ud842\udfb7\u91ce), and simplified Chinese forms all sit below.
+        if (('\u3400' <= char <= '\u9fff' or '\uf900' <= char <= '\ufaff')
+                and char not in found and not _in_japanese(char)):
+            found.append(char)
+    return ''.join(found)
+
+
+def allowed_kanji_argument(job):
+    """The non-Japanese kanji the person wrote in the request, as ASCII for the document tool's command line."""
+    return '.'.join(f'{ord(char):x}' for char in non_japanese_kanji(str(job.get('title', '')) + str(job.get('goal', ''))))
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def require_japanese_text(arguments, allowed=''):
+    """Refuse a document whose text holds kanji Japanese does not have, or characters lost in conversion.
+
+    `allowed` is the output of allowed_kanji_argument: what the person wrote in the request passes."""
+    permitted = {chr(int(code, 16)) for code in allowed.split('.') if code}
+    text = '\n'.join(_strings(arguments))
+    foreign = [char for char in non_japanese_kanji(text) if char not in permitted]
+    if foreign:
+        raise ValueError('日本語にない漢字（中国語の簡体字など）が含まれています: '
+                         + ''.join(f'「{char}」' for char in foreign[:20]) + ('ほか' if len(foreign) > 20 else '')
+                         + '。日本語の漢字に書き直してから、もう一度保存してください。')
+    if '\ufffd' in text:
+        raise ValueError('文字化けした文字（\ufffd）が含まれています。元の文字に直してから、もう一度保存してください。')
+    path = str(arguments.get('path', '')) if isinstance(arguments, dict) else ''
+    content = arguments.get('content') if isinstance(arguments, dict) else None
+    if path.lower().endswith('.html') and isinstance(content, str):
+        if not re.search(r'<html\b[^>]*\blang\s*=\s*["\']?ja\b', content, re.I):
+            raise ValueError('HTMLは <html lang="ja"> で始まる文書にしてください。'
+                             '指定がないと、漢字が日本語以外の書体で表示されることがあります。')
 
 def required_visuals(job):
     """Keep explicit screen requirements separate from the file extension."""

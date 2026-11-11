@@ -15,6 +15,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from consultation_read_tools import execute, TOOLS
 import design_profile
+from team_document_capabilities import require_japanese_text
 
 DOCUMENTS = {'.md', '.html', '.txt', '.svg', '.pptx', '.pdf', '.mp4', '.docx', '.xlsx', '.json'}
 BINARY = ('.pptx', '.pdf', '.mp4', '.docx', '.xlsx')
@@ -634,6 +635,7 @@ def main():
     source, output = (Path(p).resolve(strict=True) for p in sys.argv[1:3])
     writable = '--write' in sys.argv[3:]
     job_id=sys.argv[sys.argv.index('--job-id')+1] if '--job-id' in sys.argv else ''
+    allowed_kanji=sys.argv[sys.argv.index('--allow-kanji')+1] if '--allow-kanji' in sys.argv else ''
     if job_id and not re.fullmatch('[a-f0-9]{32}',job_id):raise ValueError('Invalid job ID')
     # Output may be the source folder or inside it (writes are create-only document files);
     # an ancestor of the source would widen the write scope, so it stays refused.
@@ -674,6 +676,8 @@ def main():
                 calls+=1
                 if calls>100: raise ValueError('Tool limit')
                 name=params.get('name');args=params.get('arguments',{})
+                # Checked once here, before any file is written, for every kind of document.
+                if name in ('write_document','generate_media','generate_office'): require_japanese_text(args,allowed_kanji)
                 value=(media_environment() if name=='media_environment' else generate_media(output,args,writable,job_id) if name=='generate_media' else generate_office((output,source),args,writable,job_id) if name=='generate_office' else learn_design((output,source),args,writable) if name=='learn_design' else document_operation(output,name,args,writable,job_id) if name in ('read_document','write_document') else dict(execute(source,name,args),output_documents=binary_documents(output)) if name=='list_files' else execute(source,name,args))
                 result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}]}
             else: raise ValueError('Unsupported operation')

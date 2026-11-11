@@ -248,6 +248,9 @@ USER_TERMINAL_RULE = (
     '利用者の端末には、この設定は付いていない。成果物とテストは、この設定がなくても同じ結果になるように作る。'
     '別のプロセスを起動して出力を読む箇所では、起動する側が子プロセスの出力の文字コードを決める。'
     'ファイルの読み書きでは文字コードを明示する。')
+JAPANESE_OUTPUT_RULE = (
+    '\n成果物の文章は日本語で書く。中国語の簡体字（例：「这」「问」「时」）を使わず、日本語の漢字で書く。'
+    '利用者が依頼の文で別の言語を指定した場合は、その指定に従う。')
 USER_TERMINAL_REVIEW = (
     'レビュー担当は、成果物とテストがこの設定に依存していないかをコードで確かめる。'
     '依存していれば、利用者の端末でテストが失敗するので、実行阻害としてblocking_reasonsへ記録する。')
@@ -415,6 +418,10 @@ class Context:
             tools = ('WebSearch', 'mcp__project_read__list_files', 'mcp__project_read__read_file',
                      'mcp__project_read__search_files', 'mcp__project_read__read_document','mcp__project_read__media_environment')
             args = ['-X','utf8',str(Path(__file__).with_name('document_tools.py')),document_source,self.project,'--job-id',self.task['job_id']]
+            from team_document_capabilities import allowed_kanji_argument
+            allowed_kanji = allowed_kanji_argument(document_job)
+            if allowed_kanji:
+                args += ['--allow-kanji', allowed_kanji]
             if self.task['role']=='builder':
                 tools += ('mcp__project_read__write_document','mcp__project_read__generate_media','mcp__project_read__generate_office','mcp__project_read__learn_design')
                 args += ['--write']
@@ -4878,6 +4885,7 @@ class Engine:
                   '\n検証コマンドの実行は作業担当が行う。レビュー担当は采来の記録と照合する。')
                if job.get('validation_commands') else '')
             + (CODE_TEST_REUSE_RULE if ctx.task['role'] == 'builder' and not job.get('document_source') else '')
+            + (JAPANESE_OUTPUT_RULE if ctx.task['role'] == 'builder' else '')
             + (USER_TERMINAL_RULE + (USER_TERMINAL_REVIEW if ctx.task['role'] == 'reviewer' else '')
                if ctx.task['role'] in ('builder', 'reviewer') and not job.get('document_source') else '')
             + ('\n今回のコードテスト計画: ' + json.dumps(job['code_test_plan'], ensure_ascii=False)

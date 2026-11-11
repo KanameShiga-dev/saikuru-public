@@ -116,6 +116,10 @@ class NativeRuntimeTests(unittest.TestCase):
         self.assertNotIn(USER_TERMINAL_REVIEW, builder)
         self.assertIn(USER_TERMINAL_RULE + USER_TERMINAL_REVIEW, reviewer)
         self.assertNotIn(USER_TERMINAL_RULE, self.engine._instructions(self.context('claude', 'planner')))
+        from team_engine import JAPANESE_OUTPUT_RULE
+        self.assertIn(JAPANESE_OUTPUT_RULE, builder)
+        self.assertNotIn(JAPANESE_OUTPUT_RULE, reviewer)
+        self.assertIn('簡体字', JAPANESE_OUTPUT_RULE)
         self.assertIn('PYTHONIOENCODING=utf-8', USER_TERMINAL_RULE)
         self.assertIn('利用者の端末には、この設定は付いていない', USER_TERMINAL_RULE)
 
