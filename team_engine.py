@@ -242,6 +242,16 @@ CODE_TEST_REUSE_RULE = (
     'コマンドの実行には既存の承認と安全確認が必要であり、未許可なら質問して待つ。'
     'テストの成功だけで全要件の合格とせず、対象外と未確認の動作をpending_checksに残す。')
 
+# The Claude adapter sets PYTHONIOENCODING for the provider process; tests that pass only with it fail for the user.
+USER_TERMINAL_RULE = (
+    '\n采来は担当のプロセスに環境変数PYTHONIOENCODING=utf-8を付けることがあり、担当が実行するコマンドとその子プロセスへ引き継がれる。'
+    '利用者の端末には、この設定は付いていない。成果物とテストは、この設定がなくても同じ結果になるように作る。'
+    '別のプロセスを起動して出力を読む箇所では、起動する側が子プロセスの出力の文字コードを決める。'
+    'ファイルの読み書きでは文字コードを明示する。')
+USER_TERMINAL_REVIEW = (
+    'レビュー担当は、成果物とテストがこの設定に依存していないかをコードで確かめる。'
+    '依存していれば、利用者の端末でテストが失敗するので、実行阻害としてblocking_reasonsへ記録する。')
+
 CODE_TEST_PLAN_RULE = (
     '\n計画にはcode_test_planを必ず含める。コード変更がある場合はrequired=trueとし、'
     '既存テストを確認して再利用するファイルの相対パスをexisting_testsに列挙し、'
@@ -4868,6 +4878,8 @@ class Engine:
                   '\n検証コマンドの実行は作業担当が行う。レビュー担当は采来の記録と照合する。')
                if job.get('validation_commands') else '')
             + (CODE_TEST_REUSE_RULE if ctx.task['role'] == 'builder' and not job.get('document_source') else '')
+            + (USER_TERMINAL_RULE + (USER_TERMINAL_REVIEW if ctx.task['role'] == 'reviewer' else '')
+               if ctx.task['role'] in ('builder', 'reviewer') and not job.get('document_source') else '')
             + ('\n今回のコードテスト計画: ' + json.dumps(job['code_test_plan'], ensure_ascii=False)
                + '\n前回までに使ったテストファイルとハッシュ: '
                + json.dumps(job.get('test_assets') or {}, ensure_ascii=False)

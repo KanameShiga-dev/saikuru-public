@@ -108,6 +108,17 @@ class NativeRuntimeTests(unittest.TestCase):
         self.assertIn('CLAUDE-ONLY-NOTE', text)
         self.assertNotIn('CLAUDE-ONLY-NOTE', self.engine._instructions(self.context('codex')))
 
+    def test_builders_and_reviewers_are_told_the_user_terminal_lacks_the_encoding_setting(self):
+        from team_engine import USER_TERMINAL_REVIEW, USER_TERMINAL_RULE
+        builder = self.engine._instructions(self.context('claude', 'builder'))
+        reviewer = self.engine._instructions(self.context('claude', 'reviewer'))
+        self.assertIn(USER_TERMINAL_RULE, builder)
+        self.assertNotIn(USER_TERMINAL_REVIEW, builder)
+        self.assertIn(USER_TERMINAL_RULE + USER_TERMINAL_REVIEW, reviewer)
+        self.assertNotIn(USER_TERMINAL_RULE, self.engine._instructions(self.context('claude', 'planner')))
+        self.assertIn('PYTHONIOENCODING=utf-8', USER_TERMINAL_RULE)
+        self.assertIn('利用者の端末には、この設定は付いていない', USER_TERMINAL_RULE)
+
     def test_codex_native_instructions_and_read_only_session(self):
         ctx = self.context()
         process = self.mock_process([
