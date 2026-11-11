@@ -1142,12 +1142,14 @@ function progressCard(job){
 // WBS の表：投入した依頼を、計画 → 機能（作業・レビュー・差し戻し）→ 全体のレビュー → 受け取り、の行で常に見せる。
 // 使うのはサーバーの投影（job.workflow）と作業の記録だけで、状態や権限を画面で推測しない。受領した依頼も選んで見られる。
 let wbsJobId=null,wbsSignature='',wbsSeen=null;
-function wbsJobs(){return state.jobs.filter(j=>isWorkflowJob(j)&&j.status!=='cancelled').sort((a,b)=>(b.created_at||0)-(a.created_at||0));}
+// 表は、機能ごとに分けた依頼だけでなく、資料作成と従来どおりの依頼にも出す（11-11、利用者の判断）。
+function wbsJobs(){return state.jobs.filter(j=>j.status!=='cancelled').sort((a,b)=>(b.created_at||0)-(a.created_at||0));}
 function wbsRowState(task,job){
   const tries=task.attempt>1?`（やり直し ${task.attempt-1} 回）`:'';
   if(canContinue(task,job))return {key:'stopped',label:'止まっています（続ける／やめる）',owner:'あなた'};
   if(pendingUser(task.id).length)return {key:'mine',label:'あなたの確認待ち',owner:'あなた'};
-  if(['failed','blocked','interrupted'].includes(task.status))return {key:'stopped',label:'止まっています',owner:'確認中'};
+  if(['failed','blocked','interrupted'].includes(task.status))return isWorkflowJob(job)
+    ?{key:'stopped',label:'止まっています',owner:'確認中'}:{key:'stopped',label:'止まっています（行を押して対応）',owner:'あなた'};
   if(task.status==='running'||task.status==='awaiting_approval')return {key:'running',label:'作業中'+tries,owner:'AI'};
   if(task.status==='queued')return {key:'todo',label:'開始待ち',owner:'AI'};
   if(task.status==='succeeded')return (task.result?.status||task.result_status)==='needs_changes'
@@ -1159,6 +1161,17 @@ function wbsRows(job){
   const rules=t=>(t.result?.rule_results||t.rule_results||[]).map(r=>`${RULE_NAMES[r.rule]||r.rule}：${RULE_OUTCOMES[r.outcome]||r.outcome}`).join('／');
   const line=(number,kind,task,title)=>({number,kind,title:title||task.title,taskId:task.id,rules:rules(task),...wbsRowState(task,job)});
   const rows=tasks.filter(t=>t.role==='planner').map(t=>line('0','計画',t));
+  const received=['accepted','accepted_with_pending_checks'].includes(job.status);
+  const receipt=number=>({number:String(number),kind:'受け取り',title:'できあがりを受け取る',rules:'',owner:'あなた',
+    key:received?'done':job.status==='awaiting_acceptance'?'mine':'todo',label:received?'受領済み':job.status==='awaiting_acceptance'?'あなたの確認待ち':'まだ'});
+  if(!isWorkflowJob(job)){
+    // 機能に分けない依頼（資料作成、従来どおり）：計画のあとの作業を、作られた順に 1 行ずつ並べる。
+    const rest=tasks.filter(t=>t.role!=='planner');
+    rest.forEach((t,i)=>rows.push(line(String(i+1),t.role==='reviewer'?(t.agent_name==='common-security-reviewer'?'セキュリティのレビュー':'レビュー')
+      :t.role==='researcher'?'調査':job.document_source?'資料の作成':'作業',t)));
+    rows.push(receipt(rest.length+1));
+    return rows;
+  }
   (job.workflow?.work_packages||[]).forEach((wp,index)=>{
     const st=wpState(wp,job),number=String(index+1);
     // 技術の確認が済み、本人が「確認を始める」を押す番のとき（サーバーの available_actions）。
@@ -1180,9 +1193,7 @@ function wbsRows(job){
       rows.push(line(`${next}.${i+1}`,kind,t,t.role==='reviewer'?kind:null));});
     next+=1;
   }
-  const received=['accepted','accepted_with_pending_checks'].includes(job.status);
-  rows.push({number:String(next),kind:'受け取り',title:'できあがりを受け取る',rules:'',owner:'あなた',
-    key:received?'done':job.status==='awaiting_acceptance'?'mine':'todo',label:received?'受領済み':job.status==='awaiting_acceptance'?'あなたの確認待ち':'まだ'});
+  rows.push(receipt(next));
   return rows;
 }
 // 表に出す依頼を選ぶ。新しく登録された依頼があればそれ、なければ今の選択、初回は進行中の最も新しい依頼。
@@ -1198,7 +1209,9 @@ function renderWbsBoard(){
   const jobs=wbsJobs();section.hidden=!jobs.length;if(!jobs.length){wbsSignature='';return;}
   wbsJobId=wbsPick(jobs);
   const job=jobs.find(j=>j.id===wbsJobId),rows=wbsRows(job),counts=job.workflow?.progress?.counts||{};
-  const head=`${jobStatusLabel(job)}　${counts.packages||0}機能中 ${counts.feature_approved||0}件完了`;
+  const work=rows.filter(r=>r.taskId);
+  const head=isWorkflowJob(job)?`${jobStatusLabel(job)}　${counts.packages||0}機能中 ${counts.feature_approved||0}件完了`
+    :`${jobStatusLabel(job)}　作業 ${work.length}件中 ${work.filter(r=>r.key==='done').length}件完了`;
   // 数秒ごとの更新で作り直すと、選択欄や押そうとした行が動く。内容が変わったときだけ描き直す。
   const signature=JSON.stringify([jobs.map(j=>[j.id,j.title]),wbsJobId,head,rows]);
   if(signature===wbsSignature)return;wbsSignature=signature;
@@ -2855,7 +2868,9 @@ $('folder-use').addEventListener('click',()=>{
 $('job-template')?.addEventListener('click',()=>{const goal=$('job-goal');if(goal.value.trim()&&!confirm('入力済みの内容を記入例で置き換えます。よろしいですか？'))return;goal.value='【目的】\n\n【材料】\n\n【完了の条件】\n\n【決まっていない点は標準で】ファイル名・表現の細部はおまかせ。迷ったら元の依頼を優先し、採用した標準を報告に書く。';goal.focus();});
 // Requests for documents get the document tools only through the ledger consultation (kind: documentation).
 const DOCUMENT_REQUEST=/PowerPoint|PPTX|パワポ|スライド|プレゼン|説明資料|報告書|Word|DOCX|Excel|XLSX|PDF|動画|MP4|チラシ|ポスター/i;
-const syncJobKind=()=>{const docs=$('job-kind').value==='documentation';$('job-document').hidden=!docs;$('job-document-format').required=docs;$('job-validation').hidden=docs;$('job-workflow-box').hidden=$('job-workflow-hint').hidden=docs;};
+// 資料作成では進め方の選択欄を出さない。黙って消すと理由が分からないので、進み方を 1 行で伝える。
+const WORKFLOW_HINT=$('job-workflow-hint').textContent,DOCUMENT_FLOW_HINT='資料作成は、計画 → 資料の作成 → レビュー → 受け取りの順に進みます。「機能ごとに分けて進める」は、開発の依頼だけで使えます。進み具合は、作業ボードの上の「依頼の作業の一覧」で確かめられます。';
+const syncJobKind=()=>{const docs=$('job-kind').value==='documentation';$('job-document').hidden=!docs;$('job-document-format').required=docs;$('job-validation').hidden=docs;$('job-workflow-box').hidden=docs;$('job-workflow-hint').textContent=docs?DOCUMENT_FLOW_HINT:WORKFLOW_HINT;};
 $('job-kind').addEventListener('change',syncJobKind);
 const routingBox=document.createElement('details');routingBox.id='job-routing-eval';routingBox.hidden=true;
 routingBox.innerHTML='<summary>分離環境で経路を比較する</summary><p class="hint">架空の単一Pythonファイルだけが対象です。通常サービスでは使えません。</p><label>実行経路<select name="route" id="job-route"><option value="full">通常経路</option><option value="light_eval">軽い経路（計画AIのみ省略）</option></select></label><label>変更してよいPythonファイル<input name="light_scope_file" id="job-light-scope" placeholder="例：calculator.py"></label><label>独立した合格条件<textarea name="light_acceptance" id="job-light-acceptance" rows="3" placeholder="例：既存の単体テストをすべて通し、負数の合計も正しく返す"></textarea></label><p class="hint">軽い経路には自動実行、検証モードA、検証用データの確認が必要です。添付・資料作成は使えません。</p>';

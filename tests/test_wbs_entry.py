@@ -287,7 +287,9 @@ class WbsEntryTests(WbsFixture):
         self.assertIn('<option value="wbs">機能ごとに分けて進める（WBS）</option>', html)
         self.assertIn("f.get('workflow')==='wbs'?{workflow:'wbs'}", script)
         self.assertIn("docs?{kind:'documentation',document_format:f.get('document_format')}:f.get", script)
-        self.assertIn("$('job-workflow-box').hidden=$('job-workflow-hint').hidden=docs", script)
+        # A document request hides the choice and says how it proceeds instead of going silent.
+        self.assertIn("$('job-workflow-box').hidden=docs;$('job-workflow-hint').textContent=docs?DOCUMENT_FLOW_HINT:WORKFLOW_HINT", script)
+        self.assertIn('資料作成は、計画 → 資料の作成 → レビュー → 受け取りの順に進みます。', script)
 
     def test_plan_screen_shows_each_features_files(self):
         node = shutil.which('node')
@@ -916,6 +918,34 @@ assert.equal(by('3.1').key,'done'); assert.match(by('3.1').rules,/安全：合�
 assert.equal(by('4').label,'まだ');
 job.status='awaiting_acceptance'; assert.equal(context.wbsRows(job).at(-1).key,'mine');
 job.status='accepted'; assert.equal(context.wbsRows(job).at(-1).label,'受領済み');
+"""
+        ran = subprocess.run([node, '-e', check, str(ROOT / 'web' / 'app.js')], capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+
+    def test_requests_without_features_list_their_work_in_order(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node.js is required for JavaScript behavior checks')
+        check = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync(process.argv[1],'utf8');
+const piece=(from,to)=>source.slice(source.indexOf(from),source.indexOf(to));
+const task=(id,role,status,extra)=>({id,role,status,job_id:'d',title:'架空の'+id,attempt:1,created_at:Number(id.slice(1)),...extra});
+const tasks=[task('t1','planner','succeeded'),task('t2','builder','succeeded'),task('t3','reviewer','succeeded'),
+  task('t4','reviewer','failed',{agent_name:'common-security-reviewer'}),task('t5','builder','cancelled'),
+  task('t9','builder','running',{job_id:'other'})];
+const job={id:'d',title:'架空の資料',status:'failed',document_source:'C:/fictional'};
+const context={state:{tasks,jobs:[job,{id:'w',status:'running',workflow_contract_version:1},{id:'x',status:'cancelled'}],approvals:[]},statuses:{},
+  userDecision:()=>true,isWorkflowJob:j=>j?.workflow_contract_version===1,RULE_NAMES:{},RULE_OUTCOMES:{},wpState:()=>({})};
+vm.createContext(context);
+vm.runInContext(piece('function pending(id)','function maintenanceHeld(')+piece('function wbsJobs(','function wbsPick('),context);
+assert.deepEqual(Array.from(context.wbsJobs(),j=>j.id).sort(),['d','w']);   // every request except cancelled ones
+const rows=context.wbsRows(job);
+assert.deepEqual(Array.from(rows,r=>[r.number,r.kind]),[['0','計画'],['1','資料の作成'],['2','レビュー'],['3','セキュリティのレビュー'],['4','受け取り']]);
+assert.equal(rows[3].key,'stopped'); assert.equal(rows[3].owner,'あなた'); assert.match(rows[3].label,/行を押して対応/);
+assert.equal(rows[4].label,'まだ');
+delete job.document_source; assert.equal(context.wbsRows(job)[1].kind,'作業');
+job.status='awaiting_acceptance'; assert.equal(context.wbsRows(job).at(-1).key,'mine');
 """
         ran = subprocess.run([node, '-e', check, str(ROOT / 'web' / 'app.js')], capture_output=True, text=True, encoding='utf-8', timeout=60)
         self.assertEqual(ran.returncode, 0, ran.stderr)
